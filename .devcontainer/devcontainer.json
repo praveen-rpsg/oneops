@@ -1,0 +1,21 @@
+{
+  "name": "oneops",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "features": {
+    "ghcr.io/devcontainers/features/go:1": { "version": "1.23" },
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" },
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "postCreateCommand": "go version && go mod download",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "esbenp.prettier-vscode",
+        "hashicorp.terraform"
+      ]
+    }
+  },
+  "forwardPorts": [8080, 5432, 4222, 9200, 9000],
+  "remoteUser": "vscode"
+}

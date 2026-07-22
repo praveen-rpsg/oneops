@@ -1,0 +1,21 @@
+# build output
+/bin/
+coverage.out
+coverage.html
+
+# env & secrets
+.env
+*.local
+
+# node
+node_modules/
+web/**/dist/
+
+# terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# os
+.DS_Store

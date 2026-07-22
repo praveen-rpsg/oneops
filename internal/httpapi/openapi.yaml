@@ -1,0 +1,199 @@
+openapi: 3.0.3
+info:
+  title: OneOps Configuration Registry API
+  version: "1.0.0"
+  description: >
+    The system of record for OneOps artifacts (Configuration State Model §6).
+    Authority is a maintained projection computed from the dependency graph (M3).
+servers:
+  - url: /
+security:
+  - bearerAuth: []
+paths:
+  /v1/artifacts:
+    get:
+      summary: List configuration objects (keyset pagination)
+      operationId: listArtifacts
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: role, in: query, schema: { $ref: '#/components/schemas/Role' } }
+        - { name: lifecycle, in: query, schema: { $ref: '#/components/schemas/Lifecycle' } }
+        - { name: authority, in: query, schema: { $ref: '#/components/schemas/Authority' } }
+        - { name: q, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: A page of configuration objects
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListResponse' }
+        '400': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Create a configuration object
+      operationId: createArtifact
+      parameters:
+        - { name: Idempotency-Key, in: header, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRequest' }
+      responses:
+        '201':
+          description: Created
+          headers:
+            ETag: { schema: { type: string } }
+            Location: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConfigObject' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1/artifacts/bulk:
+    post:
+      summary: Bulk-create configuration objects (atomic)
+      operationId: bulkCreateArtifacts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items: { $ref: '#/components/schemas/CreateRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListResponse' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1/artifacts/{id}:
+    get:
+      summary: Get a configuration object
+      operationId: getArtifact
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: If-None-Match, in: header, schema: { type: string } }
+      responses:
+        '200':
+          description: The object
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConfigObject' }
+        '304': { description: Not modified }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Partially update a configuration object (optimistic locking)
+      operationId: patchArtifact
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: If-Match, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchRequest' }
+      responses:
+        '200':
+          description: Updated
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConfigObject' }
+        '412': { $ref: '#/components/responses/Problem' }
+        '428': { $ref: '#/components/responses/Problem' }
+    delete:
+      summary: Delete a configuration object
+      operationId: deleteArtifact
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    Problem:
+      description: RFC 7807 problem detail
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    Role:
+      type: string
+      enum: [constitution, governance, eng_spec, validation, evidence, audit, planning, reference, working]
+    Lifecycle:
+      type: string
+      enum: [draft, in_review, ratified, approved, in_progress, complete, suspended, deprecated, withdrawn]
+    Authority:
+      type: string
+      enum: [active, historical, non_normative]
+    RetentionClass:
+      type: string
+      enum: [current_baseline, current_planning, historical_record, superseded_planning, historical_evidence, audit_record, working_material]
+    CreateRequest:
+      type: object
+      required: [artifact, version, role, lifecycle, retention_class]
+      properties:
+        artifact: { type: string }
+        version: { type: string, example: "1.0.0" }
+        role: { $ref: '#/components/schemas/Role' }
+        lifecycle: { $ref: '#/components/schemas/Lifecycle' }
+        retention_class: { $ref: '#/components/schemas/RetentionClass' }
+        authority: { $ref: '#/components/schemas/Authority' }
+        ratified_by: { type: string }
+        review_cycle: { type: string }
+        retention_policy: { type: string }
+        metadata: { type: object, additionalProperties: { type: string } }
+    PatchRequest:
+      type: object
+      properties:
+        lifecycle: { $ref: '#/components/schemas/Lifecycle' }
+        retention_class: { $ref: '#/components/schemas/RetentionClass' }
+        authority: { $ref: '#/components/schemas/Authority' }
+        ratified_by: { type: string }
+        review_cycle: { type: string }
+        retention_policy: { type: string }
+        metadata: { type: object, additionalProperties: { type: string } }
+    ConfigObject:
+      type: object
+      properties:
+        cfg_id: { type: string }
+        artifact: { type: string }
+        version: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        lifecycle: { $ref: '#/components/schemas/Lifecycle' }
+        retention_class: { $ref: '#/components/schemas/RetentionClass' }
+        authority: { $ref: '#/components/schemas/Authority' }
+        ratified_by: { type: string }
+        review_cycle: { type: string }
+        retention_policy: { type: string }
+        metadata: { type: object, additionalProperties: { type: string } }
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ConfigObject' }
+        next_cursor: { type: string }
+    Problem:
+      type: object
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }

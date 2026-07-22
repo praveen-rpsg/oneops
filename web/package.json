@@ -1,0 +1,13 @@
+{
+  "name": "@oneops/web",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "lint": "echo \"web lint: Backstage app + plugins land in M7\" && exit 0",
+    "test": "echo \"web tests: land in M7\" && exit 0"
+  }
+}

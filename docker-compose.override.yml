@@ -1,0 +1,6 @@
+# Local override — remaps postgres to host port 5433 to avoid a conflict
+# with another project already bound to 5432. Not part of the committed stack.
+services:
+  postgres:
+    ports: !override
+      - "5433:5432"
