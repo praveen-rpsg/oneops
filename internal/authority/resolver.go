@@ -34,11 +34,20 @@ func (e *ValidationError) Error() string {
 // Resolver computes authority. It holds no state and performs no caching.
 type Resolver struct {
 	data domain.AuthorityGraph
+	// responsibilities is wired only when the data source can supply responsibility
+	// ownership (M3.3). When nil, the resolver behaves exactly as M3.2.
+	responsibilities *ResponsibilityEvaluator
 }
 
-// NewResolver builds a resolver over the given data port.
+// NewResolver builds a resolver over the given data port. If the data source also
+// supplies responsibility ownership, the owns-all-responsibilities clause (M3.3)
+// is evaluated; otherwise the resolver behaves exactly as M3.2.
 func NewResolver(data domain.AuthorityGraph) *Resolver {
-	return &Resolver{data: data}
+	r := &Resolver{data: data}
+	if rg, ok := data.(domain.ResponsibilityGraph); ok {
+		r.responsibilities = NewResponsibilityEvaluator(rg)
+	}
+	return r
 }
 
 // reachInfo records how a node entered the Active set.
@@ -196,9 +205,24 @@ func (r *Resolver) resolveOne(ctx context.Context, cfgID string, active map[stri
 				Evidence: domain.AuthorityEvidence{SupersededBy: superseders, ActiveDependents: activeDeps, Notes: "superseded but still required by an active configuration"},
 			}, nil
 		}
+		// M3.3 — owns(allResponsibilities): a superseded config whose replacement does
+		// not own every responsibility remains Active. Only evaluated when the data
+		// source supplies responsibility ownership.
+		if r.responsibilities != nil {
+			complete, missing, err := r.responsibilities.replacementComplete(ctx, cfgID, superseders)
+			if err != nil {
+				return domain.AuthorityResult{}, err
+			}
+			if !complete {
+				return domain.AuthorityResult{
+					CfgID: cfgID, State: domain.AuthorityStateActive, Reason: domain.ReasonReplacementIncomplete,
+					Evidence: domain.AuthorityEvidence{SupersededBy: superseders, MissingResponsibilities: missing, Notes: "replacement does not own all responsibilities"},
+				}, nil
+			}
+		}
 		return domain.AuthorityResult{
 			CfgID: cfgID, State: domain.AuthorityStateHistorical, Reason: domain.ReasonSuperseded,
-			Evidence: domain.AuthorityEvidence{SupersededBy: superseders, Notes: "superseded with no active dependency"},
+			Evidence: domain.AuthorityEvidence{SupersededBy: superseders, Notes: "superseded with complete replacement and no active dependency"},
 		}, nil
 	}
 

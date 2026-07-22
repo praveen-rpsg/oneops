@@ -48,6 +48,9 @@ const (
 	// ReasonSupersededActiveDependency (M3.2): superseded but still required by an Active
 	// configuration, so it remains Active (graph-computable Replacement-Test clause).
 	ReasonSupersededActiveDependency AuthorityReason = "superseded_active_dependency"
+	// ReasonReplacementIncomplete (M3.3): superseded, but the replacement does not own
+	// every responsibility, so it remains Active (owns-all-responsibilities clause).
+	ReasonReplacementIncomplete AuthorityReason = "replacement_incomplete"
 )
 
 // AuthorityEvidence explains WHY an authority decision was made. It is a domain
@@ -63,6 +66,9 @@ type AuthorityEvidence struct {
 	// ActiveDependents (M3.2) lists the Active configurations that still depend on
 	// this object — the reason a superseded object remains Active.
 	ActiveDependents []string
+	// MissingResponsibilities (M3.3) lists the responsibility ids the replacement
+	// does not own — the reason a superseded object remains Active.
+	MissingResponsibilities []string
 	// Notes is a short human-readable rationale.
 	Notes string
 }
