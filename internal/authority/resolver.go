@@ -40,13 +40,16 @@ type Resolver struct {
 	// citations is wired only when the data source can supply artifact citations
 	// (M3.4). When nil, the resolver behaves exactly as M3.3.
 	citations *ArtifactCitationEvaluator
+	// gaps is wired only when the data source can supply operational coverage
+	// (M3.5). When nil, the resolver behaves exactly as M3.4.
+	gaps *GapEvaluator
 }
 
-// NewResolver builds a resolver over the given data port. If the data source also
-// supplies responsibility ownership, the owns-all-responsibilities clause (M3.3)
-// is evaluated; if it also supplies artifact citations, the noActiveArtifactCites
-// clause (M3.4) is evaluated. Absent either source, the resolver degrades exactly
-// to the earlier milestone's behaviour.
+// NewResolver builds a resolver over the given data port. Each replacement-test
+// clause is enabled when the data source supplies its metadata: responsibility
+// ownership (M3.3), artifact citations (M3.4), and operational coverage (M3.5).
+// Absent a source, the resolver degrades exactly to the earlier milestone's
+// behaviour.
 func NewResolver(data domain.AuthorityGraph) *Resolver {
 	r := &Resolver{data: data}
 	if rg, ok := data.(domain.ResponsibilityGraph); ok {
@@ -54,6 +57,9 @@ func NewResolver(data domain.AuthorityGraph) *Resolver {
 	}
 	if cg, ok := data.(domain.CitationGraph); ok {
 		r.citations = NewArtifactCitationEvaluator(r, cg)
+	}
+	if cvg, ok := data.(domain.CoverageGraph); ok {
+		r.gaps = NewGapEvaluator(r, cvg)
 	}
 	return r
 }
@@ -244,9 +250,26 @@ func (r *Resolver) resolveOne(ctx context.Context, cfgID string, active map[stri
 				}, nil
 			}
 		}
+		// M3.5 — noGapIfRemoved: a superseded config whose removal would leave declared
+		// operational coverage unowned by any Active configuration remains Active.
+		// Coverage is metadata-only and independent of the graph; evaluated only when
+		// the data source supplies it, and only after the M3.2, M3.3, and M3.4 clauses
+		// have all passed (precedence unchanged). This is the final technical predicate.
+		if r.gaps != nil {
+			uncovered, err := r.gaps.gapAfterRemoval(ctx, cfgID, active)
+			if err != nil {
+				return domain.AuthorityResult{}, err
+			}
+			if len(uncovered) > 0 {
+				return domain.AuthorityResult{
+					CfgID: cfgID, State: domain.AuthorityStateActive, Reason: domain.ReasonOperationalGap,
+					Evidence: domain.AuthorityEvidence{SupersededBy: superseders, UncoveredCapabilities: uncovered, Notes: "removal would leave operational coverage unowned by any active configuration"},
+				}, nil
+			}
+		}
 		return domain.AuthorityResult{
 			CfgID: cfgID, State: domain.AuthorityStateHistorical, Reason: domain.ReasonSuperseded,
-			Evidence: domain.AuthorityEvidence{SupersededBy: superseders, Notes: "superseded with complete replacement, no active dependency, and no active citation"},
+			Evidence: domain.AuthorityEvidence{SupersededBy: superseders, Notes: "superseded with complete replacement, no active dependency, no active citation, and no operational gap"},
 		}, nil
 	}
 

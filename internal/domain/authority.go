@@ -54,6 +54,10 @@ const (
 	// ReasonActiveArtifactCitation (M3.4): superseded, but an Active artifact still
 	// cites it, so it remains Active (noActiveArtifactCites clause).
 	ReasonActiveArtifactCitation AuthorityReason = "active_artifact_citation"
+	// ReasonOperationalGap (M3.5): superseded, but removing it would leave declared
+	// operational coverage unowned by any Active configuration, so it remains Active
+	// (noGapIfRemoved clause).
+	ReasonOperationalGap AuthorityReason = "operational_gap"
 )
 
 // AuthorityEvidence explains WHY an authority decision was made. It is a domain
@@ -75,6 +79,10 @@ type AuthorityEvidence struct {
 	// ActiveArtifactCitations (M3.4) lists the Active artifacts that still cite this
 	// object — the reason a superseded object remains Active.
 	ActiveArtifactCitations []string
+	// UncoveredCapabilities (M3.5) lists the operational-coverage ids that no other
+	// Active configuration provides — the reason removing this superseded object
+	// would create a gap, so it remains Active.
+	UncoveredCapabilities []string
 	// Notes is a short human-readable rationale.
 	Notes string
 }
