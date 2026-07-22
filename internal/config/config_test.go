@@ -26,6 +26,9 @@ func TestLoadOverride(t *testing.T) {
 	t.Setenv("ONEOPS_HTTP_ADDR", ":9090")
 	t.Setenv("ONEOPS_ENV", "prod")
 	t.Setenv("ONEOPS_SHUTDOWN_GRACE_SECONDS", "30")
+	// A production environment must supply secure values (production guard).
+	t.Setenv("ONEOPS_JWT_HMAC_KEY", "a-real-strong-secret")
+	t.Setenv("ONEOPS_DB_URL", "postgres://u:p@db.internal:5432/oneops?sslmode=require")
 
 	c, err := Load()
 	if err != nil {

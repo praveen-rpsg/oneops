@@ -7,4 +7,6 @@ var (
 	Version = "0.1.0-dev"
 	// Commit is the short git SHA of the build.
 	Commit = "unknown"
+	// Date is the build timestamp, injected via -ldflags at build time.
+	Date = "unknown"
 )

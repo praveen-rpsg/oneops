@@ -195,19 +195,1167 @@ paths:
         '401': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+
+  # Governance — constitutional operations (Configuration State Model §8). Each
+  # POST applies exactly one operation atomically with its audit event
+  # (ADR-AUDIT-005). Idempotency-Key is required; If-Match enables optimistic
+  # concurrency. All rules are enforced by the Governance Engine.
+  /v1/governance/{id}/ratify:
+    post:
+      summary: Ratify a configuration object
+      operationId: ratifyGovernance
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/IfMatch' }
+      responses:
+        '200': { $ref: '#/components/responses/GovernanceResult' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1/governance/{id}/approve:
+    post:
+      summary: Approve a configuration object
+      operationId: approveGovernance
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/IfMatch' }
+      responses:
+        '200': { $ref: '#/components/responses/GovernanceResult' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1/governance/{id}/suspend:
+    post:
+      summary: Suspend a configuration object
+      operationId: suspendGovernance
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/IfMatch' }
+      responses:
+        '200': { $ref: '#/components/responses/GovernanceResult' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1/governance/{id}/deprecate:
+    post:
+      summary: Deprecate a configuration object
+      operationId: deprecateGovernance
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/IfMatch' }
+      responses:
+        '200': { $ref: '#/components/responses/GovernanceResult' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1/governance/{id}/withdraw:
+    post:
+      summary: Withdraw a configuration object
+      operationId: withdrawGovernance
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/IfMatch' }
+      responses:
+        '200': { $ref: '#/components/responses/GovernanceResult' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1/governance/{id}/archive:
+    post:
+      summary: Archive a configuration object into an archival retention class
+      operationId: archiveGovernance
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/IfMatch' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GovernanceArchiveRequest' }
+      responses:
+        '200': { $ref: '#/components/responses/GovernanceResult' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1/governance/{id}:
+    get:
+      summary: Current governance state of a configuration object
+      operationId: getGovernanceState
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+      responses:
+        '200':
+          description: Current governance state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceStateResponse' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      summary: Delete a working-material configuration object
+      description: >
+        Deletion is permitted only for working_material with no dependents; the
+        engine enforces both. The audit chain for the object is preserved.
+      operationId: deleteGovernance
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/IfMatch' }
+      responses:
+        '200': { $ref: '#/components/responses/GovernanceResult' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  # Governance — read-only query APIs (state / history / audit / verification).
+  /v1/governance/{id}/history:
+    get:
+      summary: Chronological governance operation history
+      operationId: getGovernanceHistory
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/OperationFilter' }
+      responses:
+        '200':
+          description: Governance history page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceHistoryResponse' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/governance/{id}/audit:
+    get:
+      summary: Audit chain summary and verification status
+      operationId: getAuditChain
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+      responses:
+        '200':
+          description: Audit chain summary
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditChainResponse' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/governance/{id}/audit/events:
+    get:
+      summary: Audit event metadata (paged, ordered, filterable)
+      operationId: getAuditEvents
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Order' }
+        - { $ref: '#/components/parameters/OperationFilter' }
+      responses:
+        '200':
+          description: Audit events page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditEventsResponse' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/governance/{id}/verification:
+    get:
+      summary: Per-object integrity and latest scheduler result
+      operationId: getVerification
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+      responses:
+        '200':
+          description: Verification status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VerificationResponse' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  # Administration & Operations — read-only except the explicit integrity run.
+  # All require admin permission. No constitutional behavior is exposed here.
+  /v1/admin/status:
+    get:
+      summary: Platform status (reuses diagnostics)
+      operationId: adminStatus
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Platform status
+          content: { application/json: { schema: { $ref: '#/components/schemas/AdminStatusResponse' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /v1/admin/integrity:
+    get:
+      summary: Integrity/scheduler summary
+      operationId: adminIntegrity
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Integrity summary
+          content: { application/json: { schema: { $ref: '#/components/schemas/AdminIntegrityResponse' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /v1/admin/integrity/run:
+    post:
+      summary: Trigger one verification sweep (reuses the existing scheduler)
+      operationId: adminIntegrityRun
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Sweep result
+          content: { application/json: { schema: { $ref: '#/components/schemas/AdminIntegrityRun' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /v1/admin/metrics:
+    get:
+      summary: Summarized operational counters (derived from /metrics)
+      operationId: adminMetrics
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Metrics summary
+          content: { application/json: { schema: { $ref: '#/components/schemas/AdminMetricsResponse' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /v1/admin/config:
+    get:
+      summary: Redacted runtime configuration and enabled modules
+      operationId: adminConfig
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Configuration summary (no secrets)
+          content: { application/json: { schema: { $ref: '#/components/schemas/AdminConfigResponse' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /v1/admin/report:
+    get:
+      summary: Combined operational report (diagnostics + metrics)
+      operationId: adminReport
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Operational report
+          content: { application/json: { schema: { $ref: '#/components/schemas/AdminReportResponse' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+
+  # Event delivery — webhook administration (admin permission). Governance events
+  # are relayed to registered webhooks after the committed operation, signed with
+  # HMAC-SHA256. Secrets are returned only on create and secret rotation.
+  /v1/admin/webhooks:
+    get:
+      summary: List webhooks (secrets redacted)
+      operationId: listWebhooks
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Webhooks
+          content: { application/json: { schema: { $ref: '#/components/schemas/WebhookList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Create a webhook (response includes the generated secret)
+      operationId: createWebhook
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateWebhookRequest' } } }
+      responses:
+        '201':
+          description: Created webhook (secret revealed once)
+          content: { application/json: { schema: { $ref: '#/components/schemas/Webhook' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /v1/admin/webhooks/{id}:
+    patch:
+      summary: Update a webhook (enable/disable, filters, secret rotation)
+      operationId: patchWebhook
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/PatchWebhookRequest' } } }
+      responses:
+        '200':
+          description: Updated webhook (secret revealed only if rotated)
+          content: { application/json: { schema: { $ref: '#/components/schemas/Webhook' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      summary: Delete a webhook
+      operationId: deleteWebhook
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/admin/webhooks/{id}/test:
+    post:
+      summary: Deliver one synthetic event to a webhook and report the result
+      operationId: testWebhook
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Test delivery result
+          content: { application/json: { schema: { $ref: '#/components/schemas/WebhookTestResult' } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/admin/webhooks/{id}/deliveries:
+    get:
+      summary: List a webhook's recent deliveries
+      operationId: listWebhookDeliveries
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Deliveries
+          content: { application/json: { schema: { $ref: '#/components/schemas/WebhookDeliveryList' } } }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  # Event consumption & replay (admin). Replay operates only on committed
+  # audit-derived events; it never regenerates events.
+  /v1/admin/webhooks/{id}/replay:
+    post:
+      summary: Replay committed events to a webhook (async job)
+      operationId: replayWebhook
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/ReplayRequest' } } }
+      responses:
+        '202':
+          description: Replay job accepted
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReplayJob' } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/admin/webhooks/{id}/deliveries/{deliveryID}:
+    get:
+      summary: Inspect a delivery (payload, headers, attempts, status)
+      operationId: getDelivery
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: deliveryID, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Delivery detail
+          content: { application/json: { schema: { $ref: '#/components/schemas/DeliveryDetail' } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/admin/webhooks/{id}/deliveries/{deliveryID}/retry:
+    post:
+      summary: Re-queue a single delivery (reuses the dispatcher)
+      operationId: retryDelivery
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: deliveryID, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Requeued
+          content: { application/json: { schema: { $ref: '#/components/schemas/RequeueResult' } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/admin/webhooks/deadletters:
+    get:
+      summary: List dead-letter deliveries
+      operationId: listDeadLetters
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: webhook_id, in: query, required: false, schema: { type: string } }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Dead-letter deliveries
+          content: { application/json: { schema: { $ref: '#/components/schemas/WebhookDeliveryList' } } }
+  /v1/admin/webhooks/deadletters/retry:
+    post:
+      summary: Re-queue dead-letter deliveries (reuses the dispatcher)
+      operationId: retryDeadLetters
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { webhook_id: { type: string } } } } }
+      responses:
+        '200':
+          description: Requeued
+          content: { application/json: { schema: { $ref: '#/components/schemas/RequeueResult' } } }
+  /v1/admin/webhooks/replay/jobs:
+    get:
+      summary: List replay jobs
+      operationId: listReplayJobs
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Replay jobs
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReplayJobList' } } }
+  /v1/admin/webhooks/replay/jobs/{jobID}:
+    get:
+      summary: Get a replay job
+      operationId: getReplayJob
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: jobID, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Replay job
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReplayJob' } } }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  # Policy automation (admin). Policies react to committed governance events; they
+  # never participate in governance execution.
+  /v1/admin/policies:
+    get:
+      summary: List policies
+      operationId: listPolicies
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Policies
+          content: { application/json: { schema: { $ref: '#/components/schemas/PolicyList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Create a policy
+      operationId: createPolicy
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreatePolicyRequest' } } }
+      responses:
+        '201':
+          description: Created policy
+          content: { application/json: { schema: { $ref: '#/components/schemas/Policy' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /v1/admin/policies/{id}:
+    patch:
+      summary: Update a policy (enable/disable, condition, action)
+      operationId: patchPolicy
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/PatchPolicyRequest' } } }
+      responses:
+        '200':
+          description: Updated policy
+          content: { application/json: { schema: { $ref: '#/components/schemas/Policy' } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      summary: Delete a policy
+      operationId: deletePolicy
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/admin/policies/{id}/executions:
+    get:
+      summary: List a policy's executions
+      operationId: listPolicyExecutions
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Executions
+          content: { application/json: { schema: { $ref: '#/components/schemas/PolicyExecutionList' } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/admin/policies/{id}/test:
+    post:
+      summary: Run one synthetic execution of a policy's action
+      operationId: testPolicy
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Test result
+          content: { application/json: { schema: { $ref: '#/components/schemas/PolicyTestResult' } } }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  # Execution timeline (admin) — a read-only operational read model composed from
+  # existing persisted data. It participates in no execution.
+  /v1/admin/timeline/{eventID}:
+    get:
+      summary: Execution timeline correlated by audit event id
+      operationId: getEventTimeline
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: eventID, in: path, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/TimelineFrom' }
+        - { $ref: '#/components/parameters/TimelineTo' }
+        - { $ref: '#/components/parameters/TimelineComponent' }
+        - { $ref: '#/components/parameters/TimelineStatus' }
+        - { $ref: '#/components/parameters/TimelineOffset' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Timeline
+          content: { application/json: { schema: { $ref: '#/components/schemas/TimelinePage' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /v1/admin/governance/{id}/timeline:
+    get:
+      summary: Execution timeline for a configuration object (governance id)
+      operationId: getGovernanceTimeline
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/TimelineComponent' }
+        - { $ref: '#/components/parameters/TimelineStatus' }
+        - { $ref: '#/components/parameters/TimelineOffset' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Timeline
+          content: { application/json: { schema: { $ref: '#/components/schemas/TimelinePage' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /v1/admin/replay/{jobID}/timeline:
+    get:
+      summary: Execution timeline for a replay job
+      operationId: getReplayTimeline
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: jobID, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Timeline
+          content: { application/json: { schema: { $ref: '#/components/schemas/TimelinePage' } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/admin/policies/{id}/timeline:
+    get:
+      summary: Execution timeline for a policy execution
+      operationId: getPolicyTimeline
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Timeline
+          content: { application/json: { schema: { $ref: '#/components/schemas/TimelinePage' } } }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  # Compliance & evidence (admin) — read-only. Deterministic evidence composed
+  # from existing persisted data; participates in no execution.
+  /v1/admin/compliance/reports:
+    get:
+      summary: List compliance summaries across governance objects
+      operationId: getComplianceReports
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Compliance report page
+          content: { application/json: { schema: { $ref: '#/components/schemas/ComplianceReportPage' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /v1/admin/compliance/{governanceID}:
+    get:
+      summary: Compliance status summary for a governance object
+      operationId: getComplianceSummary
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: governanceID, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Compliance summary
+          content: { application/json: { schema: { $ref: '#/components/schemas/ComplianceSummary' } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/admin/compliance/{governanceID}/evidence:
+    get:
+      summary: Immutable evidence bundle (JSON, or ZIP with format=zip)
+      operationId: getComplianceEvidence
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: governanceID, in: path, required: true, schema: { type: string } }
+        - { name: format, in: query, required: false, schema: { type: string, enum: [json, zip] } }
+      responses:
+        '200':
+          description: Evidence bundle
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Evidence' } }
+            application/zip: { schema: { type: string, format: binary } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/admin/compliance/{governanceID}/checks:
+    get:
+      summary: Compliance check results for a governance object
+      operationId: getComplianceChecks
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: governanceID, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Compliance checks
+          content: { application/json: { schema: { $ref: '#/components/schemas/ComplianceCheckList' } } }
+        '404': { $ref: '#/components/responses/Problem' }
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+  parameters:
+    GovId:
+      name: id
+      in: path
+      required: true
+      description: Configuration object id (cfg_id).
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Idempotency key; used as the OperationID and drives the deterministic audit event id.
+      schema: { type: string }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: Expected row_version (ETag) for optimistic concurrency; omit to skip the check.
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum items to return (bounded by the server maximum).
+      schema: { type: integer, minimum: 1 }
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque pagination cursor (last seq of the previous page).
+      schema: { type: string }
+    Order:
+      name: order
+      in: query
+      required: false
+      description: Sort order by sequence.
+      schema: { type: string, enum: [asc, desc], default: asc }
+    OperationFilter:
+      name: operation
+      in: query
+      required: false
+      description: Filter to a single §8 operation.
+      schema: { type: string }
+    TimelineFrom:
+      name: from
+      in: query
+      required: false
+      description: Include entries at or after this RFC3339 time.
+      schema: { type: string, format: date-time }
+    TimelineTo:
+      name: to
+      in: query
+      required: false
+      description: Include entries at or before this RFC3339 time.
+      schema: { type: string, format: date-time }
+    TimelineComponent:
+      name: component
+      in: query
+      required: false
+      schema: { type: string, enum: [governance, audit, webhook, replay, policy] }
+    TimelineStatus:
+      name: status
+      in: query
+      required: false
+      schema: { type: string }
+    TimelineOffset:
+      name: offset
+      in: query
+      required: false
+      schema: { type: integer, minimum: 0 }
   responses:
     Problem:
       description: RFC 7807 problem detail
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
+    GovernanceResult:
+      description: The operation was applied atomically with its audit event.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/GovernanceResponse' }
   schemas:
+    GovernanceArchiveRequest:
+      type: object
+      required: [target_retention]
+      properties:
+        target_retention:
+          type: string
+          description: Archival retention class to set.
+          enum: [historical_record, historical_evidence, audit_record, superseded_plan]
+    GovernanceState:
+      type: object
+      properties:
+        lifecycle: { type: string }
+        retention_class: { type: string }
+        authority: { type: string }
+    GovernanceAudit:
+      type: object
+      description: Read-only audit metadata; exposes no internal hashes or event ids.
+      properties:
+        operation_id: { type: string }
+        chain_id: { type: string }
+        recorded: { type: boolean }
+    GovernanceResponse:
+      type: object
+      properties:
+        operation: { type: string }
+        cfg_id: { type: string }
+        actor: { type: string }
+        occurred_at: { type: string, format: date-time }
+        removed: { type: boolean }
+        row_version: { type: integer, format: int64 }
+        state: { $ref: '#/components/schemas/GovernanceState' }
+        audit: { $ref: '#/components/schemas/GovernanceAudit' }
+    GovernanceStateResponse:
+      type: object
+      properties:
+        cfg_id: { type: string }
+        lifecycle: { type: string }
+        retention_class: { type: string }
+        retention_policy: { type: string }
+        authority: { type: string }
+        row_version: { type: integer, format: int64 }
+        ratified_by: { type: string }
+        review_cycle: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    GovernanceHistoryItem:
+      type: object
+      properties:
+        seq: { type: integer, format: int64 }
+        operation: { type: string }
+        actor: { type: string }
+        occurred_at: { type: string, format: date-time }
+        operation_id: { type: string }
+        removed: { type: boolean }
+        resulting_state: { $ref: '#/components/schemas/GovernanceState' }
+    GovernanceHistoryResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/GovernanceHistoryItem' }
+        next_cursor: { type: string }
+    AuditChainResponse:
+      type: object
+      description: Chain summary and verification status; no hashing internals exposed.
+      properties:
+        chain_id: { type: string }
+        verified: { type: boolean }
+        checked: { type: integer, format: int64 }
+        head_seq: { type: integer, format: int64 }
+        head_hash: { type: string, description: Hex-encoded chain head hash. }
+        first_break_seq: { type: integer, format: int64 }
+        break_reason: { type: string }
+    AuditEventItem:
+      type: object
+      properties:
+        seq: { type: integer, format: int64 }
+        event_id: { type: string }
+        operation_id: { type: string }
+        operation: { type: string }
+        actor: { type: string }
+        occurred_at: { type: string, format: date-time }
+        prev_hash: { type: string }
+        this_hash: { type: string }
+    AuditEventsResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AuditEventItem' }
+        order: { type: string, enum: [asc, desc] }
+        next_cursor: { type: string }
+    VerificationResponse:
+      type: object
+      properties:
+        chain_id: { type: string }
+        integrity_ok: { type: boolean }
+        checked: { type: integer, format: int64 }
+        first_break_seq: { type: integer, format: int64 }
+        break_reason: { type: string }
+        scheduler:
+          type: object
+          properties:
+            enabled: { type: boolean }
+            has_run: { type: boolean }
+            running: { type: boolean }
+            last_run_at: { type: string, format: date-time }
+            last_healthy: { type: boolean }
+            stalled: { type: boolean }
+            failures: { type: integer }
+            errors: { type: integer }
+    AdminSchedulerStatus:
+      type: object
+      properties:
+        running: { type: boolean }
+        has_run: { type: boolean }
+        interval_seconds: { type: number }
+        last_run_at: { type: string, format: date-time }
+        stalled: { type: boolean }
+        last_healthy: { type: boolean }
+        chains_total: { type: integer }
+        chains_ok: { type: integer }
+        failures: { type: integer }
+        errors: { type: integer }
+    AdminDependency:
+      type: object
+      properties:
+        name: { type: string }
+        up: { type: boolean }
+        error: { type: string }
+    AdminStatusResponse:
+      type: object
+      properties:
+        service: { type: string }
+        version: { type: string }
+        commit: { type: string }
+        build_time: { type: string }
+        env: { type: string }
+        uptime_seconds: { type: number }
+        migration_version: { type: string }
+        scheduler: { $ref: '#/components/schemas/AdminSchedulerStatus' }
+        verifier_healthy: { type: boolean }
+        dependencies:
+          type: array
+          items: { $ref: '#/components/schemas/AdminDependency' }
+        healthy: { type: boolean }
+    AdminIntegrityResponse:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        running: { type: boolean }
+        has_run: { type: boolean }
+        last_run_at: { type: string, format: date-time }
+        last_healthy: { type: boolean }
+        stalled: { type: boolean }
+        chains_total: { type: integer }
+        chains_ok: { type: integer }
+        failures: { type: integer }
+        errors: { type: integer }
+    AdminIntegrityRun:
+      type: object
+      properties:
+        started_at: { type: string, format: date-time }
+        duration_ms: { type: integer, format: int64 }
+        chains_total: { type: integer }
+        chains_ok: { type: integer }
+        failures: { type: integer }
+        errors: { type: integer }
+        healthy: { type: boolean }
+    AdminMetricsResponse:
+      type: object
+      properties:
+        counters:
+          type: object
+          additionalProperties: { type: number }
+    AdminConfigResponse:
+      type: object
+      properties:
+        modules:
+          type: object
+          additionalProperties: { type: boolean }
+        config:
+          type: object
+          description: Redacted runtime configuration (no secrets).
+    AdminReportResponse:
+      type: object
+      properties:
+        diagnostics: { type: object, description: Operational diagnostics snapshot. }
+        metrics:
+          type: object
+          additionalProperties: { type: number }
+    Webhook:
+      type: object
+      properties:
+        id: { type: string }
+        url: { type: string }
+        enabled: { type: boolean }
+        operations: { type: array, items: { type: string } }
+        resources: { type: array, items: { type: string } }
+        max_retries: { type: integer }
+        secret: { type: string, description: Returned only on create and secret rotation. }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    WebhookList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Webhook' } }
+    CreateWebhookRequest:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string }
+        enabled: { type: boolean }
+        operations: { type: array, items: { type: string }, description: Empty means all operations. }
+        resources: { type: array, items: { type: string }, description: Empty means all resources. }
+        max_retries: { type: integer }
+    PatchWebhookRequest:
+      type: object
+      properties:
+        url: { type: string }
+        enabled: { type: boolean }
+        operations: { type: array, items: { type: string } }
+        resources: { type: array, items: { type: string } }
+        max_retries: { type: integer }
+        rotate_secret: { type: boolean }
+    WebhookTestResult:
+      type: object
+      properties:
+        status: { type: string, enum: [pending, delivered, failed, dead_letter] }
+        error: { type: string }
+    WebhookDelivery:
+      type: object
+      properties:
+        id: { type: string }
+        webhook_id: { type: string }
+        operation: { type: string }
+        cfg_id: { type: string }
+        seq: { type: integer, format: int64 }
+        status: { type: string, enum: [pending, delivered, failed, dead_letter] }
+        retry_count: { type: integer }
+        last_status_code: { type: integer }
+        last_attempt: { type: string, format: date-time }
+        next_attempt_at: { type: string, format: date-time }
+    WebhookDeliveryList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/WebhookDelivery' } }
+    ReplayRequest:
+      type: object
+      description: Time window OR delivery ids; both empty replays the full committed history.
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        delivery_ids: { type: array, items: { type: string } }
+    ReplayJob:
+      type: object
+      properties:
+        id: { type: string }
+        webhook_id: { type: string }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        delivery_ids: { type: array, items: { type: string } }
+        status: { type: string, enum: [pending, running, completed, failed] }
+        events_replayed: { type: integer }
+        error: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ReplayJobList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ReplayJob' } }
+    DeliveryDetail:
+      type: object
+      properties:
+        id: { type: string }
+        webhook_id: { type: string }
+        operation: { type: string }
+        cfg_id: { type: string }
+        seq: { type: integer, format: int64 }
+        status: { type: string }
+        attempts: { type: integer }
+        last_status_code: { type: integer }
+        last_attempt: { type: string, format: date-time }
+        next_attempt_at: { type: string, format: date-time }
+        headers: { type: object, additionalProperties: { type: string } }
+        payload: { type: object, description: Canonical delivery payload (rebuilt from committed data). }
+    RequeueResult:
+      type: object
+      properties:
+        requeued: { type: integer }
+    PolicyCondition:
+      type: object
+      properties:
+        operations: { type: array, items: { type: string } }
+        resources: { type: array, items: { type: string } }
+        actors: { type: array, items: { type: string } }
+        metadata: { type: object, additionalProperties: { type: string } }
+    PolicyAction:
+      type: object
+      properties:
+        type: { type: string, enum: [http, email, command, notification] }
+        config: { type: object }
+    Policy:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        enabled: { type: boolean }
+        condition: { $ref: '#/components/schemas/PolicyCondition' }
+        action: { $ref: '#/components/schemas/PolicyAction' }
+        max_retries: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PolicyList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Policy' } }
+    CreatePolicyRequest:
+      type: object
+      required: [name, action]
+      properties:
+        name: { type: string }
+        enabled: { type: boolean }
+        condition: { $ref: '#/components/schemas/PolicyCondition' }
+        action: { $ref: '#/components/schemas/PolicyAction' }
+        max_retries: { type: integer }
+    PatchPolicyRequest:
+      type: object
+      properties:
+        name: { type: string }
+        enabled: { type: boolean }
+        condition: { $ref: '#/components/schemas/PolicyCondition' }
+        action: { $ref: '#/components/schemas/PolicyAction' }
+        max_retries: { type: integer }
+    PolicyExecution:
+      type: object
+      properties:
+        id: { type: string }
+        policy_id: { type: string }
+        event_id: { type: string }
+        operation: { type: string }
+        cfg_id: { type: string }
+        status: { type: string, enum: [pending, running, succeeded, failed, dead_letter] }
+        retry_count: { type: integer }
+        error: { type: string }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    PolicyExecutionList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/PolicyExecution' } }
+    PolicyTestResult:
+      type: object
+      properties:
+        status: { type: string }
+        error: { type: string }
+    TimelineEntry:
+      type: object
+      properties:
+        timestamp: { type: string, format: date-time }
+        component: { type: string, enum: [governance, audit, webhook, replay, policy] }
+        action: { type: string }
+        status: { type: string }
+        duration_ms: { type: integer, format: int64 }
+        correlation: { type: object, additionalProperties: { type: string } }
+        metadata: { type: object, additionalProperties: { type: string } }
+    TimelinePage:
+      type: object
+      properties:
+        entries: { type: array, items: { $ref: '#/components/schemas/TimelineEntry' } }
+        next_offset: { type: string }
+    ComplianceCheck:
+      type: object
+      properties:
+        id: { type: string }
+        description: { type: string }
+        passed: { type: boolean }
+        detail: { type: string }
+    ComplianceCheckList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ComplianceCheck' } }
+    ComplianceSummary:
+      type: object
+      properties:
+        governance_id: { type: string }
+        lifecycle: { type: string }
+        verified: { type: boolean }
+        compliant: { type: boolean }
+        checks_passed: { type: integer }
+        checks_total: { type: integer }
+        generated_at: { type: string, format: date-time }
+    ComplianceReportPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ComplianceSummary' } }
+        next_cursor: { type: string }
+    Evidence:
+      type: object
+      description: Immutable evidence bundle composed from existing persisted data.
+      properties:
+        governance_id: { type: string }
+        generated_at: { type: string, format: date-time }
+        governance: { type: object }
+        integrity: { type: object }
+        timeline: { type: array, items: { $ref: '#/components/schemas/TimelineEntry' } }
+        webhooks: { type: array, items: { $ref: '#/components/schemas/TimelineEntry' } }
+        replays: { type: array, items: { $ref: '#/components/schemas/TimelineEntry' } }
+        policies: { type: array, items: { $ref: '#/components/schemas/TimelineEntry' } }
+        correlation_ids: { type: array, items: { type: string } }
+        checks: { type: array, items: { $ref: '#/components/schemas/ComplianceCheck' } }
+        compliant: { type: boolean }
     Role:
       type: string
       enum: [constitution, governance, eng_spec, validation, evidence, audit, planning, reference, working]

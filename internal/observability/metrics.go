@@ -50,6 +50,11 @@ func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{})
 }
 
+// Registry returns the shared Prometheus registry so operational subsystems
+// (e.g. the audit-integrity scheduler) can register their own collectors into
+// the single exposition served by Handler.
+func (m *Metrics) Registry() prometheus.Registerer { return m.reg }
+
 // Middleware records request counts and latencies keyed by chi route pattern.
 func (m *Metrics) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

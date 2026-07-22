@@ -14,7 +14,7 @@ import (
 // program extends its predecessor, and a frozen baseline supersedes a retired
 // roadmap. It exercises all three edge kinds without any traversal.
 type graphFixture struct {
-	cfgID map[string]string      // logical name -> cfg_id
+	cfgID map[string]string // logical name -> cfg_id
 	edges []*domain.DependencyEdge
 }
 
@@ -36,8 +36,8 @@ var fixtureEdges = []struct {
 	from, to string
 	kind     domain.EdgeKind
 }{
-	{"blueprint", "volumeIV", domain.EdgeKindDepends}, // Blueprint depends on Volume IV
-	{"evoap", "cvp", domain.EdgeKindExtends},          // EVOAP extends the CVP
+	{"blueprint", "volumeIV", domain.EdgeKindDepends},  // Blueprint depends on Volume IV
+	{"evoap", "cvp", domain.EdgeKindExtends},           // EVOAP extends the CVP
 	{"baseline", "roadmap", domain.EdgeKindSupersedes}, // Baseline supersedes the roadmap
 }
 
