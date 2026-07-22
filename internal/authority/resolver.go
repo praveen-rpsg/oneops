@@ -172,7 +172,7 @@ func (r *Resolver) resolveOne(ctx context.Context, cfgID string, active map[stri
 	}
 	info, isActive := active[cfgID]
 
-	// Rule 1 — replacement dominates.
+	// Rule 1 — replacement, gated by the graph-computable Replacement-Test clause.
 	if len(superseders) > 0 {
 		// A current-baseline member that is also superseded is contradictory
 		// (§9.3 invariant 1: current_baseline ⇒ Active) → indeterminate.
@@ -183,9 +183,22 @@ func (r *Resolver) resolveOne(ctx context.Context, cfgID string, active map[stri
 				Evidence: domain.AuthorityEvidence{BaselineMember: true, SupersededBy: superseders, Notes: "baseline member is also superseded"},
 			}, nil
 		}
+		// M3.2 — noActiveDependencyOn: a superseded config still required by an
+		// Active configuration remains Active (Replacement Test, §9.1). Only when
+		// no Active configuration depends on it may it resolve Historical.
+		activeDeps, err := activeDependentsOf(ctx, r.data, cfgID, active)
+		if err != nil {
+			return domain.AuthorityResult{}, err
+		}
+		if len(activeDeps) > 0 {
+			return domain.AuthorityResult{
+				CfgID: cfgID, State: domain.AuthorityStateActive, Reason: domain.ReasonSupersededActiveDependency,
+				Evidence: domain.AuthorityEvidence{SupersededBy: superseders, ActiveDependents: activeDeps, Notes: "superseded but still required by an active configuration"},
+			}, nil
+		}
 		return domain.AuthorityResult{
 			CfgID: cfgID, State: domain.AuthorityStateHistorical, Reason: domain.ReasonSuperseded,
-			Evidence: domain.AuthorityEvidence{SupersededBy: superseders, Notes: "superseded by an incoming supersedes edge"},
+			Evidence: domain.AuthorityEvidence{SupersededBy: superseders, Notes: "superseded with no active dependency"},
 		}, nil
 	}
 

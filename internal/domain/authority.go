@@ -45,6 +45,9 @@ const (
 	ReasonObjectNotFound AuthorityReason = "object_not_found"
 	// ReasonInconsistentBaselineSuperseded: a baseline member is also superseded (contradiction).
 	ReasonInconsistentBaselineSuperseded AuthorityReason = "inconsistent_baseline_superseded"
+	// ReasonSupersededActiveDependency (M3.2): superseded but still required by an Active
+	// configuration, so it remains Active (graph-computable Replacement-Test clause).
+	ReasonSupersededActiveDependency AuthorityReason = "superseded_active_dependency"
 )
 
 // AuthorityEvidence explains WHY an authority decision was made. It is a domain
@@ -57,8 +60,20 @@ type AuthorityEvidence struct {
 	ReachableVia string
 	// SupersededBy lists the cfg_ids whose supersedes edges target this object.
 	SupersededBy []string
+	// ActiveDependents (M3.2) lists the Active configurations that still depend on
+	// this object — the reason a superseded object remains Active.
+	ActiveDependents []string
 	// Notes is a short human-readable rationale.
 	Notes string
+}
+
+// ActiveDependencyResult reports whether an object is still required by an Active
+// configuration (the graph-computable Replacement-Test clause). It is a pure
+// domain value — no persistence, transport, or presentation fields.
+type ActiveDependencyResult struct {
+	CfgID               string
+	HasActiveDependency bool
+	ActiveDependents    []string
 }
 
 // AuthorityResult is the computed authority of a single object with its evidence.
