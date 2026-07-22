@@ -1,0 +1,53 @@
+package httpapi
+
+import "github.com/rpsg/oneops/internal/domain"
+
+// graphNode is a reachable node in a traversal response. It exposes only graph
+// primitives — never authority, lifecycle, or baseline state (those are M3).
+type graphNode struct {
+	CfgID string `json:"cfg_id"`
+	Depth int    `json:"depth"`
+}
+
+// traversalResponse is the payload for the dependencies/dependents endpoints.
+type traversalResponse struct {
+	Root      string      `json:"root"`
+	Direction string      `json:"direction"`
+	Recursive bool        `json:"recursive"`
+	Count     int         `json:"count"`
+	Nodes     []graphNode `json:"nodes"`
+}
+
+func newTraversalResponse(root string, dir domain.Direction, recursive bool, nodes []domain.TraversalNode) traversalResponse {
+	out := make([]graphNode, len(nodes))
+	for i, n := range nodes {
+		out[i] = graphNode{CfgID: n.CfgID, Depth: n.Depth}
+	}
+	return traversalResponse{
+		Root:      root,
+		Direction: string(dir),
+		Recursive: recursive,
+		Count:     len(out),
+		Nodes:     out,
+	}
+}
+
+// cyclePath is a single detected cycle as a closed path of node ids.
+type cyclePath struct {
+	Path []string `json:"path"`
+}
+
+// cyclesResponse is the payload for the cycles endpoint.
+type cyclesResponse struct {
+	Root   string      `json:"root"`
+	Count  int         `json:"count"`
+	Cycles []cyclePath `json:"cycles"`
+}
+
+func newCyclesResponse(root string, cycles []domain.Cycle) cyclesResponse {
+	out := make([]cyclePath, 0, len(cycles))
+	for _, c := range cycles {
+		out = append(out, cyclePath{Path: c.Path.Nodes})
+	}
+	return cyclesResponse{Root: root, Count: len(out), Cycles: out}
+}

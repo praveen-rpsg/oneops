@@ -116,6 +116,85 @@ paths:
       responses:
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/configurations/{cfgId}/dependencies:
+    get:
+      summary: Dependencies of a configuration object (forward graph)
+      description: >
+        Direct dependencies by default; the transitive forward closure when
+        recursive=true. Graph primitives only — no authority or lifecycle.
+      operationId: getDependencies
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: cfgId, in: path, required: true, schema: { type: string } }
+        - { name: recursive, in: query, schema: { type: boolean, default: false } }
+        - { name: max_depth, in: query, schema: { type: integer, minimum: 1 }, description: Cap recursive depth. }
+      responses:
+        '200':
+          description: Reachable dependency nodes
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TraversalResponse' }
+              example:
+                root: "01J000000000000000000ROOT"
+                direction: dependencies
+                recursive: true
+                count: 2
+                nodes:
+                  - { cfg_id: "01J0000000000000000000BBB", depth: 1 }
+                  - { cfg_id: "01J0000000000000000000CCC", depth: 2 }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/configurations/{cfgId}/dependents:
+    get:
+      summary: Dependents of a configuration object (reverse graph)
+      description: >
+        Direct dependents by default; the transitive reverse closure when
+        recursive=true. Graph primitives only — no authority or lifecycle.
+      operationId: getDependents
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: cfgId, in: path, required: true, schema: { type: string } }
+        - { name: recursive, in: query, schema: { type: boolean, default: false } }
+        - { name: max_depth, in: query, schema: { type: integer, minimum: 1 }, description: Cap recursive depth. }
+      responses:
+        '200':
+          description: Reachable dependent nodes
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TraversalResponse' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/configurations/{cfgId}/cycles:
+    get:
+      summary: Cycles reachable from a configuration object
+      description: >
+        Dependency cycles reachable from cfgId, each as a closed path. Returns an
+        empty list when none exist. Cycles are detected, never repaired.
+      operationId: getCycles
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: cfgId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Detected cycles (possibly empty)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CyclesResponse' }
+              example:
+                root: "01J000000000000000000ROOT"
+                count: 1
+                cycles:
+                  - { path: ["01J...A", "01J...B", "01J...A"] }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
 components:
   securitySchemes:
     bearerAuth:
@@ -197,3 +276,34 @@ components:
         status: { type: integer }
         detail: { type: string }
         instance: { type: string }
+    GraphNode:
+      type: object
+      description: A reachable graph node. Graph primitive only — no authority/lifecycle.
+      properties:
+        cfg_id: { type: string }
+        depth: { type: integer, description: Minimum hop distance from the root (direct = 1). }
+    TraversalResponse:
+      type: object
+      properties:
+        root: { type: string }
+        direction: { type: string, enum: [dependencies, dependents] }
+        recursive: { type: boolean }
+        count: { type: integer }
+        nodes:
+          type: array
+          items: { $ref: '#/components/schemas/GraphNode' }
+    CyclePath:
+      type: object
+      properties:
+        path:
+          type: array
+          description: A closed cycle path; first and last node ids are identical.
+          items: { type: string }
+    CyclesResponse:
+      type: object
+      properties:
+        root: { type: string }
+        count: { type: integer }
+        cycles:
+          type: array
+          items: { $ref: '#/components/schemas/CyclePath' }

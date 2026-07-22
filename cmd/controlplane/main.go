@@ -68,6 +68,7 @@ func run(logger *slog.Logger) error {
 	metrics := observability.NewMetrics()
 
 	srv := httpapi.NewServer(cfg, logger, repo, idem, verifier, metrics, pool.Ping)
+	srv.SetGraph(postgres.NewGraphRepo(pool)) // M2.3 dependency-graph endpoints
 	httpServer := srv.HTTPServer()
 
 	logger.Info("starting oneops control plane",

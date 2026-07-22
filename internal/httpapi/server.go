@@ -14,6 +14,7 @@ import (
 	"github.com/rpsg/oneops/internal/auth"
 	"github.com/rpsg/oneops/internal/config"
 	"github.com/rpsg/oneops/internal/domain"
+	"github.com/rpsg/oneops/internal/graph"
 	"github.com/rpsg/oneops/internal/observability"
 	"github.com/rpsg/oneops/pkg/version"
 )
@@ -27,13 +28,23 @@ type idempotencyStore interface {
 
 // Server wires the registry dependencies into an HTTP handler.
 type Server struct {
-	cfg      *config.Config
-	log      *slog.Logger
-	repo     domain.ConfigObjectRepository
-	idem     idempotencyStore
-	verifier *auth.Verifier
-	metrics  *observability.Metrics
-	health   *Health
+	cfg       *config.Config
+	log       *slog.Logger
+	repo      domain.ConfigObjectRepository
+	idem      idempotencyStore
+	verifier  *auth.Verifier
+	metrics   *observability.Metrics
+	health    *Health
+	graph     *graph.Service        // M2.3 graph transport; nil until SetGraph
+	graphRepo domain.GraphTraversal // direct (one-hop) lookups
+}
+
+// SetGraph wires the dependency-graph traversal layer (M2.3). It is additive:
+// the registry endpoints operate without it. The GraphService is constructed
+// here from the traversal repository, unchanged from M2.2.
+func (s *Server) SetGraph(gt domain.GraphTraversal) {
+	s.graphRepo = gt
+	s.graph = graph.NewService(gt)
 }
 
 // NewServer constructs a Server. ready checks downstream readiness (DB ping).
@@ -77,6 +88,11 @@ func (s *Server) Router() http.Handler {
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/artifacts/bulk", s.bulkCreateArtifacts)
 		rt.With(s.requirePermission(auth.PermWrite)).Patch("/artifacts/{id}", s.patchArtifact)
 		rt.With(s.requirePermission(auth.PermDelete)).Delete("/artifacts/{id}", s.deleteArtifact)
+
+		// M2.3 Dependency Graph — read-only, same authorization as config reads.
+		rt.With(s.requirePermission(auth.PermRead)).Get("/configurations/{cfgId}/dependencies", s.getDependencies)
+		rt.With(s.requirePermission(auth.PermRead)).Get("/configurations/{cfgId}/dependents", s.getDependents)
+		rt.With(s.requirePermission(auth.PermRead)).Get("/configurations/{cfgId}/cycles", s.getCycles)
 	})
 
 	return otelhttp.NewHandler(r, "oneops-controlplane")
