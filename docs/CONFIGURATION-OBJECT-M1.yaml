@@ -1,0 +1,57 @@
+# OneOps Configuration Object — Milestone M1 (Configuration Registry)
+# Attached per Configuration State Model v1.0 §6 ("every artifact carries a
+# Configuration Object") and §10(1). Dimension values obey the ratified model
+# and the finality precedent (INT-1…INT-5). Authority is COMPUTED, not asserted.
+
+Configuration ID:        ONEOPS-CFG-0013
+Artifact:                oneops/ (Configuration Registry control plane, Milestone M1)
+Version:                 v0.1.0-m1
+Role:                    Engineering Specification    # §5 nearest available; see AC-1 (Role=Implementation candidate amendment)
+
+# --- Authority is DERIVED from the dependency graph (§9.1), never chronology ---
+Authority:               Non-Normative
+Authority Basis:         >-
+  Computed Non-Normative: M1 is not in the in-force baseline and no Active
+  artifact depends on it (Removal Test §9.2 negative). NOT derived from maturity
+  or commit-state (INT-1). Elevation to Active occurs only via the §8
+  Ratification + Baseline-Freeze operations, by the Constitutional Architecture
+  Council — not by this engineering closure.
+
+Lifecycle:               In Progress                  # executable milestone under the Execution Program; not yet Ratified/Approved
+Retention Class:         Working Material              # assigned by purpose per §4 (INT-3); becomes Current Baseline only on ratification
+
+Dependencies:            # upstream — what M1 derives from (all Active)
+  - Configuration State Model v1.0
+  - Engineering Blueprint v1.0
+  - Engineering Execution Playbook v1.0 (Exit Criteria = "register+fetch+list with auth")
+Dependents: []           # none — nothing Active depends on M1 (drives Authority = Non-Normative)
+Supersedes: []
+Superseded By:           none
+Extended By: []
+Ratified/Approved By:    n/a                           # pending §8 Ratification (Constitutional Architecture Council)
+Current Governing Artifact: n/a
+Applicable Gates:        [Engineering Validation Gate A (future; cumulative)]
+Review Cycle:            event-driven
+Retention Policy:        permanent
+
+# --- Evidence package (governance closure) ---
+Evidence:
+  version_binding:       "git initial commit 4d6456e; release tag v0.1.0-m1"
+  sbom:                  docs/evidence/m1-sbom.cdx.json   # CycloneDX 1.7, 38 components
+  closure_record:        docs/evidence/M1-ENGINEERING-CLOSURE.md
+  security:              "govulncheck 0 reachable; trivy image/fs 0 HIGH-CRITICAL; CI security gate green"
+  tests:                 "unit+integration+race green; coverage domain 90.2 / observability 96.7 / httpapi 88.3 / auth 87.9 / config 87.0 / store-postgres 71.6 (aggregate 76.2)"
+  performance:           "CRUD p95 ~4ms (local, single-client) vs 200ms budget"
+  toolchain:             "Go 1.25; distroless nonroot read-only image"
+
+Audit Trail:
+  - "2026-07-22 IEVB Engineering Validation Meta-Report (② RATIFIED WITH AMENDMENTS)"
+  - "2026-07-22 Constitutional Finality Judgment (① precedent finalized; INT-1…INT-5)"
+  - "2026-07-22 Engineering Closure: security remediated, version-bound, Config Object attached"
+
+# --- Constitutional state boundaries (kept independent per §1 / GUI-1) ---
+Status Notes: >-
+  Existence: YES (this object).  Registration/attachment: DONE.
+  Ratification: PENDING (§8, Council).  Baseline inclusion: NOT frozen.
+  Production readiness: separate operational gate (see closure record).
+  These states are independent and are not to be collapsed.

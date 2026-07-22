@@ -29,7 +29,7 @@ curl -s -X POST localhost:8080/v1/artifacts -H 'Content-Type: application/json' 
 curl -s "localhost:8080/v1/artifacts?role=constitution&limit=10" | jq
 ```
 
-Requires: Go 1.23+, Docker, Make.
+Requires: Go 1.25+, Docker, Make.
 
 ## API
 
