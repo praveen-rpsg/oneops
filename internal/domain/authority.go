@@ -51,6 +51,9 @@ const (
 	// ReasonReplacementIncomplete (M3.3): superseded, but the replacement does not own
 	// every responsibility, so it remains Active (owns-all-responsibilities clause).
 	ReasonReplacementIncomplete AuthorityReason = "replacement_incomplete"
+	// ReasonActiveArtifactCitation (M3.4): superseded, but an Active artifact still
+	// cites it, so it remains Active (noActiveArtifactCites clause).
+	ReasonActiveArtifactCitation AuthorityReason = "active_artifact_citation"
 )
 
 // AuthorityEvidence explains WHY an authority decision was made. It is a domain
@@ -69,6 +72,9 @@ type AuthorityEvidence struct {
 	// MissingResponsibilities (M3.3) lists the responsibility ids the replacement
 	// does not own — the reason a superseded object remains Active.
 	MissingResponsibilities []string
+	// ActiveArtifactCitations (M3.4) lists the Active artifacts that still cite this
+	// object — the reason a superseded object remains Active.
+	ActiveArtifactCitations []string
 	// Notes is a short human-readable rationale.
 	Notes string
 }

@@ -37,15 +37,23 @@ type Resolver struct {
 	// responsibilities is wired only when the data source can supply responsibility
 	// ownership (M3.3). When nil, the resolver behaves exactly as M3.2.
 	responsibilities *ResponsibilityEvaluator
+	// citations is wired only when the data source can supply artifact citations
+	// (M3.4). When nil, the resolver behaves exactly as M3.3.
+	citations *ArtifactCitationEvaluator
 }
 
 // NewResolver builds a resolver over the given data port. If the data source also
 // supplies responsibility ownership, the owns-all-responsibilities clause (M3.3)
-// is evaluated; otherwise the resolver behaves exactly as M3.2.
+// is evaluated; if it also supplies artifact citations, the noActiveArtifactCites
+// clause (M3.4) is evaluated. Absent either source, the resolver degrades exactly
+// to the earlier milestone's behaviour.
 func NewResolver(data domain.AuthorityGraph) *Resolver {
 	r := &Resolver{data: data}
 	if rg, ok := data.(domain.ResponsibilityGraph); ok {
 		r.responsibilities = NewResponsibilityEvaluator(rg)
+	}
+	if cg, ok := data.(domain.CitationGraph); ok {
+		r.citations = NewArtifactCitationEvaluator(r, cg)
 	}
 	return r
 }
@@ -220,9 +228,25 @@ func (r *Resolver) resolveOne(ctx context.Context, cfgID string, active map[stri
 				}, nil
 			}
 		}
+		// M3.4 — noActiveArtifactCites: a superseded config still cited by an Active
+		// artifact remains Active. Citations are metadata-only and independent of the
+		// graph; evaluated only when the data source supplies them, and only after the
+		// M3.2 and M3.3 clauses have both passed (precedence unchanged).
+		if r.citations != nil {
+			citers, err := r.citations.activeArtifactCitersOf(ctx, cfgID, active)
+			if err != nil {
+				return domain.AuthorityResult{}, err
+			}
+			if len(citers) > 0 {
+				return domain.AuthorityResult{
+					CfgID: cfgID, State: domain.AuthorityStateActive, Reason: domain.ReasonActiveArtifactCitation,
+					Evidence: domain.AuthorityEvidence{SupersededBy: superseders, ActiveArtifactCitations: citers, Notes: "superseded but still cited by an active artifact"},
+				}, nil
+			}
+		}
 		return domain.AuthorityResult{
 			CfgID: cfgID, State: domain.AuthorityStateHistorical, Reason: domain.ReasonSuperseded,
-			Evidence: domain.AuthorityEvidence{SupersededBy: superseders, Notes: "superseded with complete replacement and no active dependency"},
+			Evidence: domain.AuthorityEvidence{SupersededBy: superseders, Notes: "superseded with complete replacement, no active dependency, and no active citation"},
 		}, nil
 	}
 
