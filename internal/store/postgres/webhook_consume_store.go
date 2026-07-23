@@ -128,7 +128,7 @@ func (s *WebhookStore) CreateJob(ctx context.Context, j events.ReplayJob) error 
 		INSERT INTO webhook_replay_job
 			(id, webhook_id, from_ts, to_ts, delivery_ids, status, events_replayed, error, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,0,'',now(),now())`,
-		j.ID, j.WebhookID, nullTime(j.From), nullTime(j.To), j.DeliveryIDs, string(j.Status))
+		j.ID, j.WebhookID, nullTime(j.From), nullTime(j.To), textArray(j.DeliveryIDs), string(j.Status))
 	if err != nil {
 		return fmt.Errorf("create replay job: %w", err)
 	}
@@ -211,4 +211,21 @@ func nullTime(t time.Time) *time.Time {
 		return nil
 	}
 	return &t
+}
+
+// textArray normalizes a Go slice bound to a `text[] NOT NULL DEFAULT '{}'`
+// column. pgx encodes a NIL slice as SQL NULL, and an explicit NULL bypasses the
+// column DEFAULT — so the insert violates the NOT NULL constraint (SQLSTATE
+// 23502). An empty non-nil slice encodes as '{}' and is accepted.
+//
+// Nil is a legitimate value at every call site: a webhook with no Operations or
+// Resources filter means "all events" (events.Webhook.Matches), and a replay job
+// with no DeliveryIDs means time-window mode (events.ReplayJob). Normalizing here
+// — at the single persistence boundary — keeps that meaning intact for every
+// caller instead of pushing the constraint back into the transport layer.
+func textArray(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }

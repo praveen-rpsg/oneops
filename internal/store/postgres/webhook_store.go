@@ -36,7 +36,7 @@ func (s *WebhookStore) Create(ctx context.Context, w events.Webhook) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO webhook (`+webhookCols+`)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now())`,
-		w.ID, w.URL, w.Secret, w.Enabled, w.Operations, w.Resources, w.MaxRetries)
+		w.ID, w.URL, w.Secret, w.Enabled, textArray(w.Operations), textArray(w.Resources), w.MaxRetries)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return domain.ErrConflict
@@ -94,7 +94,7 @@ func (s *WebhookStore) Update(ctx context.Context, w events.Webhook) error {
 		   SET url=$2, secret=$3, enabled=$4, operations=$5, resources=$6,
 		       max_retries=$7, updated_at=now()
 		 WHERE id=$1`,
-		w.ID, w.URL, w.Secret, w.Enabled, w.Operations, w.Resources, w.MaxRetries)
+		w.ID, w.URL, w.Secret, w.Enabled, textArray(w.Operations), textArray(w.Resources), w.MaxRetries)
 	if err != nil {
 		return fmt.Errorf("update webhook: %w", err)
 	}

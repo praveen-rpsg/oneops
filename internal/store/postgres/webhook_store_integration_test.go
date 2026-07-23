@@ -136,3 +136,70 @@ func TestWebhookStore_Integration(t *testing.T) {
 		t.Fatalf("Delete: %v", err)
 	}
 }
+
+// TestWebhookStore_NilSlicesPersist is the regression test for the nil-slice
+// defect shipped in v1.0.0: pgx encodes a NIL Go slice as SQL NULL, and an
+// explicit NULL bypasses `DEFAULT '{}'`, so every `text[] NOT NULL` insert bound
+// to a nil slice failed with SQLSTATE 23502.
+//
+// Nil is the NORMAL case at each of these call sites, which is exactly why the
+// defect reached production:
+//   - a webhook with no Operations/Resources means "subscribe to all events"
+//   - a replay job with no DeliveryIDs means time-window mode
+//
+// Every prior test supplied populated slices, so none of them caught it.
+func TestWebhookStore_NilSlicesPersist(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `TRUNCATE webhook, webhook_delivery, webhook_cursor, webhook_replay_job CASCADE`); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	s := NewWebhookStore(pool)
+
+	// Create with nil Operations AND nil Resources — "all events".
+	wh := events.Webhook{
+		ID: "wh_nil", URL: "https://sub/all", Secret: "s", Enabled: true,
+		Operations: nil, Resources: nil, MaxRetries: 3,
+	}
+	if err := s.Create(ctx, wh); err != nil {
+		t.Fatalf("Create with nil slices: %v", err)
+	}
+	got, err := s.Get(ctx, "wh_nil")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Operations) != 0 || len(got.Resources) != 0 {
+		t.Fatalf("nil slices round-tripped as %+v, want empty", got)
+	}
+	// The semantic contract survives: empty means "match everything".
+	if !got.Matches(events.Event{Operation: "ratification", CfgID: "any"}) {
+		t.Error("a webhook with no filters must match every event")
+	}
+
+	// Update back to nil after having been populated.
+	wh.Operations, wh.Resources = []string{"ratification"}, []string{"c1"}
+	if err := s.Update(ctx, wh); err != nil {
+		t.Fatalf("Update populated: %v", err)
+	}
+	wh.Operations, wh.Resources = nil, nil
+	if err := s.Update(ctx, wh); err != nil {
+		t.Fatalf("Update back to nil slices: %v", err)
+	}
+
+	// Replay job with nil DeliveryIDs — time-window mode.
+	job := events.ReplayJob{
+		ID: "rpl_nil", WebhookID: "wh_nil",
+		From: time.Now().Add(-time.Hour), To: time.Now(),
+		DeliveryIDs: nil, Status: events.JobPending,
+	}
+	if err := s.CreateJob(ctx, job); err != nil {
+		t.Fatalf("CreateJob with nil DeliveryIDs: %v", err)
+	}
+	gotJob, ok, err := s.GetJob(ctx, "rpl_nil")
+	if err != nil || !ok {
+		t.Fatalf("GetJob: %v ok=%v", err, ok)
+	}
+	if len(gotJob.DeliveryIDs) != 0 {
+		t.Fatalf("DeliveryIDs = %v, want empty", gotJob.DeliveryIDs)
+	}
+}
