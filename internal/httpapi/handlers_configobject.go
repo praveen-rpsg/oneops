@@ -36,12 +36,12 @@ func (s *Server) createArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	obj := req.toDomain()
 	if err := obj.Validate(); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	created, err := s.repo.Create(r.Context(), obj)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 
@@ -61,7 +61,7 @@ func (s *Server) createArtifact(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getArtifact(w http.ResponseWriter, r *http.Request) {
 	obj, err := s.repo.Get(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	tag := etag(obj.RowVersion)
@@ -81,7 +81,7 @@ func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	}
 	page, err := s.repo.List(r.Context(), params)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	items := make([]configObjectResponse, 0, len(page.Items))
@@ -110,12 +110,12 @@ func (s *Server) patchArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	patch, verr := req.toPatch()
 	if verr != nil {
-		mapError(w, r, verr)
+		s.mapError(w, r, verr)
 		return
 	}
 	updated, err := s.repo.Update(r.Context(), chi.URLParam(r, "id"), expected, patch)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	w.Header().Set("ETag", etag(updated.RowVersion))
@@ -124,7 +124,7 @@ func (s *Server) patchArtifact(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteArtifact(w http.ResponseWriter, r *http.Request) {
 	if err := s.repo.Delete(r.Context(), chi.URLParam(r, "id")); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -152,7 +152,7 @@ func (s *Server) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := s.repo.BulkCreate(r.Context(), objs)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	items := make([]configObjectResponse, 0, len(created))

@@ -65,7 +65,7 @@ func (s *Server) writeTimeline(w http.ResponseWriter, r *http.Request, page time
 			writeProblem(w, r, http.StatusNotFound, "not found", "no such timeline root")
 			return
 		}
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, page)

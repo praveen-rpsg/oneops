@@ -30,7 +30,7 @@ func (s *Server) serveTraversal(w http.ResponseWriter, r *http.Request, dir doma
 	cfgID := chi.URLParam(r, "cfgId")
 	// cfgId must reference an existing configuration object.
 	if _, err := s.repo.Get(r.Context(), cfgID); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	recursive, err := parseBoolParam(r.URL.Query().Get("recursive"))
@@ -46,7 +46,7 @@ func (s *Server) serveTraversal(w http.ResponseWriter, r *http.Request, dir doma
 
 	nodes, err := s.traverse(r, dir, cfgID, recursive, maxDepth)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 
@@ -111,12 +111,12 @@ func (s *Server) getCycles(w http.ResponseWriter, r *http.Request) {
 	}
 	cfgID := chi.URLParam(r, "cfgId")
 	if _, err := s.repo.Get(r.Context(), cfgID); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	cycles, err := s.graph.DetectCycles(r.Context(), cfgID)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	s.log.Info("graph_cycles",

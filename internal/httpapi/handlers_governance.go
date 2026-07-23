@@ -91,7 +91,7 @@ func toGovernanceResponse(res governance.Result, operationID string) governanceR
 // mapGovernanceError maps governance-specific errors to HTTP, then delegates to
 // the shared registry mapper for domain errors (404 / 412 / 422 / 500),
 // preserving existing error semantics.
-func mapGovernanceError(w http.ResponseWriter, r *http.Request, err error) {
+func (s *Server) mapGovernanceError(w http.ResponseWriter, r *http.Request, err error) {
 	var te *governance.TransitionError
 	switch {
 	case errors.As(err, &te):
@@ -102,7 +102,7 @@ func mapGovernanceError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, governance.ErrUnsupportedOperation):
 		writeProblem(w, r, http.StatusUnprocessableEntity, "unsupported operation", err.Error())
 	default:
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 	}
 }
 
@@ -195,10 +195,16 @@ func (s *Server) execGovernance(w http.ResponseWriter, r *http.Request, op domai
 
 	res, err := s.governance.Execute(r.Context(), cmd)
 	if err != nil {
+		// This WARN is the operation-level fact: which §8 operation, on which
+		// object. It covers EXPECTED failures too (a 409 from a TransitionError),
+		// which s.mapError deliberately does not log. For an unexpected error the
+		// canonical cause line comes from s.mapError at ERROR; the two are
+		// complementary and correlate on request_id. Retained on purpose — this
+		// is not a duplicate to be removed.
 		s.log.Warn("governance operation failed",
 			"operation", op, "cfg_id", cmd.CfgID,
 			"request_id", RequestIDFrom(r.Context()), "err", err.Error())
-		mapGovernanceError(w, r, err)
+		s.mapGovernanceError(w, r, err)
 		return
 	}
 

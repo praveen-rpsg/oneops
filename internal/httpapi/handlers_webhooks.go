@@ -98,7 +98,7 @@ func (s *Server) listWebhooks(w http.ResponseWriter, r *http.Request) {
 	}
 	items, err := s.webhooks.List(r.Context())
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	out := make([]webhookDTO, 0, len(items))
@@ -134,12 +134,12 @@ func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) {
 		Operations: req.Operations, Resources: req.Resources, MaxRetries: maxRetries,
 	}
 	if err := s.webhooks.Create(r.Context(), wh); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	created, err := s.webhooks.Get(r.Context(), wh.ID)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	s.log.Info("webhook created", "webhook_id", wh.ID, "request_id", RequestIDFrom(r.Context()))
@@ -153,7 +153,7 @@ func (s *Server) patchWebhook(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	cur, err := s.webhooks.Get(r.Context(), id)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	var req patchWebhookRequest
@@ -182,7 +182,7 @@ func (s *Server) patchWebhook(w http.ResponseWriter, r *http.Request) {
 		rotated = true
 	}
 	if err := s.webhooks.Update(r.Context(), cur); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	s.log.Info("webhook updated", "webhook_id", id, "secret_rotated", rotated, "request_id", RequestIDFrom(r.Context()))
@@ -194,7 +194,7 @@ func (s *Server) deleteWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.webhooks.Delete(r.Context(), chi.URLParam(r, "id")); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -210,7 +210,7 @@ func (s *Server) testWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	wh, err := s.webhooks.Get(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	status, terr := s.webhookTester(r.Context(), wh)
@@ -227,12 +227,12 @@ func (s *Server) listWebhookDeliveries(w http.ResponseWriter, r *http.Request) {
 	}
 	id := chi.URLParam(r, "id")
 	if _, err := s.webhooks.Get(r.Context(), id); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	ds, err := s.webhooks.ListByWebhook(r.Context(), id, s.pageLimit(r))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	out := make([]deliveryDTO, 0, len(ds))

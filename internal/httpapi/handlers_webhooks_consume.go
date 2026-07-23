@@ -76,7 +76,7 @@ func (s *Server) replayWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	id := chi.URLParam(r, "id")
 	if _, err := s.webhooks.Get(r.Context(), id); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	var req replayRequest
@@ -96,7 +96,7 @@ func (s *Server) replayWebhook(w http.ResponseWriter, r *http.Request) {
 		job.To = *req.To
 	}
 	if err := s.replayJobs.CreateJob(r.Context(), job); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	s.log.Info("replay job created", "job_id", job.ID, "webhook_id", id, "request_id", RequestIDFrom(r.Context()))
@@ -111,12 +111,12 @@ func (s *Server) getDelivery(w http.ResponseWriter, r *http.Request) {
 	id, deliveryID := chi.URLParam(r, "id"), chi.URLParam(r, "deliveryID")
 	wh, err := s.webhooks.Get(r.Context(), id)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	d, ok, err := s.deliveryOps.GetDelivery(r.Context(), deliveryID)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	if !ok || d.WebhookID != id {
@@ -143,7 +143,7 @@ func (s *Server) retryDelivery(w http.ResponseWriter, r *http.Request) {
 	id, deliveryID := chi.URLParam(r, "id"), chi.URLParam(r, "deliveryID")
 	d, ok, err := s.deliveryOps.GetDelivery(r.Context(), deliveryID)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	if !ok || d.WebhookID != id {
@@ -152,7 +152,7 @@ func (s *Server) retryDelivery(w http.ResponseWriter, r *http.Request) {
 	}
 	n, err := s.deliveryOps.Requeue(r.Context(), []string{deliveryID})
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"requeued": n})
@@ -165,7 +165,7 @@ func (s *Server) listDeadLetters(w http.ResponseWriter, r *http.Request) {
 	}
 	ds, err := s.deliveryOps.ListDeadLetters(r.Context(), r.URL.Query().Get("webhook_id"), s.pageLimit(r))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	out := make([]deliveryDTO, 0, len(ds))
@@ -192,7 +192,7 @@ func (s *Server) retryDeadLetters(w http.ResponseWriter, r *http.Request) {
 	}
 	n, err := s.deliveryOps.RequeueDeadLetters(r.Context(), req.WebhookID)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	s.log.Info("dead-letters requeued", "count", n, "webhook_id", req.WebhookID, "request_id", RequestIDFrom(r.Context()))
@@ -206,7 +206,7 @@ func (s *Server) listReplayJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs, err := s.replayJobs.ListJobs(r.Context(), s.pageLimit(r))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	out := make([]replayJobDTO, 0, len(jobs))
@@ -223,7 +223,7 @@ func (s *Server) getReplayJob(w http.ResponseWriter, r *http.Request) {
 	}
 	j, ok, err := s.replayJobs.GetJob(r.Context(), chi.URLParam(r, "jobID"))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	if !ok {

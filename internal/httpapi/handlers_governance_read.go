@@ -162,7 +162,7 @@ func parseCursor(r *http.Request, def int64) int64 {
 // requireObject reuses the registry repository to 404 unknown ids consistently.
 func (s *Server) requireObject(w http.ResponseWriter, r *http.Request, id string) bool {
 	if _, err := s.repo.Get(r.Context(), id); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return false
 	}
 	return true
@@ -175,7 +175,7 @@ func (s *Server) getGovernanceState(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	obj, err := s.repo.Get(r.Context(), id)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	w.Header().Set("ETag", etag(obj.RowVersion))
@@ -212,7 +212,7 @@ func (s *Server) getGovernanceHistory(w http.ResponseWriter, r *http.Request) {
 
 	events, err := s.auditRead.ListEvents(r.Context(), domain.AuditChainID(id), cursor, false, limit, operation)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 
@@ -258,12 +258,12 @@ func (s *Server) getAuditChain(w http.ResponseWriter, r *http.Request) {
 
 	seq, hash, found, err := s.auditRead.HeadOf(r.Context(), chainID)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	res, err := s.auditVerifier.VerifyChain(r.Context(), chainID)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	resp := auditChainResponse{
@@ -303,7 +303,7 @@ func (s *Server) getAuditEvents(w http.ResponseWriter, r *http.Request) {
 
 	events, err := s.auditRead.ListEvents(r.Context(), domain.AuditChainID(id), cursor, desc, limit, operation)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	order := "asc"
@@ -344,7 +344,7 @@ func (s *Server) getVerification(w http.ResponseWriter, r *http.Request) {
 
 	res, err := s.auditVerifier.VerifyChain(r.Context(), chainID)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	resp := verificationResponse{
