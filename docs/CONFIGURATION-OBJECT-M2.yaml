@@ -1,0 +1,57 @@
+# OneOps Configuration Object — Milestone M2 (Dependency Graph)
+# Attached per Configuration State Model v1.0 §6. Dimension values obey the
+# ratified finality precedent (INT-1…INT-5): Authority is COMPUTED from
+# dependency, not asserted; Retention assigned by purpose.
+
+Configuration ID:        ONEOPS-CFG-0014
+Artifact:                oneops/ Dependency Graph (Milestone M2 = M2.1–M2.4)
+Version:                 v0.2.0-m2
+Role:                    Engineering Specification    # §5 nearest; see AC-1 (Implementation role candidate)
+
+# --- Authority DERIVED from the dependency graph (§9.1), never chronology ---
+Authority:               Non-Normative
+Authority Basis:         >-
+  Computed Non-Normative: M2 is not in the in-force baseline and no Active
+  artifact depends on it (Removal Test negative). Not derived from completion
+  (INT-1). Elevation to Active is a §8 Ratification/Freeze act reserved to the
+  Constitutional Architecture Council — not performed by engineering.
+
+Lifecycle:               In Progress                  # engineering-complete; not yet Ratified/Approved
+Retention Class:         Working Material              # by purpose per §4 (INT-3); Current Baseline only on ratification
+
+Dependencies:            # upstream (all Active or the M1 baseline)
+  - ONEOPS-CFG-0013 (M1 Configuration Registry)        # M2 builds on M1; dependency_edge FK -> configuration_object
+  - Configuration State Model v1.0
+  - Engineering Execution Playbook v1.0 (M2 row / S3)
+Dependents: []           # none — nothing Active depends on M2 (drives Authority = Non-Normative)
+Supersedes: []
+Superseded By:           none
+Ratified/Approved By:    n/a                           # pending §8 Ratification
+
+# --- Stories (all committed, additive to M1) ---
+Stories:
+  M2.1: dependency_edge persistence (migration 20260722000002_graph.sql, repo, domain, tests)
+  M2.2: recursive-CTE traversal + cycle detection (GraphService, deterministic, cycle-safe)
+  M2.3: graph REST endpoints (/v1/configurations/{cfgId}/dependencies|dependents|cycles) + OpenAPI + RBAC
+  M2.4: performance validation & operational hardening (benchmarks, concurrency, EXPLAIN, reports)
+
+# --- Evidence references ---
+Evidence:
+  version_binding:       "commit d615300; annotated tag v0.2.0-m2"
+  performance:           docs/evidence/M2-PERFORMANCE-SUMMARY.md   # p95 705us @10k/30k (<50ms)
+  benchmarks:            docs/evidence/M2-BENCHMARK-REPORT.md
+  query_plans:           docs/evidence/M2-QUERY-PLAN-SUMMARY.md    # ix_edge_from/ix_edge_to; no seq-scan regression
+  operational:           docs/evidence/M2-OPERATIONAL-VALIDATION.md
+  release_verification:  OneOps-M2-Independent-Release-Verification.md
+  sbom:                  docs/evidence/m1-sbom.cdx.json            # UNCHANGED — M2 added 0 dependencies
+  security:              "go.mod/go.sum unchanged vs M1 -> govulncheck 0 reachable, trivy 0 HIGH/CRITICAL inherited"
+  schema:                "additive migration V002 only; M1 tables untouched (0 diff)"
+
+Audit Trail:
+  - "2026-07-22 M2.1–M2.4 committed additively on branch m2-dependency-graph"
+  - "2026-07-22 Independent M2 Release Verification — ② VERIFIED WITH FINDINGS; tagged v0.2.0-m2"
+
+Status Notes: >-
+  Existence: YES.  Registration/attachment: DONE.  Ratification: PENDING (§8, Council).
+  Baseline inclusion: NOT frozen.  Production readiness: separate gate (M9).
+  These states are independent and are not to be collapsed.

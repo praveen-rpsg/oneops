@@ -6,6 +6,13 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
+)
+
+// Insecure development defaults that must never reach a production environment.
+const (
+	devJWTHMACKey  = "dev-insecure-secret-change-me"
+	devDatabaseURL = "postgres://oneops:dev@localhost:5432/oneops?sslmode=disable"
 )
 
 // Config holds the resolved runtime configuration.
@@ -33,6 +40,54 @@ type Config struct {
 	// Observability.
 	ServiceName  string
 	OTLPEndpoint string // empty => tracing exporter disabled
+
+	// Audit-integrity verification scheduler (operational).
+	VerifyIntervalSeconds int // 0 => scheduler disabled
+	VerifyTimeoutSeconds  int // per-chain verification timeout
+	VerifyRetryAttempts   int // retries on transport error (never on a break)
+
+	// Runtime profiling (operational). Disabled by default; mounts net/http/pprof.
+	PProfEnabled bool
+
+	// Webhook delivery retention in hours (terminal deliveries older than this are
+	// pruned; pending/failed are never deleted). 0 disables deletion.
+	WebhookRetentionHours int
+}
+
+// IsProduction reports whether the service runs in a production environment,
+// where insecure development defaults are rejected at startup.
+func (c *Config) IsProduction() bool {
+	switch strings.ToLower(strings.TrimSpace(c.Env)) {
+	case "prod", "production":
+		return true
+	default:
+		return false
+	}
+}
+
+// validateProduction fails fast when a production environment is left on insecure
+// development defaults. It is a no-op outside production.
+func (c *Config) validateProduction() error {
+	if !c.IsProduction() {
+		return nil
+	}
+	var problems []string
+	if c.AuthEnabled && c.JWTHMACKey == devJWTHMACKey {
+		problems = append(problems, "ONEOPS_JWT_HMAC_KEY is the insecure development default")
+	}
+	if !c.AuthEnabled {
+		problems = append(problems, "ONEOPS_AUTH_ENABLED must not be false in production")
+	}
+	if c.DatabaseURL == devDatabaseURL {
+		problems = append(problems, "ONEOPS_DB_URL is the local development default")
+	}
+	if strings.Contains(c.DatabaseURL, "sslmode=disable") {
+		problems = append(problems, "ONEOPS_DB_URL disables TLS (sslmode=disable)")
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("insecure production configuration: %s", strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 // Load reads configuration from the environment and validates it.
@@ -53,6 +108,14 @@ func Load() (*Config, error) {
 		JWKSURL:         getEnv("ONEOPS_JWKS_URL", ""),
 		ServiceName:     getEnv("ONEOPS_SERVICE_NAME", "oneops-controlplane"),
 		OTLPEndpoint:    getEnv("ONEOPS_OTLP_ENDPOINT", ""),
+
+		VerifyIntervalSeconds: getEnvInt("ONEOPS_AUDIT_VERIFY_INTERVAL_SECONDS", 300),
+		VerifyTimeoutSeconds:  getEnvInt("ONEOPS_AUDIT_VERIFY_TIMEOUT_SECONDS", 30),
+		VerifyRetryAttempts:   getEnvInt("ONEOPS_AUDIT_VERIFY_RETRY_ATTEMPTS", 2),
+
+		PProfEnabled: getEnvBool("ONEOPS_PPROF_ENABLED", false),
+
+		WebhookRetentionHours: getEnvInt("ONEOPS_WEBHOOK_RETENTION_HOURS", 720),
 	}
 	if c.ShutdownGrace < 0 {
 		return nil, fmt.Errorf("ONEOPS_SHUTDOWN_GRACE_SECONDS must be >= 0, got %d", c.ShutdownGrace)
@@ -68,6 +131,12 @@ func Load() (*Config, error) {
 	}
 	if c.AuthEnabled && c.JWTHMACKey == "" && c.JWKSURL == "" {
 		return nil, fmt.Errorf("auth enabled but neither ONEOPS_JWT_HMAC_KEY nor ONEOPS_JWKS_URL is set")
+	}
+	if c.VerifyIntervalSeconds < 0 || c.VerifyTimeoutSeconds < 0 || c.VerifyRetryAttempts < 0 {
+		return nil, fmt.Errorf("audit verify settings must be >= 0")
+	}
+	if err := c.validateProduction(); err != nil {
+		return nil, err
 	}
 	return c, nil
 }

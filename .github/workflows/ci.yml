@@ -3,7 +3,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
 
 permissions:
   contents: read
@@ -19,10 +19,59 @@ jobs:
           cache: true
       - name: vet
         run: go vet ./...
-      - name: test
-        run: go test ./... -race -cover
+      - name: unit tests (race + coverage)
+        run: go test ./... -race -coverprofile=coverage.out -covermode=atomic
+      - name: coverage summary
+        run: go tool cover -func=coverage.out | tail -1
       - name: build
         run: make build
+
+  # PostgreSQL-backed integration tests. These carry the `integration` build tag
+  # (so the unit job never compiles them) and require TEST_DATABASE_URL. The job
+  # FAILS if any integration test is skipped — the pipeline must actually exercise
+  # the SQL layer (governance atomic transaction, hash chain, webhook/policy/
+  # timeline persistence), not silently skip it.
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: oneops
+          POSTGRES_PASSWORD: oneops
+          POSTGRES_DB: oneops_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U oneops"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://oneops:oneops@localhost:5432/oneops_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: integration tests (race, fail on skip)
+        run: |
+          set -euo pipefail
+          go test -tags integration -race -count=1 -v \
+            ./internal/store/postgres/... ./internal/httpapi/... 2>&1 | tee itest.log
+          if grep -q -- '--- SKIP' itest.log; then
+            echo "::error::an integration test was SKIPPED — the SQL layer was not exercised"
+            exit 1
+          fi
+
+  migrations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ariga/setup-atlas@v0
+      - name: validate migration directory and checksum
+        run: atlas migrate validate --dir "file://internal/store/migrate/sql"
 
   lint:
     runs-on: ubuntu-latest

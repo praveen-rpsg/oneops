@@ -56,6 +56,20 @@ func Up(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+// Latest returns the version of the newest embedded migration — the schema
+// version this binary expects — or "" when there are none. It is a read-only
+// helper for operational diagnostics; it touches no database and applies nothing.
+func Latest() (string, error) {
+	files, err := forwardFiles()
+	if err != nil {
+		return "", err
+	}
+	if len(files) == 0 {
+		return "", nil
+	}
+	return strings.TrimSuffix(files[len(files)-1], ".sql"), nil
+}
+
 func applyOne(ctx context.Context, pool *pgxpool.Pool, version, body string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
