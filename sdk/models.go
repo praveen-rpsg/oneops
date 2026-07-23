@@ -37,6 +37,9 @@ type GovernanceResult struct {
 	RowVersion int64            `json:"row_version"`
 	State      *GovernanceState `json:"state,omitempty"`
 	Audit      AuditMeta        `json:"audit"`
+	// SuccessorID is returned by Extend only: the object recorded as extending
+	// CfgID. Empty for every other operation.
+	SuccessorID string `json:"successor_id,omitempty"`
 }
 
 // ObjectState is the current governance state of a configuration object.

@@ -68,6 +68,18 @@ func (g *GovernanceClient) Archive(ctx context.Context, id, targetRetention stri
 	return g.post(ctx, id, "archive", body, opts)
 }
 
+// Extend records that successorID extends the configuration object id
+// (Configuration State Model §8 Extension). The base object's dimensions are
+// unchanged — in particular its authority is not demoted. Extension is not
+// replacement.
+func (g *GovernanceClient) Extend(ctx context.Context, id, successorID string, opts WriteOptions) (*GovernanceResult, error) {
+	if successorID == "" {
+		return nil, errors.New("oneops: Extend requires a successor id")
+	}
+	body := map[string]string{"successor_id": successorID}
+	return g.post(ctx, id, "extend", body, opts)
+}
+
 // Delete deletes a working-material configuration object (engine enforces the rules).
 func (g *GovernanceClient) Delete(ctx context.Context, id string, opts WriteOptions) (*GovernanceResult, error) {
 	h, err := opts.headers()

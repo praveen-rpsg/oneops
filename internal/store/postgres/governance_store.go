@@ -75,6 +75,28 @@ func (s *GovernanceStore) CountDependents(ctx context.Context, tx pgx.Tx, cfgID 
 	return n, nil
 }
 
+// RecordEdge inserts a dependency edge within the operation's transaction,
+// reusing the M2 dependency_edge table unchanged. The schema's foreign keys make
+// a missing endpoint a domain.ErrNotFound and its uniqueness constraint makes a
+// duplicate edge a domain.ErrConflict, so the engine needs no separate existence
+// check. It adds no schema.
+func (s *GovernanceStore) RecordEdge(ctx context.Context, tx pgx.Tx, from, to string, kind domain.EdgeKind) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO dependency_edge (id, from_cfg, to_cfg, edge_kind)
+		VALUES ($1,$2,$3,$4)`,
+		domain.NewID(), from, to, string(kind))
+	switch {
+	case err == nil:
+		return nil
+	case isUniqueViolation(err):
+		return domain.ErrConflict
+	case isForeignKeyViolation(err):
+		return domain.ErrNotFound
+	default:
+		return fmt.Errorf("governance record edge: %w", err)
+	}
+}
+
 // RemoveObject deletes the object under optimistic concurrency. A version
 // mismatch (or missing object) yields domain.ErrVersionMismatch.
 func (s *GovernanceStore) RemoveObject(ctx context.Context, tx pgx.Tx, cfgID string, expected int64) error {

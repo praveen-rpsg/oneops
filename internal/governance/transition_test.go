@@ -99,8 +99,9 @@ func TestDeletion(t *testing.T) {
 }
 
 func TestUnsupportedOperations(t *testing.T) {
+	// Extension is implemented (WP-2) and is deliberately absent from this list.
 	for _, op := range []domain.ConfigurationOperation{
-		domain.OpExtension, domain.OpReplacement, domain.OpAmendment,
+		domain.OpReplacement, domain.OpAmendment,
 		domain.OpBaselineFreeze, domain.OpHistoricalPreservation,
 	} {
 		if _, err := planTransition(op, obj(domain.LifecycleRatified, domain.RetentionCurrentBaseline, domain.AuthorityActive), Command{}); !errors.Is(err, ErrUnsupportedOperation) {

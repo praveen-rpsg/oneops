@@ -16,8 +16,8 @@ import (
 // Engine errors.
 var (
 	// ErrUnsupportedOperation is returned for a §8 operation not yet implemented
-	// by this engine (Extension, Replacement, Amendment, Baseline Freeze,
-	// Historical Preservation).
+	// by this engine (Replacement, Amendment, Baseline Freeze, Historical
+	// Preservation).
 	ErrUnsupportedOperation = errors.New("governance: operation not supported")
 	// ErrHasDependents is returned when Deletion is attempted on an object that
 	// still has dependents (State Model §8: deletion requires no dependents).
@@ -42,6 +42,10 @@ type Command struct {
 	ExpectedRowVersion int64
 	// TargetRetention is the archival retention class for Archiving.
 	TargetRetention domain.RetentionClass
+	// SuccessorID is the extending object for Extension (State Model §8): the
+	// successor that depends on / inherits CfgID. Required by Extension; unused
+	// by every other operation.
+	SuccessorID string
 }
 
 func (c Command) validate() error {
@@ -71,6 +75,8 @@ type Result struct {
 	NewAuthority domain.Authority
 	Removed      bool
 	RowVersion   int64
+	// SuccessorID is set by Extension: the object recorded as extending CfgID.
+	SuccessorID string
 }
 
 // auditPayload is the governance-owned JSON descriptor of a committed result:
@@ -87,6 +93,11 @@ func (r Result) auditPayload() (json.RawMessage, error) {
 		NewRetention domain.RetentionClass         `json:"new_retention,omitempty"`
 		NewAuthority domain.Authority              `json:"new_authority,omitempty"`
 		RowVersion   int64                         `json:"row_version"`
+		// SuccessorID is emitted only by Extension. It is omitempty so every
+		// pre-existing operation marshals byte-identically to before this field
+		// existed — the hash chain over already-committed events is unaffected
+		// (Law 12: audit is append-only and never rewritten).
+		SuccessorID string `json:"successor_id,omitempty"`
 	}{
 		Operation:    r.Operation,
 		CfgID:        r.CfgID,
@@ -95,6 +106,7 @@ func (r Result) auditPayload() (json.RawMessage, error) {
 		NewRetention: r.NewRetention,
 		NewAuthority: r.NewAuthority,
 		RowVersion:   r.RowVersion,
+		SuccessorID:  r.SuccessorID,
 	})
 }
 
@@ -106,6 +118,11 @@ type Store interface {
 	ApplyDimensions(ctx context.Context, tx pgx.Tx, cfgID string, expected int64, lifecycle domain.Lifecycle, retention domain.RetentionClass, authority domain.Authority) (rowVersion int64, err error)
 	CountDependents(ctx context.Context, tx pgx.Tx, cfgID string) (int, error)
 	RemoveObject(ctx context.Context, tx pgx.Tx, cfgID string, expected int64) error
+	// RecordEdge writes a dependency edge inside the operation's transaction.
+	// Referential integrity is enforced by the schema (both endpoints are foreign
+	// keys), so a missing endpoint surfaces as domain.ErrNotFound and a duplicate
+	// edge as domain.ErrConflict — the engine performs no separate existence check.
+	RecordEdge(ctx context.Context, tx pgx.Tx, from, to string, kind domain.EdgeKind) error
 }
 
 // Authorizer decides whether an actor may perform an operation on an object
@@ -213,6 +230,18 @@ func (e *Engine) Execute(ctx context.Context, cmd Command) (Result, error) {
 			return Result{}, err
 		}
 		res.NewLifecycle, res.NewRetention, res.NewAuthority, res.RowVersion = p.Lifecycle, p.Retention, p.Authority, rv
+	}
+
+	// Relational effect (§8 Extension). Written inside the SAME transaction as the
+	// dimensional apply and the audit append below: the edge IS the operation's
+	// constitutional mutation, so it commits atomically with its audit event or
+	// not at all (ADR-AUDIT-005). A failure here returns before the commit and the
+	// deferred Rollback undoes everything staged above.
+	if p.Edge != nil {
+		if err := e.store.RecordEdge(ctx, tx, p.Edge.From, p.Edge.To, p.Edge.Kind); err != nil {
+			return Result{}, err
+		}
+		res.SuccessorID = p.Edge.From
 	}
 
 	// --- ATOMIC AUDIT EMISSION (ADR-AUDIT-005) --------------------------------

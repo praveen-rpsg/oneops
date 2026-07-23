@@ -29,6 +29,8 @@ type governanceExecutor interface {
 type governanceRequest struct {
 	// TargetRetention is required only for archive; the engine enforces the rest.
 	TargetRetention string `json:"target_retention,omitempty"`
+	// SuccessorID is required only for extend: the object that extends this one.
+	SuccessorID string `json:"successor_id,omitempty"`
 }
 
 type governanceStateDTO struct {
@@ -56,6 +58,9 @@ type governanceResponse struct {
 	RowVersion int64               `json:"row_version"`
 	State      *governanceStateDTO `json:"state,omitempty"`
 	Audit      governanceAuditDTO  `json:"audit"`
+	// SuccessorID is returned by extend only: the object recorded as extending
+	// this one. Absent for every other operation.
+	SuccessorID string `json:"successor_id,omitempty"`
 }
 
 func toGovernanceResponse(res governance.Result, operationID string) governanceResponse {
@@ -79,6 +84,7 @@ func toGovernanceResponse(res governance.Result, operationID string) governanceR
 			Authority:      string(res.NewAuthority),
 		}
 	}
+	resp.SuccessorID = res.SuccessorID
 	return resp
 }
 
@@ -107,6 +113,9 @@ func (s *Server) ratifyGovernance(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) approveGovernance(w http.ResponseWriter, r *http.Request) {
 	s.execGovernance(w, r, domain.OpApproval)
+}
+func (s *Server) extendGovernance(w http.ResponseWriter, r *http.Request) {
+	s.execGovernance(w, r, domain.OpExtension)
 }
 func (s *Server) suspendGovernance(w http.ResponseWriter, r *http.Request) {
 	s.execGovernance(w, r, domain.OpSuspension)
@@ -171,9 +180,16 @@ func (s *Server) execGovernance(w http.ResponseWriter, r *http.Request, op domai
 		if req.TargetRetention != "" {
 			cmd.TargetRetention = domain.RetentionClass(req.TargetRetention)
 		}
+		if req.SuccessorID != "" {
+			cmd.SuccessorID = req.SuccessorID
+		}
 	}
 	if op == domain.OpArchiving && cmd.TargetRetention == "" {
 		writeProblem(w, r, http.StatusBadRequest, "bad request", "target_retention is required for archive")
+		return
+	}
+	if op == domain.OpExtension && cmd.SuccessorID == "" {
+		writeProblem(w, r, http.StatusBadRequest, "bad request", "successor_id is required for extend")
 		return
 	}
 

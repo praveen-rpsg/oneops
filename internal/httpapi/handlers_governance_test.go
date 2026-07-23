@@ -251,3 +251,52 @@ func TestGovernance_NotWiredReturns500(t *testing.T) {
 		t.Fatalf("status = %d, want 500", rec.Code)
 	}
 }
+
+// M4 WP-2 — the extend endpoint (§8 Extension). Transport concerns only: the
+// successor is required and is propagated verbatim to the engine, which owns
+// every constitutional decision.
+func TestGovernance_ExtendRequiresSuccessor(t *testing.T) {
+	gov := &fakeGov{res: governance.Result{RowVersion: 1}}
+	h := newGovAPI(t, false, gov)
+
+	// Missing successor_id -> 400, engine not called.
+	rec := do(h, http.MethodPost, "/v1/governance/c1/extend", nil, idemHdr("op-e"))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if gov.calls != 0 {
+		t.Fatalf("engine called %d times for invalid extend, want 0", gov.calls)
+	}
+
+	// With successor_id -> propagated to the command as an Extension operation.
+	rec = do(h, http.MethodPost, "/v1/governance/c1/extend",
+		map[string]string{"successor_id": "c2"}, idemHdr("op-e"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if gov.lastCmd.Operation != domain.OpExtension {
+		t.Fatalf("Operation = %q, want %q", gov.lastCmd.Operation, domain.OpExtension)
+	}
+	if gov.lastCmd.SuccessorID != "c2" {
+		t.Fatalf("SuccessorID = %q, want c2", gov.lastCmd.SuccessorID)
+	}
+}
+
+// The response surfaces the successor so a client can confirm what was recorded.
+func TestGovernance_ExtendResponseCarriesSuccessor(t *testing.T) {
+	gov := &fakeGov{res: governance.Result{RowVersion: 4, SuccessorID: "c2"}}
+	h := newGovAPI(t, false, gov)
+
+	rec := do(h, http.MethodPost, "/v1/governance/c1/extend",
+		map[string]string{"successor_id": "c2"}, idemHdr("op-e"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var resp governanceResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.SuccessorID != "c2" {
+		t.Fatalf("successor_id = %q, want c2", resp.SuccessorID)
+	}
+}

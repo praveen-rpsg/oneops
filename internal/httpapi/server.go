@@ -156,6 +156,7 @@ func (s *Server) Router() http.Handler {
 		// require write; deletion requires delete. All logic lives in the engine.
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/ratify", s.ratifyGovernance)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/approve", s.approveGovernance)
+		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/extend", s.extendGovernance)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/suspend", s.suspendGovernance)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/deprecate", s.deprecateGovernance)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/withdraw", s.withdrawGovernance)

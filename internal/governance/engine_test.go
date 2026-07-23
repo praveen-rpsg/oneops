@@ -30,6 +30,12 @@ type mockStore struct {
 	depCount    int
 	removeErr   error
 	removeCalls int
+	edgeErr     error
+	edgeCalls   int
+	lastEdge    struct {
+		From, To string
+		Kind     domain.EdgeKind
+	}
 }
 
 func (m *mockStore) Begin(context.Context) (pgx.Tx, error) {
@@ -49,6 +55,11 @@ func (m *mockStore) CountDependents(context.Context, pgx.Tx, string) (int, error
 func (m *mockStore) RemoveObject(context.Context, pgx.Tx, string, int64) error {
 	m.removeCalls++
 	return m.removeErr
+}
+func (m *mockStore) RecordEdge(_ context.Context, _ pgx.Tx, from, to string, kind domain.EdgeKind) error {
+	m.edgeCalls++
+	m.lastEdge.From, m.lastEdge.To, m.lastEdge.Kind = from, to, kind
+	return m.edgeErr
 }
 
 type denyAuthorizer struct{ err error }

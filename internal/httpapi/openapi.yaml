@@ -236,6 +236,39 @@ paths:
         '409': { $ref: '#/components/responses/Problem' }
         '412': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
+  /v1/governance/{id}/extend:
+    post:
+      summary: Record that a successor extends this configuration object
+      description: >
+        Configuration State Model §8 Extension. The successor depends on or
+        inherits this object; this object's dimensions are UNCHANGED — in
+        particular its Authority is not demoted. Extension is not Replacement.
+      operationId: extendGovernance
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/IfMatch' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [successor_id]
+              properties:
+                successor_id:
+                  type: string
+                  description: The configuration object that extends this one.
+      responses:
+        '200': { $ref: '#/components/responses/GovernanceResult' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
   /v1/governance/{id}/suspend:
     post:
       summary: Suspend a configuration object
