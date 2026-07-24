@@ -18,9 +18,15 @@ resources:
     cpu: 500m
     memory: 256Mi
 
+# The observability listener. Not published through the Service: scrape it
+# directly from the pod, or add a headless Service scoped to Prometheus.
+metrics:
+  port: 9090
+
 env:
   ONEOPS_ENV: dev
   ONEOPS_HTTP_ADDR: ":8080"
+  ONEOPS_METRICS_ADDR: ":9090"
 
 podAnnotations: {}
 nodeSelector: {}

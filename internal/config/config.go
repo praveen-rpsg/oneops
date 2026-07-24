@@ -17,7 +17,14 @@ const (
 
 // Config holds the resolved runtime configuration.
 type Config struct {
-	HTTPAddr      string
+	HTTPAddr string
+	// MetricsAddr binds the observability listener. /metrics is served there
+	// and not on the public listener, so scrape exposure is decided by
+	// deployment topology rather than by an authentication check Prometheus
+	// would have to be taught to satisfy. Empty keeps /metrics on the public
+	// listener, which is the pre-existing behaviour and is intended only for
+	// local development.
+	MetricsAddr   string
 	Env           string
 	ShutdownGrace int
 
@@ -89,6 +96,13 @@ func (c *Config) validateProduction() error {
 	if strings.Contains(c.DatabaseURL, "sslmode=disable") {
 		problems = append(problems, "ONEOPS_DB_URL disables TLS (sslmode=disable)")
 	}
+	if c.MetricsAddr == "" {
+		// /metrics discloses audit-integrity state, per-route request volumes
+		// and dependency health to anyone who can reach the public listener.
+		// None of it is tenant data, but it tells an attacker when audit
+		// verification is failing.
+		problems = append(problems, "ONEOPS_METRICS_ADDR is empty, which serves /metrics on the public listener")
+	}
 	if len(problems) > 0 {
 		return fmt.Errorf("insecure production configuration: %s", strings.Join(problems, "; "))
 	}
@@ -99,6 +113,7 @@ func (c *Config) validateProduction() error {
 func Load() (*Config, error) {
 	c := &Config{
 		HTTPAddr:        getEnv("ONEOPS_HTTP_ADDR", ":8080"),
+		MetricsAddr:     getEnv("ONEOPS_METRICS_ADDR", ":9090"),
 		Env:             getEnv("ONEOPS_ENV", "dev"),
 		ShutdownGrace:   getEnvInt("ONEOPS_SHUTDOWN_GRACE_SECONDS", 10),
 		DatabaseURL:     getEnv("ONEOPS_DB_URL", "postgres://oneops:dev@localhost:5432/oneops?sslmode=disable"),

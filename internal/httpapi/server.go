@@ -129,7 +129,14 @@ func (s *Server) Router() http.Handler {
 	r.Get("/healthz", s.health.Live)
 	r.Get("/readyz", s.health.Ready)
 	r.Get("/auth/config", s.serveAuthConfig)
-	r.Handle("/metrics", s.metrics.Handler())
+	// /metrics rides the public listener only when no separate observability
+	// listener is configured. It discloses audit-integrity state, per-route
+	// request volumes and dependency health — no tenant data, but enough to
+	// tell an attacker when audit verification is failing. Production config
+	// validation refuses an empty ONEOPS_METRICS_ADDR.
+	if s.cfg.MetricsAddr == "" {
+		r.Handle("/metrics", s.metrics.Handler())
+	}
 	r.Get("/openapi.yaml", serveOpenAPI)
 	r.Get("/docs", serveDocs)
 
@@ -253,6 +260,28 @@ func (s *Server) Router() http.Handler {
 	})
 
 	return otelhttp.NewHandler(r, "oneops-controlplane")
+}
+
+// MetricsServer builds the observability listener, or nil when /metrics is
+// served on the public listener instead.
+//
+// It carries no authentication and must not be exposed by the public ingress:
+// the isolation is the bind address. Kept deliberately separate from Router so
+// nothing tenant-facing can be added to it by accident.
+func (s *Server) MetricsServer() *http.Server {
+	if s.cfg.MetricsAddr == "" {
+		return nil
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", s.metrics.Handler())
+	return &http.Server{
+		Addr:              s.cfg.MetricsAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 }
 
 // HTTPServer builds an *http.Server with production timeouts.

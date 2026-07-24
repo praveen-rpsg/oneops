@@ -40,9 +40,27 @@ func TestValidateProduction_AllowsSecureProd(t *testing.T) {
 		AuthEnabled: true,
 		JWTHMACKey:  "a-real-strong-secret",
 		DatabaseURL: "postgres://u:p@db.internal:5432/oneops?sslmode=require",
+		MetricsAddr: ":9090",
 	}
 	if err := c.validateProduction(); err != nil {
 		t.Fatalf("secure production config rejected: %v", err)
+	}
+}
+
+// /metrics on the public listener discloses audit-integrity state, per-route
+// request volumes and dependency health to any unauthenticated caller. None of
+// it is tenant data, but it tells an attacker when audit verification is
+// failing. Production must bind observability separately.
+func TestValidateProduction_RejectsMetricsOnPublicListener(t *testing.T) {
+	c := &Config{
+		Env:         "production",
+		AuthEnabled: true,
+		JWTHMACKey:  "a-real-strong-secret",
+		DatabaseURL: "postgres://u:p@db.internal:5432/oneops?sslmode=require",
+		MetricsAddr: "",
+	}
+	if err := c.validateProduction(); err == nil {
+		t.Fatal("production must reject serving /metrics on the public listener")
 	}
 }
 

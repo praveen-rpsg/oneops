@@ -163,6 +163,20 @@ func run(logger *slog.Logger) error {
 
 	httpServer := srv.HTTPServer()
 
+	// Observability listener. Bound separately so /metrics is reachable by the
+	// scraper without being reachable through the public ingress — exposure
+	// becomes a deployment decision rather than an authentication check
+	// Prometheus would have to be taught to satisfy.
+	metricsServer := srv.MetricsServer()
+	if metricsServer != nil {
+		go func() {
+			logger.Info("observability listener started", "addr", cfg.MetricsAddr)
+			if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("observability listener failed", "err", err)
+			}
+		}()
+	}
+
 	logger.Info("starting oneops control plane",
 		"version", version.Version, "commit", version.Commit,
 		"addr", cfg.HTTPAddr, "env", cfg.Env)
@@ -348,6 +362,9 @@ func run(logger *slog.Logger) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.ShutdownGrace)*time.Second)
 	defer cancel()
 
+	if metricsServer != nil {
+		_ = metricsServer.Shutdown(shutdownCtx)
+	}
 	err = httpServer.Shutdown(shutdownCtx)
 	execMetrics.SetShutdownDuration(time.Since(shutdownStart))
 	if err != nil {
