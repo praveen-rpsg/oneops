@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/rpsg/oneops/internal/domain"
 )
@@ -379,5 +382,130 @@ func TestTenantRoutesWithoutRegistry(t *testing.T) {
 		if rec.Code != http.StatusNotImplemented {
 			t.Errorf("%s %s = %d, want 501", tc.method, tc.path, rec.Code)
 		}
+	}
+}
+
+// mintRoleTenantToken mints a token asserting both a tenant and arbitrary
+// roles, which is what a customer's own identity provider can do.
+func mintRoleTenantToken(t *testing.T, external string, roles []string) string {
+	t.Helper()
+	claims := jwt.MapClaims{
+		"sub": "u", "iss": tIss, "aud": tAud,
+		"exp": time.Now().Add(time.Hour).Unix(), "roles": roles,
+	}
+	if external != "" {
+		claims["tenant"] = external
+	}
+	s, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(tSecret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// A tenant administrator must not reach the tenant registry.
+//
+// Against the running service, one could list every customer's slug and
+// external identifier, register tenants binding identifiers of its choosing,
+// and suspend a different customer — which locked that customer out of the
+// platform entirely (403 "tenant is suspended" on every request).
+func TestTenantAdminCannotAdministerTenants(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(
+		activeTenant("t-acme", "ext-acme", "acme"),
+		activeTenant("t-globex", "ext-globex", "globex"),
+	))
+	token := mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"})
+
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodGet, "/v1/admin/tenants", ""},
+		{http.MethodPost, "/v1/admin/tenants", `{"slug":"shadow","name":"Shadow"}`},
+		{http.MethodPatch, "/v1/admin/tenants/t-globex", `{"status":"suspended"}`},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s = %d, want 403 for a tenant administrator",
+				tc.method, tc.path, rec.Code)
+		}
+	}
+}
+
+// Roles arrive in a bearer token, so a customer's identity provider can assert
+// the platform role. The tenant cannot be forged the same way: it is resolved
+// against the registry. Platform operations therefore require both, and this
+// is the case that proves the second condition carries its own weight.
+func TestForgedPlatformRoleFromATenantIsRefused(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/tenants", nil)
+	req.Header.Set("Authorization", "Bearer "+
+		mintRoleTenantToken(t, "ext-acme", []string{"oneops-platform-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("a tenant-scoped caller asserting the platform role = %d, want 403", rec.Code)
+	}
+	// The refusal must not disclose that the roles were sufficient and only the
+	// tenant was wrong, which would tell an attacker exactly what to change.
+	if strings.Contains(strings.ToLower(rec.Body.String()), "tenant") {
+		t.Errorf("the refusal distinguishes the failing condition: %s", rec.Body.String())
+	}
+}
+
+// Resolving to the system tenant is the default for a token asserting no
+// tenant, so that condition alone must not authorise platform administration.
+func TestSystemTenantWithoutPlatformRoleIsRefused(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants())
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/tenants", nil)
+	req.Header.Set("Authorization", "Bearer "+
+		mintRoleTenantToken(t, "", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("system tenant without the platform role = %d, want 403", rec.Code)
+	}
+}
+
+// The operator, holding both conditions, still works.
+func TestPlatformAdminOnSystemTenantIsAdmitted(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/tenants", nil)
+	req.Header.Set("Authorization", "Bearer "+
+		mintRoleTenantToken(t, "", []string{"oneops-platform-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("platform administrator = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Tenant-scoped administration is unaffected: a tenant administrator still
+// administers its own subsystems, where row-level security confines the result.
+func TestTenantAdminRetainsTenantScopedAdministration(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/webhooks", nil)
+	req.Header.Set("Authorization", "Bearer "+
+		mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	// Not wired in this harness, so 501 — the point is that authorization let
+	// it through rather than refusing with 403.
+	if rec.Code == http.StatusForbidden {
+		t.Fatal("a tenant administrator lost administration inside its own tenant")
 	}
 }

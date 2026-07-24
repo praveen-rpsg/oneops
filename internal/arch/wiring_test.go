@@ -210,3 +210,95 @@ func TestWiringExemptionsRemainJustified(t *testing.T) {
 		}
 	}
 }
+
+// Authorization scope is a property of routing.
+//
+// Operations on the tenant registry are platform operations: the registry is
+// exempt from row-level security by necessity, so the middleware guarding it is
+// the only control between a caller and every customer's record. They were
+// routed under PermAdmin — the same permission that administers webhooks inside
+// a tenant — and any tenant administrator could therefore enumerate every
+// customer, register tenants binding identifiers of its choosing, and suspend a
+// different customer outright. Verified against the running service; see
+// ADR-AUTHZ-001.
+//
+// This asserts the routing, not the permission constant, because the defect was
+// that a correct permission check guarded the wrong scope.
+const routerFile = "../../internal/httpapi/server.go"
+
+// platformHandlers must be reachable only through requirePlatformAdmin.
+var platformHandlers = []string{"listTenants", "createTenant", "patchTenant"}
+
+func TestPlatformRoutesRequirePlatformAdmin(t *testing.T) {
+	path, err := filepath.Abs(routerFile)
+	if err != nil {
+		t.Fatalf("resolve router: %v", err)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse router: %v", err)
+	}
+
+	// Handler name -> the middleware chain its route was registered With().
+	guardOf := map[string]string{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		// Matches rt.With(<guard>).Method("/path", s.<handler>)
+		method, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		with, ok := method.X.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		withSel, ok := with.Fun.(*ast.SelectorExpr)
+		if !ok || withSel.Sel.Name != "With" || len(with.Args) == 0 {
+			return true
+		}
+		guard := exprText(with.Args[0])
+		for _, arg := range call.Args {
+			if sel, ok := arg.(*ast.SelectorExpr); ok {
+				guardOf[sel.Sel.Name] = guard
+			}
+		}
+		return true
+	})
+
+	for _, handler := range platformHandlers {
+		guard, routed := guardOf[handler]
+		if !routed {
+			t.Errorf("%s is not routed in %s; if it was renamed, update platformHandlers",
+				handler, routerFile)
+			continue
+		}
+		if !strings.Contains(guard, "requirePlatformAdmin") {
+			t.Errorf("%s is guarded by %q, not requirePlatformAdmin. Operations on the "+
+				"tenant registry are platform operations: row-level security does not "+
+				"confine them, so a tenant-scoped permission would let any tenant "+
+				"administrator enumerate and suspend other customers.", handler, guard)
+		}
+	}
+}
+
+// exprText renders a guard expression well enough to identify it.
+func exprText(e ast.Expr) string {
+	switch v := e.(type) {
+	case *ast.SelectorExpr:
+		return exprText(v.X) + "." + v.Sel.Name
+	case *ast.Ident:
+		return v.Name
+	case *ast.CallExpr:
+		var args []string
+		for _, a := range v.Args {
+			args = append(args, exprText(a))
+		}
+		return exprText(v.Fun) + "(" + strings.Join(args, ",") + ")"
+	default:
+		return "?"
+	}
+}

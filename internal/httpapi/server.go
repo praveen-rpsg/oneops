@@ -196,11 +196,21 @@ func (s *Server) Router() http.Handler {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/report", s.adminReport)
 
 		// Tenant registry — the isolation boundary every other row belongs to.
-		// Administering tenants is strictly more privileged than administering
-		// data inside one, so these require admin like the rest of /admin.
-		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/tenants", s.listTenants)
-		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/tenants", s.createTenant)
-		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/tenants/{id}", s.patchTenant)
+		//
+		// These are platform operations, not tenant operations, and they are the
+		// one part of /admin that row-level security does not confine: the
+		// registry is exempt by necessity, since resolving a token to a tenant
+		// must precede binding one (ADR-TENANCY-001 §4).
+		//
+		// They previously required PermAdmin, the same permission that
+		// administers webhooks inside a tenant. Any tenant administrator could
+		// therefore enumerate every customer, register tenants binding external
+		// identifiers of its choosing, and suspend a different customer — locking
+		// them out of the platform entirely. Verified against the running
+		// service; see ADR-AUTHZ-001.
+		rt.With(s.requirePlatformAdmin).Get("/admin/tenants", s.listTenants)
+		rt.With(s.requirePlatformAdmin).Post("/admin/tenants", s.createTenant)
+		rt.With(s.requirePlatformAdmin).Patch("/admin/tenants/{id}", s.patchTenant)
 
 		// Event delivery — webhook administration (admin permission).
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/webhooks", s.listWebhooks)
