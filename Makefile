@@ -31,6 +31,15 @@ build: ## Build the control-plane binary into ./bin
 run: ## Run the control plane locally
 	@$(DOTENV) go run ./cmd/controlplane
 
+db-reset: ## Drop and recreate the local dev schema (destructive; dev only)
+	@echo "Resetting the local development database. This destroys all local data."
+	@echo "audit_event is append-only, so DROP SCHEMA is the only way to clear"
+	@echo "audit history — which is why this target exists and why it is dev-only."
+	@docker exec oneops-postgres psql -U oneops -d oneops -q \
+		-c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;' \
+		-c 'GRANT ALL ON SCHEMA public TO oneops; GRANT ALL ON SCHEMA public TO public;'
+	@echo "Done. Migrations re-run on next control-plane start."
+
 test: ## Run all tests with the race detector and coverage
 	go test ./... -race -cover
 
