@@ -39,9 +39,10 @@ func (s *PolicyStore) Create(ctx context.Context, p policy.Policy) error {
 		return fmt.Errorf("marshal condition: %w", err)
 	}
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO policy (`+policyCols+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now())`,
-		p.ID, p.Name, p.Enabled, cond, p.Action.Type, actionConfig(p.Action.Config), p.MaxRetries)
+		INSERT INTO policy (`+policyCols+`, tenant_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now(),$8)`,
+		p.ID, p.Name, p.Enabled, cond, p.Action.Type, actionConfig(p.Action.Config), p.MaxRetries,
+		domain.TenantIDFrom(ctx))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return domain.ErrConflict

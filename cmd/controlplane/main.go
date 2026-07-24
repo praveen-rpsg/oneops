@@ -193,13 +193,26 @@ func run(logger *slog.Logger) error {
 	// Enterprise event delivery: a relay tails the committed audit log and a
 	// dispatcher delivers signed webhooks. Both are decoupled from the
 	// constitutional path (ADR-AUDIT-005) — they only read committed audit events.
+	// Two instances over the same tables, deliberately.
+	//
+	// The relay and dispatcher below must see every tenant's subscriptions from
+	// one process, so they take the owning pool and its RLS bypass. The
+	// administration API takes the tenant-scoped pool, so one tenant cannot
+	// read, re-secret, disable or delete another tenant's webhooks.
+	//
+	// A single shared instance previously served both, which meant the admin
+	// API inherited the workers' bypass: any authenticated tenant could list
+	// every tenant's endpoint URLs, rotate their HMAC secrets (returned in the
+	// response, enabling forged signed deliveries) and disable their delivery
+	// entirely. Verified against the running service before this change.
 	webhookStore := postgres.NewWebhookStore(pool)
+	webhookAdminStore := postgres.NewWebhookStore(appPool)
 	eventMetrics := events.NewPromMetrics(metrics.Registry())
 	relay := events.NewRelay(auditStore, webhookStore, webhookStore, webhookStore, eventMetrics, logger, events.RelayConfig{})
 	dispatcher := events.NewDispatcher(webhookStore, webhookStore, &http.Client{Timeout: 15 * time.Second}, eventMetrics, logger, events.DispatcherConfig{})
 	go func() { _ = relay.Run(ctx) }()
 	go func() { _ = dispatcher.Run(ctx) }()
-	srv.SetWebhooks(webhookStore, func(ctx context.Context, wh events.Webhook) (events.DeliveryStatus, error) {
+	srv.SetWebhooks(webhookAdminStore, func(ctx context.Context, wh events.Webhook) (events.DeliveryStatus, error) {
 		return dispatcher.Deliver(ctx, events.Delivery{
 			ID:        "test_" + wh.ID,
 			WebhookID: wh.ID,
@@ -217,20 +230,24 @@ func run(logger *slog.Logger) error {
 	})
 	go func() { _ = replayWorker.Run(ctx) }()
 	go func() { _ = retentionWorker.Run(ctx) }()
-	srv.SetWebhookConsume(webhookStore, webhookStore)
+	srv.SetWebhookConsume(webhookAdminStore, webhookAdminStore)
 
 	// Policy automation (PRS-020): an isolated event consumer. It tails the
 	// committed audit log with its own cursor, evaluates policies, and runs
 	// pluggable actions asynchronously. Failures never affect Governance, Audit,
 	// Replay, or Event Delivery.
+	// Split for the same reason as the webhook stores above: the consumer and
+	// executor process every tenant, while the administration API must be
+	// confined to the caller's tenant.
 	policyStore := postgres.NewPolicyStore(pool)
+	policyAdminStore := postgres.NewPolicyStore(appPool)
 	policyMetrics := policy.NewPromMetrics(metrics.Registry())
 	policyRegistry := policy.DefaultRegistry(&http.Client{Timeout: 15 * time.Second}, nil, nil, nil, logger)
 	policyConsumer := policy.NewConsumer(auditStore, policyStore, policyStore, policyStore, policyMetrics, logger, policy.ConsumerConfig{})
 	policyExecutor := policy.NewExecutor(policyStore, policyStore, policyRegistry, policyMetrics, logger, policy.ExecutorConfig{})
 	go func() { _ = policyConsumer.Run(ctx) }()
 	go func() { _ = policyExecutor.Run(ctx) }()
-	srv.SetPolicies(policyStore, func(ctx context.Context, p policy.Policy) (policy.ExecutionStatus, error) {
+	srv.SetPolicies(policyAdminStore, func(ctx context.Context, p policy.Policy) (policy.ExecutionStatus, error) {
 		ex := policy.Execution{
 			ID: "poltest_" + p.ID, PolicyID: p.ID, Status: policy.ExecPending,
 			Event: policy.Event{Operation: "test", CfgID: p.ID, EventID: "test"},

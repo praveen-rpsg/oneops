@@ -34,9 +34,10 @@ const webhookCols = `id, url, secret, enabled, operations, resources, max_retrie
 // Create inserts a webhook.
 func (s *WebhookStore) Create(ctx context.Context, w events.Webhook) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO webhook (`+webhookCols+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now())`,
-		w.ID, w.URL, w.Secret, w.Enabled, textArray(w.Operations), textArray(w.Resources), w.MaxRetries)
+		INSERT INTO webhook (`+webhookCols+`, tenant_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now(),$8)`,
+		w.ID, w.URL, w.Secret, w.Enabled, textArray(w.Operations), textArray(w.Resources), w.MaxRetries,
+		domain.TenantIDFrom(ctx))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return domain.ErrConflict

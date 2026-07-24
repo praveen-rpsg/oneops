@@ -4,12 +4,15 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
 
 	"github.com/rpsg/oneops/internal/domain"
+	"github.com/rpsg/oneops/internal/events"
+	"github.com/rpsg/oneops/internal/policy"
 )
 
 // tenantScopedPool returns a pool that assumes oneops_app and binds the tenant
@@ -318,5 +321,107 @@ func TestRLS_TenantCanWriteThroughRepository(t *testing.T) {
 	}
 	if got.Artifact != "repo-write.md" {
 		t.Errorf("round-trip mismatch: %+v", got)
+	}
+}
+
+// Webhook subscriptions are tenant data, not platform data.
+//
+// The administration API and the delivery workers shared one store instance,
+// so the API inherited the workers' RLS bypass. Verified against the running
+// service: a second tenant could list every tenant's endpoint URLs, rotate
+// their HMAC secrets — returned in the response, so forged signed deliveries
+// became possible — and disable their delivery. Read, credential disclosure
+// and denial of service across the tenant boundary from one wiring mistake.
+func TestRLS_WebhooksAreTenantIsolated(t *testing.T) {
+	priv := testPool(t)
+	ctx := context.Background()
+
+	tenants := NewTenantStore(priv)
+	a, err := tenants.Create(ctx, newTenant("rls-wh-a", "ext-rls-wh-a"))
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+
+	scoped := tenantScopedPool(t)
+	sysStore := NewWebhookStore(scoped)
+	otherStore := NewWebhookStore(scoped)
+
+	sysCtx := domain.WithTenant(ctx, &domain.Tenant{
+		TenantID: domain.SystemTenantID, Status: domain.TenantActive})
+	if err := sysStore.Create(sysCtx, events.Webhook{
+		ID: "wh_sys_secret", URL: "https://system-internal.example.com/hook",
+		Secret: "system-hmac-key", Enabled: true, MaxRetries: 5,
+	}); err != nil {
+		t.Fatalf("system creates webhook: %v", err)
+	}
+
+	// The other tenant must not see it.
+	aCtx := domain.WithTenant(ctx, a)
+	list, err := otherStore.List(aCtx)
+	if err != nil {
+		t.Fatalf("list as other tenant: %v", err)
+	}
+	for _, w := range list {
+		if w.ID == "wh_sys_secret" {
+			t.Fatalf("tenant %s can see another tenant's webhook %q (url %q)",
+				a.TenantID, w.ID, w.URL)
+		}
+	}
+
+	// Nor fetch it directly, which is what the PATCH and DELETE handlers do
+	// before mutating — the path that allowed secret rotation.
+	if _, err := otherStore.Get(aCtx, "wh_sys_secret"); err == nil {
+		t.Fatal("another tenant could fetch the webhook, so it could re-secret or disable it")
+	}
+
+	// The owner still sees its own.
+	own, err := sysStore.List(sysCtx)
+	if err != nil {
+		t.Fatalf("owner list: %v", err)
+	}
+	found := false
+	for _, w := range own {
+		if w.ID == "wh_sys_secret" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the owning tenant must still see its own webhook")
+	}
+}
+
+// Policies carry conditions and action configuration, which can embed
+// endpoints and credentials. Same wiring, same exposure.
+func TestRLS_PoliciesAreTenantIsolated(t *testing.T) {
+	priv := testPool(t)
+	ctx := context.Background()
+
+	tenants := NewTenantStore(priv)
+	a, err := tenants.Create(ctx, newTenant("rls-pol-a", "ext-rls-pol-a"))
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+
+	scoped := tenantScopedPool(t)
+	store := NewPolicyStore(scoped)
+
+	sysCtx := domain.WithTenant(ctx, &domain.Tenant{
+		TenantID: domain.SystemTenantID, Status: domain.TenantActive})
+	if err := store.Create(sysCtx, policy.Policy{
+		ID: "pol_sys_secret", Name: "system-only", Enabled: true, MaxRetries: 3,
+		Action: policy.ActionSpec{Type: "webhook",
+			Config: json.RawMessage(`{"url":"https://system-internal.example.com/policy"}`)},
+	}); err != nil {
+		t.Fatalf("system creates policy: %v", err)
+	}
+
+	list, err := store.List(domain.WithTenant(ctx, a))
+	if err != nil {
+		t.Fatalf("list as other tenant: %v", err)
+	}
+	for _, p := range list {
+		if p.ID == "pol_sys_secret" {
+			t.Fatalf("tenant %s can see another tenant's policy %q", a.TenantID, p.ID)
+		}
 	}
 }
