@@ -3,6 +3,10 @@
 coverage.out
 coverage.html
 
+# database dumps — never commit data
+/backups/
+*.dump
+
 # env & secrets
 .env
 *.local

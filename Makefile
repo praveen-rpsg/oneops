@@ -6,10 +6,22 @@ LDFLAGS := -s -w -X $(PKG)/pkg/version.Version=$(VERSION) -X $(PKG)/pkg/version.
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down build run test test-integration cover lint fmt vet tidy docker gen migrate-hash migrate-validate clean
+.PHONY: help up down build run test test-integration cover lint fmt vet tidy docker gen migrate-hash migrate-validate clean db-backup db-restore dr-drill db-reset web web-test
 
 MIGRATIONS_DIR := internal/store/migrate/sql
-ATLAS := docker run --rm -v $(PWD):/src -w /src arigaio/atlas:latest
+ATLAS := docker run --rm -v "$(PWD)":/src -w /src arigaio/atlas:latest
+
+# Backup tooling runs in a container pinned to the server's major version.
+# pg_dump refuses to dump a server newer than itself, so a developer's
+# Homebrew client (14.x on this machine) cannot back up the 16.x server. In
+# production the same constraint applies, which is why the backup CronJob must
+# use the postgres image matching the database rather than a generic runner.
+# Attaching to the compose network lets the container reach postgres by name,
+# so this works identically regardless of host port remapping.
+PG_IMAGE   := postgres:16
+PG_NETWORK := oneops_default
+PG_URL     := postgres://oneops:dev@oneops-postgres:5432/oneops?sslmode=disable
+PGTOOLS    := docker run --rm --network $(PG_NETWORK) -v "$(PWD)":/src -w /src -e "ONEOPS_DB_URL=$(PG_URL)" $(PG_IMAGE)
 
 # Load .env (gitignored) so local runs hit this machine's port mapping rather
 # than the compose defaults, which other projects here already occupy.
@@ -30,6 +42,12 @@ build: ## Build the control-plane binary into ./bin
 
 run: ## Run the control plane locally
 	@$(DOTENV) go run ./cmd/controlplane
+
+db-backup: ## Take a verified logical backup into ./backups
+	@$(PGTOOLS) scripts/db-backup.sh /src/backups
+
+dr-drill: ## Back up, restore into a throwaway database, and verify (see docs/disaster-recovery.md)
+	@$(PGTOOLS) scripts/dr-drill.sh
 
 db-reset: ## Drop and recreate the local dev schema (destructive; dev only)
 	@echo "Resetting the local development database. This destroys all local data."
