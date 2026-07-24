@@ -44,25 +44,20 @@ type Webhook struct {
 	UpdatedAt  time.Time
 }
 
-// Matches reports whether this webhook subscribes to the given event. A disabled
-// webhook matches nothing; empty Operations/Resources mean "all".
+// OwnerTenantID implements domain.Owned.
+func (w Webhook) OwnerTenantID() string { return w.TenantID }
+
+// Matches reports whether this webhook subscribes to the given event — that is,
+// whether the event is the *kind* of thing it wants. A disabled webhook matches
+// nothing; empty Operations/Resources mean "all".
 //
-// The tenant comparison is first and is not optional. The relay cross-products
-// every enabled subscription against every chain it can see, and it can see all
-// of them — so without this check a subscription with no Operations and no
-// Resources filter, which is the documented way to subscribe to everything,
-// received every other tenant's governance events signed with its own HMAC
-// secret. Verified against the running service: an attacker's endpoint received
-// the victim's chain_id, cfg_id, operation, actor and event_id.
-//
-// Both sides are compared as empty-safe: an event or subscription that somehow
-// carries no owner matches nothing, so a missing value fails closed rather than
-// matching everything.
+// It deliberately does not compare tenants. Ownership is enforced by
+// domain.FanOut before this is consulted, so a predicate written here cannot
+// widen the tenant boundary however carelessly it is expressed. Callers must
+// reach subscriptions through FanOut rather than calling Matches directly
+// across a privileged read; internal/arch enforces that.
 func (w Webhook) Matches(ev Event) bool {
 	if !w.Enabled {
-		return false
-	}
-	if w.TenantID == "" || ev.TenantID == "" || w.TenantID != ev.TenantID {
 		return false
 	}
 	if len(w.Operations) > 0 && !contains(w.Operations, ev.Operation) {
@@ -87,6 +82,9 @@ type Event struct {
 	CfgID       string // per-object chain: equals ChainID
 	OccurredAt  time.Time
 }
+
+// OwnerTenantID implements domain.Owned.
+func (e Event) OwnerTenantID() string { return e.TenantID }
 
 // eventFrom projects a committed audit event into a delivery Event.
 func eventFrom(a domain.AuditEvent) Event {

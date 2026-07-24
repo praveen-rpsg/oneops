@@ -17,6 +17,9 @@ import (
 // Event is a committed governance event projected from an audit event and
 // evaluated by policy conditions. Conditions match ONLY this published event.
 type Event struct {
+	// TenantID owns the event. Read from the audit row, never inferred: the
+	// consumer tails every tenant's chains on a privileged connection.
+	TenantID    string
 	EventID     string
 	OperationID string
 	Operation   string
@@ -33,7 +36,8 @@ type Event struct {
 // into matchable metadata. It reads only committed data; it reconstructs nothing.
 func eventFrom(a domain.AuditEvent) Event {
 	ev := Event{
-		EventID: a.EventID, OperationID: a.OperationID, Operation: string(a.Operation),
+		TenantID: a.TenantID,
+		EventID:  a.EventID, OperationID: a.OperationID, Operation: string(a.Operation),
 		Actor: a.Actor, CfgID: a.ChainID, Seq: a.Seq, OccurredAt: a.OccurredAt,
 		Metadata: map[string]string{},
 	}
@@ -109,7 +113,10 @@ type ActionSpec struct {
 // Policy is an operator-defined automation: when a committed event matches
 // Condition, Action is executed asynchronously.
 type Policy struct {
-	ID         string
+	ID string
+	// TenantID owns the policy. Compared against the event's owner by
+	// domain.FanOut before the condition is evaluated.
+	TenantID   string
 	Name       string
 	Enabled    bool
 	Condition  Condition
@@ -118,6 +125,12 @@ type Policy struct {
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 }
+
+// OwnerTenantID implements domain.Owned.
+func (p Policy) OwnerTenantID() string { return p.TenantID }
+
+// OwnerTenantID implements domain.Owned.
+func (e Event) OwnerTenantID() string { return e.TenantID }
 
 // ExecutionStatus is the lifecycle state of a policy execution.
 type ExecutionStatus string

@@ -418,40 +418,60 @@ func TestDispatcher_MetricsRecorded(t *testing.T) {
 //
 // Verified against the running service before the fix: an attacker's endpoint
 // received the victim's chain_id, cfg_id, operation, actor and event_id.
-func TestMatches_RequiresSameTenant(t *testing.T) {
+func TestFanOut_RequiresSameTenant(t *testing.T) {
 	victimEvent := Event{
 		TenantID: "t-victim", ChainID: "c-victim", CfgID: "c-victim",
 		Operation: "ratification", Seq: 1,
 	}
-
-	// The unfiltered subscription — the shape that made this total.
-	attacker := Webhook{ID: "atk", TenantID: "t-attacker", Enabled: true, MaxRetries: 1}
-	if attacker.Matches(victimEvent) {
-		t.Fatal("a subscription matched another tenant's event; the relay would deliver it")
+	subs := []Webhook{
+		// The unfiltered subscription — the shape that made this total.
+		{ID: "atk", TenantID: "t-attacker", Enabled: true, MaxRetries: 1},
+		{ID: "own", TenantID: "t-victim", Enabled: true, MaxRetries: 1},
 	}
 
-	// The owner still receives its own.
-	owner := Webhook{ID: "own", TenantID: "t-victim", Enabled: true, MaxRetries: 1}
-	if !owner.Matches(victimEvent) {
-		t.Error("the owning tenant must still receive its own events")
+	got := domain.FanOut(victimEvent, subs, func(w Webhook) bool { return w.Matches(victimEvent) })
+
+	for _, w := range got {
+		if w.TenantID != victimEvent.TenantID {
+			t.Fatalf("fan-out selected %q, owned by %q, for an event owned by %q",
+				w.ID, w.TenantID, victimEvent.TenantID)
+		}
+	}
+	if len(got) != 1 || got[0].ID != "own" {
+		t.Fatalf("fan-out = %v, want exactly the owning subscription", got)
 	}
 }
 
-// A missing owner on either side must match nothing. Treating an absent tenant
+// Matches decides what, never who. Left alone it selects another tenant's
+// event, which is precisely why ownership is enforced above it rather than
+// inside it — a predicate cannot widen the boundary it is not consulted about.
+func TestMatches_DecidesWhatNotWho(t *testing.T) {
+	foreign := Event{TenantID: "t-victim", ChainID: "c", CfgID: "c", Operation: "ratification"}
+	attacker := Webhook{ID: "atk", TenantID: "t-attacker", Enabled: true}
+
+	if !attacker.Matches(foreign) {
+		t.Error("Matches should still answer the 'what' question on its own")
+	}
+	if domain.SameOwner(attacker, foreign) {
+		t.Error("SameOwner must reject subscriptions owned by another tenant")
+	}
+}
+
+// A missing owner on either side must select nothing. Treating an absent tenant
 // as a wildcard would restore the vulnerability for any row written before the
 // column existed, or by any future path that forgets to populate it.
-func TestMatches_MissingTenantFailsClosed(t *testing.T) {
-	ev := Event{TenantID: "t-a", ChainID: "c", CfgID: "c", Operation: "ratification"}
+func TestFanOut_MissingTenantFailsClosed(t *testing.T) {
+	owned := Event{TenantID: "t-a", ChainID: "c", CfgID: "c", Operation: "ratification"}
+	unowned := Event{ChainID: "c", CfgID: "c", Operation: "ratification"}
+	yes := func(Webhook) bool { return true }
 
-	if (Webhook{ID: "w", Enabled: true}).Matches(ev) {
-		t.Error("a subscription with no owner must match nothing")
+	if got := domain.FanOut(owned, []Webhook{{ID: "w", Enabled: true}}, yes); len(got) != 0 {
+		t.Error("a subscription with no owner must be selected for nothing")
 	}
-	if (Webhook{ID: "w", TenantID: "t-a", Enabled: true}).Matches(
-		Event{ChainID: "c", CfgID: "c", Operation: "ratification"}) {
-		t.Error("an event with no owner must match nothing")
+	if got := domain.FanOut(unowned, []Webhook{{ID: "w", TenantID: "t-a", Enabled: true}}, yes); len(got) != 0 {
+		t.Error("an event with no owner must select nothing")
 	}
-	if (Webhook{ID: "w", Enabled: true}).Matches(
-		Event{ChainID: "c", CfgID: "c", Operation: "ratification"}) {
+	if got := domain.FanOut(unowned, []Webhook{{ID: "w", Enabled: true}}, yes); len(got) != 0 {
 		t.Error("two absent owners must not be treated as equal")
 	}
 }

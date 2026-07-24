@@ -302,3 +302,88 @@ func exprText(e ast.Expr) string {
 		return "?"
 	}
 }
+
+// Acting across tenants is forbidden, and no worker decides that for itself.
+//
+// A privileged worker may read every tenant's rows — the relay, the policy
+// consumer and the replay worker all must, because they serve the whole
+// installation from one process on a connection that bypasses row-level
+// security by design. What none of them may do is act on what they read
+// without re-establishing whose data it was.
+//
+// Two workers got that wrong in the same shape: the relay matched audit events
+// to webhook subscriptions on operation and resource, and the policy consumer
+// matched them to policy conditions on operation, resource, actor and metadata.
+// Neither compared tenant. An unfiltered subscription — the documented way to
+// subscribe to everything — therefore selected every other tenant's events.
+//
+// Ownership now lives in domain.FanOut and domain.SameOwner, so a worker's
+// predicate answers only "is this the kind of thing I act on". This test fails
+// if a worker package fans out without going through that framework.
+var workerPackages = []string{"../events", "../policy"}
+
+// callsIn returns the set of "pkg.Func" and ".Method" call names in a file,
+// parsed from the syntax tree.
+//
+// Text scanning was tried first and was defeated by this test's own subject
+// matter: the comment above the relay's fan-out names domain.FanOut, which
+// satisfied a strings.Contains check even after the call itself was removed.
+// The control passed against a deliberately reintroduced confused deputy. Only
+// the AST distinguishes a call from a sentence about a call.
+func callsIn(t *testing.T, path string) map[string]bool {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, 0) // no ParseComments: comments are not code
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	out := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			if pkg, ok := sel.X.(*ast.Ident); ok {
+				out[pkg.Name+"."+sel.Sel.Name] = true
+			}
+			out["."+sel.Sel.Name] = true
+		}
+		return true
+	})
+	return out
+}
+
+func TestWorkersFanOutThroughOwnershipFramework(t *testing.T) {
+	for _, dir := range workerPackages {
+		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
+		if err != nil {
+			t.Fatalf("glob %s: %v", dir, err)
+		}
+		fanOutSites := 0
+		for _, f := range files {
+			if strings.HasSuffix(f, "_test.go") {
+				continue
+			}
+			calls := callsIn(t, f)
+
+			// A file that invokes a match predicate is fanning out: that is the
+			// site where a privileged cross-tenant read becomes per-subscriber
+			// work, and where ownership has to be re-established.
+			if !calls[".Matches"] {
+				continue
+			}
+			fanOutSites++
+			if !calls["domain.FanOut"] && !calls["domain.SameOwner"] {
+				t.Errorf("%s invokes a match predicate without calling domain.FanOut or "+
+					"domain.SameOwner. A privileged worker that fans out without them "+
+					"selects other tenants' events — the relay delivered a victim's "+
+					"governance event to an attacker's endpoint exactly this way.", f)
+			}
+		}
+		if fanOutSites == 0 {
+			t.Errorf("no fan-out site found in %s — the detector matched nothing, "+
+				"so it is proving nothing", dir)
+		}
+	}
+}

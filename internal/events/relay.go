@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/rpsg/oneops/internal/domain"
 )
 
 // IDGen generates unique delivery ids. A default (crypto/rand hex) is provided.
@@ -121,8 +123,12 @@ func (r *Relay) tailChain(ctx context.Context, chainID string, subs []Webhook) {
 	maxSeq := cursor
 	for i := range evs {
 		ev := eventFrom(evs[i])
-		for _, wh := range subs {
-			if wh.Matches(ev) {
+		// domain.FanOut confines the cross-tenant subscription list to the
+		// event's owner before wh.Matches is consulted. The relay reads every
+		// tenant's chains and every tenant's subscriptions on a privileged
+		// connection; this is where that read stops being cross-tenant.
+		for _, wh := range domain.FanOut(ev, subs, func(w Webhook) bool { return w.Matches(ev) }) {
+			{
 				deliveries = append(deliveries, Delivery{
 					ID:            r.newID(),
 					WebhookID:     wh.ID,

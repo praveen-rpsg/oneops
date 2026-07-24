@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/rpsg/oneops/internal/domain"
 )
 
 // ReplayConfig parameterises the replay worker.
@@ -153,7 +155,10 @@ func (w *ReplayWorker) replayWindow(ctx context.Context, job ReplayJob) (int, er
 					continue
 				}
 				ev := eventFrom(evs[i])
-				if !wh.Matches(ev) {
+				// Replay re-enqueues committed deliveries, so it must apply the
+				// same ownership rule as the original fan-out or it becomes a
+				// second route to the same cross-tenant delivery.
+				if !domain.SameOwner(wh, ev) || !wh.Matches(ev) {
 					continue
 				}
 				batch = append(batch, Delivery{

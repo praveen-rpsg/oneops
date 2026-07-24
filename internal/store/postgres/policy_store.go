@@ -30,7 +30,9 @@ var (
 	_ policy.CursorStore    = (*PolicyStore)(nil)
 )
 
-const policyCols = `id, name, enabled, condition, action_type, action_config, max_retries, created_at, updated_at`
+// tenant_id is read on every path so the consumer's fan-out can compare
+// ownership: it lists policies across all tenants on a privileged connection.
+const policyCols = `id, name, enabled, condition, action_type, action_config, max_retries, created_at, updated_at, tenant_id`
 
 // Create inserts a policy.
 func (s *PolicyStore) Create(ctx context.Context, p policy.Policy) error {
@@ -39,7 +41,7 @@ func (s *PolicyStore) Create(ctx context.Context, p policy.Policy) error {
 		return fmt.Errorf("marshal condition: %w", err)
 	}
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO policy (`+policyCols+`, tenant_id)
+		INSERT INTO policy (`+policyCols+`)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now(),$8)`,
 		p.ID, p.Name, p.Enabled, cond, p.Action.Type, actionConfig(p.Action.Config), p.MaxRetries,
 		domain.TenantIDFrom(ctx))
@@ -220,7 +222,8 @@ func (s *PolicyStore) SetPolicyCursor(ctx context.Context, chainID string, seq i
 func scanPolicy(sc rowScanner) (policy.Policy, error) {
 	var p policy.Policy
 	var cond, cfg []byte
-	if err := sc.Scan(&p.ID, &p.Name, &p.Enabled, &cond, &p.Action.Type, &cfg, &p.MaxRetries, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	if err := sc.Scan(&p.ID, &p.Name, &p.Enabled, &cond, &p.Action.Type, &cfg, &p.MaxRetries,
+		&p.CreatedAt, &p.UpdatedAt, &p.TenantID); err != nil {
 		return policy.Policy{}, err
 	}
 	if len(cond) > 0 {

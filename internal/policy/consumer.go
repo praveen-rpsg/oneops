@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"time"
+
+	"github.com/rpsg/oneops/internal/domain"
 )
 
 // ConsumerConfig parameterises the policy consumer.
@@ -138,14 +140,21 @@ func (c *Consumer) tailChain(ctx context.Context, chainID string, pols []Policy)
 // single evaluation path used for both live and replayed committed events.
 func (c *Consumer) Evaluate(ev Event, pols []Policy, now time.Time) []Execution {
 	var out []Execution
-	for _, p := range pols {
-		if !p.Enabled || !p.Condition.Matches(ev) {
-			continue
+	// domain.FanOut confines the cross-tenant policy list to the event's owner
+	// before any condition is evaluated. The consumer tails every tenant's
+	// audit chains on a privileged connection, and policy actions make outbound
+	// HTTP calls carrying operator-supplied configuration — so a policy
+	// selecting another tenant's events would be an oracle over their
+	// governance activity, and a request made on their behalf.
+	for _, p := range domain.FanOut(ev, pols, func(p Policy) bool {
+		return p.Enabled && p.Condition.Matches(ev)
+	}) {
+		{
+			out = append(out, Execution{
+				ID: c.newID(), PolicyID: p.ID, Event: ev, Status: ExecPending,
+				NextAttemptAt: now, CreatedAt: now,
+			})
 		}
-		out = append(out, Execution{
-			ID: c.newID(), PolicyID: p.ID, Event: ev, Status: ExecPending,
-			NextAttemptAt: now, CreatedAt: now,
-		})
 	}
 	return out
 }

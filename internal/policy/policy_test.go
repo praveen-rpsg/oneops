@@ -15,6 +15,10 @@ import (
 	"github.com/rpsg/oneops/internal/domain"
 )
 
+// testTenant owns every fixture. The fan-out is ownership-first, so a fixture
+// without an owner is selected for nothing — which is the intended default.
+const testTenant = "t-test"
+
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // ---- fakes ------------------------------------------------------------------
@@ -199,7 +203,7 @@ func (r *sr) Read(p []byte) (int, error) {
 }
 
 func auditEvt(chain string, seq int64, op, actor string, payload string) domain.AuditEvent {
-	return domain.AuditEvent{
+	return domain.AuditEvent{TenantID: testTenant,
 		ChainID: chain, Seq: seq, EventID: "evt_" + strconv.FormatInt(seq, 10),
 		OperationID: "op-" + strconv.FormatInt(seq, 10), Operation: domain.ConfigurationOperation(op),
 		Actor: actor, PayloadCanonical: []byte(payload), OccurredAt: time.Now().UTC(),
@@ -209,7 +213,7 @@ func auditEvt(chain string, seq int64, op, actor string, payload string) domain.
 // ---- condition matching -----------------------------------------------------
 
 func TestCondition_Matches(t *testing.T) {
-	ev := Event{Operation: "ratification", CfgID: "c1", Actor: "user:alice", Metadata: map[string]string{"new_lifecycle": "ratified"}}
+	ev := Event{TenantID: testTenant, Operation: "ratification", CfgID: "c1", Actor: "user:alice", Metadata: map[string]string{"new_lifecycle": "ratified"}}
 	cases := []struct {
 		c    Condition
 		want bool
@@ -241,7 +245,7 @@ func TestConsumer_OnlyCommittedEventsEnqueue(t *testing.T) {
 			auditEvt("c1", 2, "deprecation", "user:bob", `{}`),
 		},
 	}}
-	pols := newFakePolicies(Policy{ID: "p1", Enabled: true, MaxRetries: 3,
+	pols := newFakePolicies(Policy{ID: "p1", TenantID: testTenant, Enabled: true, MaxRetries: 3,
 		Condition: Condition{Operations: []string{"ratification"}}, Action: ActionSpec{Type: "notification"}})
 	execs := newFakeExecs()
 	c := NewConsumer(src, newFakeCursor(), pols, execs, nil, quiet(), ConsumerConfig{})
@@ -260,7 +264,7 @@ func TestConsumer_OnlyCommittedEventsEnqueue(t *testing.T) {
 func TestConsumer_NoEventsNoExecutions(t *testing.T) {
 	// A rolled-back operation leaves no audit event, so nothing is evaluated.
 	src := &fakeSource{chains: map[string][]domain.AuditEvent{"c1": nil}}
-	pols := newFakePolicies(Policy{ID: "p1", Enabled: true, MaxRetries: 1, Action: ActionSpec{Type: "notification"}})
+	pols := newFakePolicies(Policy{ID: "p1", TenantID: testTenant, Enabled: true, MaxRetries: 1, Action: ActionSpec{Type: "notification"}})
 	execs := newFakeExecs()
 	NewConsumer(src, newFakeCursor(), pols, execs, nil, quiet(), ConsumerConfig{}).RunOnce(context.Background())
 	if execs.count() != 0 {
@@ -271,7 +275,7 @@ func TestConsumer_NoEventsNoExecutions(t *testing.T) {
 // TestConsumer_ReplayedEventTriggers proves a replayed committed event flows
 // through the same Evaluate path and triggers matching policies.
 func TestConsumer_ReplayedEventTriggers(t *testing.T) {
-	pols := newFakePolicies(Policy{ID: "p1", Enabled: true, MaxRetries: 3,
+	pols := newFakePolicies(Policy{ID: "p1", TenantID: testTenant, Enabled: true, MaxRetries: 3,
 		Condition: Condition{Operations: []string{"ratification"}}, Action: ActionSpec{Type: "http"}})
 	c := NewConsumer(&fakeSource{}, newFakeCursor(), pols, newFakeExecs(), nil, quiet(), ConsumerConfig{})
 
@@ -286,11 +290,11 @@ func TestConsumer_ReplayedEventTriggers(t *testing.T) {
 // ---- executor: retries, dead-letter, isolation ------------------------------
 
 func execPending(id, policyID string) Execution {
-	return Execution{ID: id, PolicyID: policyID, Status: ExecPending, NextAttemptAt: time.Unix(0, 0), Event: Event{Operation: "ratification"}}
+	return Execution{ID: id, PolicyID: policyID, Status: ExecPending, NextAttemptAt: time.Unix(0, 0), Event: Event{TenantID: testTenant, Operation: "ratification"}}
 }
 
 func TestExecutor_SuccessRunsAction(t *testing.T) {
-	pols := newFakePolicies(Policy{ID: "p1", Enabled: true, MaxRetries: 3, Action: ActionSpec{Type: "http", Config: json.RawMessage(`{"url":"http://x"}`)}})
+	pols := newFakePolicies(Policy{ID: "p1", TenantID: testTenant, Enabled: true, MaxRetries: 3, Action: ActionSpec{Type: "http", Config: json.RawMessage(`{"url":"http://x"}`)}})
 	execs := newFakeExecs()
 	_ = execs.Enqueue(context.Background(), []Execution{execPending("x1", "p1")})
 	var called bool
@@ -304,7 +308,7 @@ func TestExecutor_SuccessRunsAction(t *testing.T) {
 }
 
 func TestExecutor_RetryThenDeadLetter(t *testing.T) {
-	pols := newFakePolicies(Policy{ID: "p1", Enabled: true, MaxRetries: 2, Action: ActionSpec{Type: "http", Config: json.RawMessage(`{"url":"http://x"}`)}})
+	pols := newFakePolicies(Policy{ID: "p1", TenantID: testTenant, Enabled: true, MaxRetries: 2, Action: ActionSpec{Type: "http", Config: json.RawMessage(`{"url":"http://x"}`)}})
 	execs := newFakeExecs()
 	_ = execs.Enqueue(context.Background(), []Execution{execPending("x1", "p1")})
 	reg := NewRegistry()
@@ -325,7 +329,7 @@ func TestExecutor_RetryThenDeadLetter(t *testing.T) {
 // TestExecutor_FailureIsolated proves a panicking/erroring action is captured on
 // the execution and never propagates (no panic escapes RunOnce).
 func TestExecutor_FailureIsolated(t *testing.T) {
-	pols := newFakePolicies(Policy{ID: "p1", Enabled: true, MaxRetries: 1, Action: ActionSpec{Type: "boom"}})
+	pols := newFakePolicies(Policy{ID: "p1", TenantID: testTenant, Enabled: true, MaxRetries: 1, Action: ActionSpec{Type: "boom"}})
 	execs := newFakeExecs()
 	_ = execs.Enqueue(context.Background(), []Execution{execPending("x1", "p1")})
 	reg := NewRegistry()
@@ -347,7 +351,7 @@ func (f actionFunc) Run(ctx context.Context, ev Event, c json.RawMessage) error 
 
 func TestActions_Builtins(t *testing.T) {
 	ctx := context.Background()
-	ev := Event{Operation: "ratification", EventID: "evt_1"}
+	ev := Event{TenantID: testTenant, Operation: "ratification", EventID: "evt_1"}
 
 	// HTTP action posts the event.
 	var gotBody []byte
