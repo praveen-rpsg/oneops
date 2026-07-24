@@ -72,17 +72,36 @@ roles and `FORCE ROW LEVEL SECURITY`.
    with no `IS NULL` escape. A connection that has not declared a tenant sees
    nothing. An omission causes an empty result, not a leak.
 
-3. **Two roles, two pools.**
-   - `oneops_app` — holds no `BYPASSRLS`. Every request-scoped query runs here.
-     The tenant resolved at the authentication boundary is applied to the
-     connection before the query and cleared on release.
-   - `oneops_worker` — holds `BYPASSRLS`. Background workers run here. Their
-     cross-tenant access becomes explicit, greppable and auditable rather than
-     an implicit consequence of connecting as the owner.
+3. **Two effective roles, two pools, one connection string.**
+   - `oneops_app` — a `NOLOGIN` role holding no `BYPASSRLS` and owning nothing.
+     Request-scoped connections assume it with `SET ROLE` on acquire, so every
+     query below the authentication boundary is subject to the policies.
+   - The migrating/owning role (superuser in development, table owner in
+     production) keeps `BYPASSRLS`. Background workers use it directly. Their
+     cross-tenant access is explicit, greppable and auditable rather than an
+     implicit consequence of connecting as the owner.
 
-   Splitting the pools is what lets the policy stay fail-closed. Without it,
-   the only way to keep the workers running is an escape hatch in the policy,
-   and that escape hatch is the vulnerability.
+   Separating the two identities is what lets the policy stay fail-closed.
+   Without it, the only way to keep the workers running is an escape hatch in
+   the policy, and that escape hatch is the vulnerability.
+
+   **Revision (2026-07-24).** This ADR originally specified two connection
+   strings, one per role. Implementation showed that unnecessary.
+   `pgxpool.Config.BeforeAcquire` receives the request context, so a single
+   pool can assume `oneops_app` and apply the resolved tenant at acquire time
+   — no changes to any repository, and no second production secret to
+   provision, rotate and leak. A `NOLOGIN` role cannot be used to connect at
+   all, which is a stronger default than a second credential.
+
+   The residual risk is that `SET ROLE` is reversible within its session, so an
+   attacker able to execute arbitrary SQL could `RESET ROLE` and escape the
+   policies. That is accepted: arbitrary SQL execution is already total
+   compromise of a system where the same process holds owner credentials, and
+   every query in the codebase is parameterised. Should the platform later
+   split the workers into their own process, that process should hold the only
+   owner credential and the API process should connect as `oneops_app`
+   directly. This decision does not foreclose that; it declines to pay for it
+   before the process split exists to justify it.
 
 4. **Tables excluded from RLS**, because they hold no tenant data:
    `schema_migrations`, `tenant` itself (administering tenants is a

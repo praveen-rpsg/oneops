@@ -75,14 +75,33 @@ func run(logger *slog.Logger) error {
 		}
 	}
 
-	repo := postgres.NewConfigObjectRepo(pool)
-	idem := postgres.NewIdempotencyStore(pool)
+	// Request-scoped work runs on a second pool over the same database. Its
+	// connections assume oneops_app and carry the tenant resolved at the
+	// authentication boundary, so PostgreSQL row-level security confines every
+	// query to that tenant (ADR-TENANCY-001 §3).
+	//
+	// `pool` above keeps the connecting role and its RLS bypass. Migrations
+	// need it, and so do the background workers below: they process every
+	// tenant from one process and would otherwise read nothing — the audit
+	// integrity sweeper in particular would report healthy precisely because it
+	// could no longer see anything to check.
+	//
+	// The split is by pool, not by credential: the same DSN is used for both,
+	// so there is no second secret to provision or rotate.
+	appPool, err := postgres.NewTenantScopedPool(rootCtx, cfg.DatabaseURL, cfg.DBMaxConns)
+	if err != nil {
+		return err
+	}
+	defer appPool.Close()
+
+	repo := postgres.NewConfigObjectRepo(appPool)
+	idem := postgres.NewIdempotencyStore(appPool)
 	verifier := auth.NewVerifier(cfg.JWTIssuer, cfg.JWTAudience, cfg.JWTHMACKey, cfg.JWKSURL)
 	metrics := observability.NewMetrics()
 	execMetrics := ops.NewExecutiveMetrics(metrics.Registry())
 
 	srv := httpapi.NewServer(cfg, logger, repo, idem, verifier, metrics, pool.Ping)
-	srv.SetGraph(postgres.NewGraphRepo(pool)) // M2.3 dependency-graph endpoints
+	srv.SetGraph(postgres.NewGraphRepo(appPool)) // M2.3 dependency-graph endpoints
 
 	// Governance API: the engine owns the single atomic constitutional mutation
 	// (ADR-AUDIT-005); its audit append is instrumented via MeteredAuditor. The
@@ -237,6 +256,10 @@ func run(logger *slog.Logger) error {
 	// asserting an unregistered or suspended tenant; while unwired every
 	// request resolves to the system tenant, which is the pre-tenancy
 	// behaviour and keeps single-tenant deployments working unchanged.
+	// Deliberately on the privileged pool. Resolving a bearer token to a tenant
+	// necessarily happens before any tenant is known, so binding the registry
+	// to a tenant-scoped connection would be circular. `tenant` is excluded
+	// from row-level security for the same reason (ADR-TENANCY-001 §4).
 	srv.SetTenants(postgres.NewTenantStore(pool))
 
 	// Operational diagnostics + administration APIs: both reuse one diagnostics

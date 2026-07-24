@@ -101,14 +101,21 @@ func (r *ConfigObjectRepo) insertTx(ctx context.Context, tx pgx.Tx, o *domain.Co
 	if o.RetentionPolicy == "" {
 		o.RetentionPolicy = "permanent"
 	}
+	// Ownership is written explicitly rather than left to the column DEFAULT.
+	// The default exists so a path that predates tenancy still produces a valid
+	// row, but under row-level security a row must be labelled with the tenant
+	// bound to the connection: inserting the default while connected as another
+	// tenant violates the policy's WITH CHECK and fails the write outright.
+	tenantID := domain.TenantIDFrom(ctx)
 	err := tx.QueryRow(ctx, `
 		INSERT INTO configuration_object
 			(cfg_id, artifact, version, role, lifecycle, retention_class, authority,
-			 ratified_by, review_cycle, retention_policy)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			 ratified_by, review_cycle, retention_policy, tenant_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		RETURNING row_version, created_at, updated_at`,
 		o.CfgID, o.Artifact, o.Version, string(o.Role), string(o.Lifecycle),
 		string(o.RetentionClass), string(o.Authority), o.RatifiedBy, o.ReviewCycle, o.RetentionPolicy,
+		tenantID,
 	).Scan(&o.RowVersion, &o.CreatedAt, &o.UpdatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -118,8 +125,8 @@ func (r *ConfigObjectRepo) insertTx(ctx context.Context, tx pgx.Tx, o *domain.Co
 	}
 	for k, v := range o.Metadata {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO configuration_metadata (cfg_id, key, value) VALUES ($1,$2,$3)`,
-			o.CfgID, k, v,
+			`INSERT INTO configuration_metadata (cfg_id, key, value, tenant_id) VALUES ($1,$2,$3,$4)`,
+			o.CfgID, k, v, tenantID,
 		); err != nil {
 			return fmt.Errorf("insert metadata: %w", err)
 		}
