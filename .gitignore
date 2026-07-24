@@ -10,6 +10,13 @@ coverage.html
 # node
 node_modules/
 web/**/dist/
+*.tsbuildinfo
+
+# The console bundle is a build artifact produced by `make web`. The directory
+# itself is tracked (via .gitkeep) because //go:embed all:webdist must resolve
+# for the Go build to compile at all.
+internal/httpapi/webdist/*
+!internal/httpapi/webdist/.gitkeep
 
 # terraform
 *.tfstate

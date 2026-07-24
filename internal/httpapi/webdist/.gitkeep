@@ -1,0 +1,4 @@
+Placeholder so `//go:embed all:webdist` always resolves and the Go build stays
+independent of `pnpm build`. The real bundle is produced by `make web` and is
+git-ignored; without it webFS() returns false and the control plane serves the
+JSON service descriptor at "/" instead of the console.
