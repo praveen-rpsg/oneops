@@ -106,10 +106,30 @@ func run(logger *slog.Logger) error {
 	// Governance API: the engine owns the single atomic constitutional mutation
 	// (ADR-AUDIT-005); its audit append is instrumented via MeteredAuditor. The
 	// HTTP layer is transport only.
+	// Two audit stores over the same table, for the two directions of access.
+	//
+	// auditStore keeps the owning pool: the integrity verifier, the event relay
+	// and the policy consumer all sweep every tenant's chains from one process
+	// and would read nothing if confined.
+	//
+	// The engine's own store and appender are tenant-scoped, because a
+	// constitutional operation is tenant data. On the owning pool they were not:
+	// a second tenant could POST /v1/governance/{id}/suspend against another
+	// tenant's ratified artifact and receive HTTP 200 — the lifecycle changed,
+	// the row version advanced, and an entry was written into the victim's
+	// append-only chain attributed to the attacker's operation id. The read
+	// endpoints refused the same id, because they resolve the configuration
+	// object through the scoped repository first; the write path went straight
+	// to the engine and never did. Verified against the running service.
+	//
+	// Both engine dependencies must share one pool: ADR-AUDIT-005 requires the
+	// state change and its audit append to commit in a single transaction, and
+	// a transaction cannot span two pools.
 	auditStore := postgres.NewAuditStore(pool)
 	auditVerifier := audit.NewVerifier(auditStore)
-	meteredAuditor := ops.NewMeteredAuditor(postgres.NewAuditAppender(pool, auditStore), execMetrics)
-	engine, err := governance.NewEngine(postgres.NewGovernanceStore(pool), governance.AllowAllAuthorizer{}, meteredAuditor)
+	scopedAuditStore := postgres.NewAuditStore(appPool)
+	meteredAuditor := ops.NewMeteredAuditor(postgres.NewAuditAppender(appPool, scopedAuditStore), execMetrics)
+	engine, err := governance.NewEngine(postgres.NewGovernanceStore(appPool), governance.AllowAllAuthorizer{}, meteredAuditor)
 	if err != nil {
 		return err
 	}
@@ -123,7 +143,10 @@ func run(logger *slog.Logger) error {
 	// Wiring is additive: it changes no existing operation. Without it the engine
 	// refuses Replacement outright (ErrReplacementTesterUnavailable) rather than
 	// performing it untested.
-	authorityStore := postgres.NewAuthorityStore(pool)
+	// Tenant-scoped: the Replacement Test reads the dependency graph, artifact
+	// citations and responsibility ownership of the objects being replaced, all
+	// of which are tenant data, and it runs inside a request.
+	authorityStore := postgres.NewAuthorityStore(appPool)
 	authorityResolver := authority.NewResolver(authorityStore)
 	replacementTest, err := authority.NewReplacementTest(
 		authority.NewActiveDependencyEvaluator(authorityResolver),
@@ -258,7 +281,15 @@ func run(logger *slog.Logger) error {
 	// Execution timeline (PRS-021): a read-only operational read model that
 	// composes existing persisted data (audit, deliveries, replay jobs, policy
 	// executions). It participates in no execution and modifies no subsystem.
-	timelineSvc := timeline.NewService(postgres.NewTimelineStore(pool), timeline.NewPromMetrics(metrics.Registry()))
+	// Tenant-scoped: the timeline is a projection over governance, audit,
+	// delivery and policy rows, so it reproduces their contents and must
+	// reproduce their isolation. On the owning pool it exposed another tenant's
+	// governance history — actor, operation, timestamps and correlation ids —
+	// to any authenticated caller who knew a configuration id, which the
+	// governance endpoints themselves correctly refused. Verified against the
+	// running service. No worker consumes the timeline; it is read-only and
+	// request-path only.
+	timelineSvc := timeline.NewService(postgres.NewTimelineStore(appPool), timeline.NewPromMetrics(metrics.Registry()))
 	srv.SetTimeline(timelineSvc)
 
 	// Compliance & evidence engine (PRS-022): a read-only capability composing
