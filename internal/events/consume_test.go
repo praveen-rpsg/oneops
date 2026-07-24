@@ -162,7 +162,7 @@ func TestReplay_WindowReadsCommittedOnlyAndPreserves(t *testing.T) {
 
 func TestReplay_ByDeliveryIDsRequeues(t *testing.T) {
 	del := newFakeDeliveries()
-	_ = del.Enqueue(context.Background(), []Delivery{{ID: "d1", WebhookID: "w1", Status: StatusDeadLetter, Event: Event{Operation: "ratification"}}})
+	_ = del.Enqueue(context.Background(), []Delivery{{ID: "d1", WebhookID: "w1", Status: StatusDeadLetter, Event: Event{TenantID: testTenant, Operation: "ratification"}}})
 	jobs := newFakeJobs()
 	_ = jobs.CreateJob(context.Background(), ReplayJob{ID: "j1", WebhookID: "w1", DeliveryIDs: []string{"d1"}, Status: JobPending})
 
@@ -183,7 +183,7 @@ func TestReplay_ByDeliveryIDsRequeues(t *testing.T) {
 func TestRetry_ReusesExistingDispatcher(t *testing.T) {
 	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 3})
 	del := newFakeDeliveries()
-	_ = del.Enqueue(context.Background(), []Delivery{{ID: "d1", WebhookID: "w1", Status: StatusDeadLetter, NextAttemptAt: time.Unix(0, 0), Event: Event{Operation: "ratification"}}})
+	_ = del.Enqueue(context.Background(), []Delivery{{ID: "d1", WebhookID: "w1", Status: StatusDeadLetter, NextAttemptAt: time.Unix(0, 0), Event: Event{TenantID: testTenant, Operation: "ratification"}}})
 
 	n, _ := del.RequeueDeadLetters(context.Background(), "w1")
 	if n != 1 || del.status("d1") != StatusPending {

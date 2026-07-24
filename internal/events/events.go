@@ -114,6 +114,10 @@ type Delivery struct {
 	CreatedAt      time.Time
 }
 
+// OwnerTenantID implements domain.Owned. A delivery belongs to the tenant that
+// owns the event it carries.
+func (d Delivery) OwnerTenantID() string { return d.Event.TenantID }
+
 func contains(xs []string, x string) bool {
 	for _, v := range xs {
 		if v == x {

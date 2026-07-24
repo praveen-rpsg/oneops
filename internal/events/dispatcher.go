@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/rpsg/oneops/internal/domain"
 )
 
 // DispatcherConfig parameterises delivery.
@@ -118,6 +120,23 @@ func (d *Dispatcher) attempt(ctx context.Context, del Delivery) (DeliveryStatus,
 	wh, err := d.webhooks.Get(ctx, del.WebhookID)
 	if err != nil {
 		// The subscriber is gone; the delivery can never succeed.
+		_ = d.deliv.MarkResult(ctx, del.ID, StatusDeadLetter, del.RetryCount, 0, d.now(), time.Time{})
+		return StatusDeadLetter, err
+	}
+
+	// The queue is storage and storage is untrusted. A delivery row may predate
+	// ownership, come from a restore, or be written by a future regression —
+	// the producer refusing to create a cross-tenant pairing does not stop one
+	// existing. Verified against the running service: a row inserted directly
+	// into webhook_delivery, pairing one tenant's event with another tenant's
+	// endpoint, was dispatched and marked delivered.
+	//
+	// Dead-lettered rather than retried: a mismatch is never transient, and
+	// retrying would repeatedly attempt a cross-tenant delivery.
+	if err := domain.AuthorizeExecution(wh, del); err != nil {
+		d.log.Error("event dispatcher: refused cross-tenant delivery",
+			"delivery_id", del.ID, "webhook_id", wh.ID,
+			"webhook_tenant", wh.OwnerTenantID(), "delivery_tenant", del.OwnerTenantID())
 		_ = d.deliv.MarkResult(ctx, del.ID, StatusDeadLetter, del.RetryCount, 0, d.now(), time.Time{})
 		return StatusDeadLetter, err
 	}

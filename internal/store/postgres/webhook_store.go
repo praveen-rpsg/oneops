@@ -122,7 +122,7 @@ func (s *WebhookStore) Delete(ctx context.Context, id string) error {
 }
 
 const deliveryCols = `id, webhook_id, chain_id, seq, event_id, operation_id, operation, actor,
-	cfg_id, occurred_at, status, retry_count, last_status_code, last_attempt, next_attempt_at, created_at`
+	cfg_id, occurred_at, status, retry_count, last_status_code, last_attempt, next_attempt_at, created_at, tenant_id`
 
 // Enqueue inserts pending deliveries. Duplicate ids are ignored (idempotent relay).
 func (s *WebhookStore) Enqueue(ctx context.Context, ds []events.Delivery) error {
@@ -260,6 +260,10 @@ func scanDelivery(sc rowScanner) (events.Delivery, error) {
 		&d.ID, &d.WebhookID, &d.Event.ChainID, &d.Event.Seq, &d.Event.EventID, &d.Event.OperationID,
 		&op, &d.Event.Actor, &d.Event.CfgID, &d.Event.OccurredAt, &status, &d.RetryCount,
 		&d.LastStatusCode, &lastAttempt, &d.NextAttemptAt, &d.CreatedAt,
+		// The delivery's stored owner is the event's owner: the producer writes
+		// d.Event.TenantID into the row. Reading it back here is what lets the
+		// dispatcher authorise execution without re-reading the audit log.
+		&d.Event.TenantID,
 	); err != nil {
 		return events.Delivery{}, err
 	}

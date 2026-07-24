@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -500,5 +501,75 @@ func TestRelay_DoesNotCrossTenantBoundary(t *testing.T) {
 	}
 	if len(deliv.all()) == 0 {
 		t.Error("the owning tenant's subscription received nothing")
+	}
+}
+
+// A queue is storage, and storage is untrusted.
+//
+// The producer refusing to create a cross-tenant pairing does not stop one
+// existing: a row may predate ownership, arrive from a restore, or be written
+// by a future regression. Verified against the running service — a delivery
+// inserted directly into webhook_delivery, pairing one tenant's audit event
+// with another tenant's endpoint, was dispatched and marked delivered while the
+// producer was correctly refusing that exact pairing.
+func TestDispatcher_RefusesCrossTenantDelivery(t *testing.T) {
+	wh := newFakeWebhooks(Webhook{
+		ID: "w-attacker", TenantID: "t-attacker", URL: "http://attacker.example",
+		Secret: "s", Enabled: true, MaxRetries: 3,
+	})
+	del := newFakeDeliveries()
+
+	// The forged item: the attacker's endpoint, the victim's event.
+	forged := Delivery{
+		ID: "dlv-forged", WebhookID: "w-attacker", Status: StatusPending,
+		Event: Event{
+			TenantID: "t-victim", ChainID: "c-victim", CfgID: "c-victim",
+			Operation: "ratification", Seq: 1, EventID: "evt-1",
+		},
+	}
+
+	called := false
+	d := NewDispatcher(del, wh, doerFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return resp(200), nil
+	}), nil, quiet(), DispatcherConfig{})
+
+	status, err := d.Deliver(context.Background(), forged)
+
+	if called {
+		t.Fatal("the dispatcher made an outbound request for another tenant's event")
+	}
+	if !errors.Is(err, domain.ErrOwnershipMismatch) {
+		t.Fatalf("err = %v, want ErrOwnershipMismatch", err)
+	}
+	// Dead-lettered, not retried: a mismatch is never transient, and retrying
+	// would repeatedly attempt a cross-tenant delivery.
+	if status != StatusDeadLetter {
+		t.Errorf("status = %q, want %q", status, StatusDeadLetter)
+	}
+}
+
+// A delivery whose owner is unknown — the shape a row predating ownership has —
+// must also be refused rather than treated as universally deliverable.
+func TestDispatcher_RefusesUnownedDelivery(t *testing.T) {
+	wh := newFakeWebhooks(Webhook{
+		ID: "w", TenantID: "t-a", URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 3,
+	})
+	del := newFakeDeliveries()
+	called := false
+	d := NewDispatcher(del, wh, doerFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return resp(200), nil
+	}), nil, quiet(), DispatcherConfig{})
+
+	_, err := d.Deliver(context.Background(), Delivery{
+		ID: "dlv-unowned", WebhookID: "w", Status: StatusPending,
+		Event: Event{ChainID: "c", CfgID: "c", Operation: "ratification"},
+	})
+	if called {
+		t.Fatal("the dispatcher delivered work of unknown ownership")
+	}
+	if !errors.Is(err, domain.ErrOwnershipMismatch) {
+		t.Fatalf("err = %v, want ErrOwnershipMismatch", err)
 	}
 }
