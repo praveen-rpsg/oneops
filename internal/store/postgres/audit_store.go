@@ -29,7 +29,7 @@ func NewAuditStore(pool *pgxpool.Pool) *AuditStore {
 // auditEventCols is the projection for reads. The derived payload jsonb column is
 // not read back: payload_canonical is the hashed source of truth.
 const auditEventCols = `chain_id, seq, event_id, operation_id, operation, actor,
-	payload_canonical, prev_hash, this_hash, occurred_at`
+	payload_canonical, prev_hash, this_hash, occurred_at, tenant_id`
 
 // AppendAuditEvent inserts one fully-formed audit event within the caller's
 // transaction. The derived payload jsonb column is populated from the already
@@ -39,10 +39,11 @@ func (s *AuditStore) AppendAuditEvent(ctx context.Context, tx pgx.Tx, e *domain.
 	_, err := tx.Exec(ctx, `
 		INSERT INTO audit_event
 			(chain_id, seq, event_id, operation_id, operation, actor,
-			 payload_canonical, payload, prev_hash, this_hash, occurred_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,convert_from($7,'UTF8')::jsonb,$8,$9,$10)`,
+			 payload_canonical, payload, prev_hash, this_hash, occurred_at, tenant_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,convert_from($7,'UTF8')::jsonb,$8,$9,$10,$11)`,
 		e.ChainID, e.Seq, e.EventID, e.OperationID, string(e.Operation), e.Actor,
-		e.PayloadCanonical, e.PrevHash, e.ThisHash, e.OccurredAt)
+		e.PayloadCanonical, e.PrevHash, e.ThisHash, e.OccurredAt,
+		domain.TenantIDFrom(ctx))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return domain.ErrConflict
@@ -58,9 +59,10 @@ func (s *AuditStore) AppendAuditEvent(ctx context.Context, tx pgx.Tx, e *domain.
 // a create race (ADR-AUDIT-004). genesisHash must be 32 bytes.
 func (s *AuditStore) EnsureChainHead(ctx context.Context, tx pgx.Tx, chainID string, genesisHash []byte) error {
 	_, err := tx.Exec(ctx, `
-		INSERT INTO audit_chain_head (chain_id, last_seq, last_hash)
-		VALUES ($1, 0, $2)
-		ON CONFLICT (chain_id) DO NOTHING`, chainID, genesisHash)
+		INSERT INTO audit_chain_head (chain_id, last_seq, last_hash, tenant_id)
+		VALUES ($1, 0, $2, $3)
+		ON CONFLICT (chain_id) DO NOTHING`, chainID, genesisHash,
+		domain.TenantIDFrom(ctx))
 	if err != nil {
 		return fmt.Errorf("ensure chain head: %w", err)
 	}
@@ -90,12 +92,13 @@ func (s *AuditStore) ReadChainHead(ctx context.Context, tx pgx.Tx, chainID strin
 // AppendAuditEvent that produced the new hash.
 func (s *AuditStore) UpsertChainHead(ctx context.Context, tx pgx.Tx, chainID string, lastSeq int64, lastHash []byte) error {
 	_, err := tx.Exec(ctx, `
-		INSERT INTO audit_chain_head (chain_id, last_seq, last_hash, updated_at)
-		VALUES ($1, $2, $3, now())
+		INSERT INTO audit_chain_head (chain_id, last_seq, last_hash, updated_at, tenant_id)
+		VALUES ($1, $2, $3, now(), $4)
 		ON CONFLICT (chain_id) DO UPDATE
 		   SET last_seq = EXCLUDED.last_seq,
 		       last_hash = EXCLUDED.last_hash,
-		       updated_at = now()`, chainID, lastSeq, lastHash)
+		       updated_at = now()`, chainID, lastSeq, lastHash,
+		domain.TenantIDFrom(ctx))
 	if err != nil {
 		return fmt.Errorf("upsert chain head: %w", err)
 	}
@@ -224,7 +227,7 @@ func scanAuditEvent(sc rowScanner) (*domain.AuditEvent, error) {
 	var op string
 	if err := sc.Scan(
 		&e.ChainID, &e.Seq, &e.EventID, &e.OperationID, &op, &e.Actor,
-		&e.PayloadCanonical, &e.PrevHash, &e.ThisHash, &e.OccurredAt,
+		&e.PayloadCanonical, &e.PrevHash, &e.ThisHash, &e.OccurredAt, &e.TenantID,
 	); err != nil {
 		return nil, err
 	}

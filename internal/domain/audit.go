@@ -77,6 +77,10 @@ func (e *EventInput) Validate() error {
 // append-only, provenance-bearing, tamper-evident value (Vol IV §4.6). It is a
 // pure domain value; the audit package computes its hashes and identifiers.
 type AuditEvent struct {
+	// TenantID owns the event. Read from the row and never inferred: the event
+	// relay reads across every tenant on a privileged connection, so consumers
+	// must compare ownership explicitly rather than trust the query's scope.
+	TenantID string
 	// ChainID is the audit chain (partition) this event belongs to.
 	ChainID string
 	// Seq is the contiguous, strictly increasing position within the chain.

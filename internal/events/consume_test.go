@@ -127,7 +127,7 @@ func TestReplay_WindowReadsCommittedOnlyAndPreserves(t *testing.T) {
 	src := &fakeSource{chains: map[string][]domain.AuditEvent{
 		"c1": {auditEvt("c1", 1, "ratification"), auditEvt("c1", 2, "deprecation")},
 	}}
-	wh := newFakeWebhooks(Webhook{ID: "w1", Secret: "s3cr3t", Enabled: true, Operations: []string{"ratification"}, MaxRetries: 3})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, Secret: "s3cr3t", Enabled: true, Operations: []string{"ratification"}, MaxRetries: 3})
 	del := newFakeDeliveries()
 	jobs := newFakeJobs()
 	_ = jobs.CreateJob(context.Background(), ReplayJob{ID: "j1", WebhookID: "w1", Status: JobPending})
@@ -181,7 +181,7 @@ func TestReplay_ByDeliveryIDsRequeues(t *testing.T) {
 // unchanged dispatcher: requeue flips status to pending, then the PRS-018
 // dispatcher delivers it.
 func TestRetry_ReusesExistingDispatcher(t *testing.T) {
-	wh := newFakeWebhooks(Webhook{ID: "w1", URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 3})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 3})
 	del := newFakeDeliveries()
 	_ = del.Enqueue(context.Background(), []Delivery{{ID: "d1", WebhookID: "w1", Status: StatusDeadLetter, NextAttemptAt: time.Unix(0, 0), Event: Event{Operation: "ratification"}}})
 

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rpsg/oneops/internal/domain"
 	"github.com/rpsg/oneops/internal/events"
 )
 
@@ -47,7 +48,7 @@ func TestWebhookStore_Integration(t *testing.T) {
 
 	// --- delivery batch + claim + mark ----------------------------------------
 	now := time.Now().UTC()
-	ev := events.Event{ChainID: "c1", Seq: 1, EventID: "evt_1", OperationID: "op_1", Operation: "ratification", Actor: "u", CfgID: "c1", OccurredAt: now}
+	ev := events.Event{TenantID: domain.SystemTenantID, ChainID: "c1", Seq: 1, EventID: "evt_1", OperationID: "op_1", Operation: "ratification", Actor: "u", CfgID: "c1", OccurredAt: now}
 	if err := s.Enqueue(ctx, []events.Delivery{
 		{ID: "d1", WebhookID: "wh_1", Event: ev, Status: events.StatusPending, NextAttemptAt: now.Add(-time.Minute)},
 		{ID: "d2", WebhookID: "wh_1", Event: ev, Status: events.StatusPending, NextAttemptAt: now.Add(-time.Minute)},
@@ -172,7 +173,7 @@ func TestWebhookStore_NilSlicesPersist(t *testing.T) {
 		t.Fatalf("nil slices round-tripped as %+v, want empty", got)
 	}
 	// The semantic contract survives: empty means "match everything".
-	if !got.Matches(events.Event{Operation: "ratification", CfgID: "any"}) {
+	if !got.Matches(events.Event{TenantID: domain.SystemTenantID, Operation: "ratification", CfgID: "any"}) {
 		t.Error("a webhook with no filters must match every event")
 	}
 

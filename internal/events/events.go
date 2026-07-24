@@ -27,7 +27,13 @@ const (
 
 // Webhook is a registered subscriber endpoint and its subscription filters.
 type Webhook struct {
-	ID         string
+	ID string
+	// TenantID owns the subscription. Delivery compares it against the event's
+	// owner, because the relay reads every tenant's subscriptions and every
+	// tenant's events from one privileged connection: row-level security is
+	// bypassed there by design, so tenant identity has to be re-established in
+	// the match rather than assumed from the query.
+	TenantID   string
 	URL        string
 	Secret     string
 	Enabled    bool
@@ -40,8 +46,23 @@ type Webhook struct {
 
 // Matches reports whether this webhook subscribes to the given event. A disabled
 // webhook matches nothing; empty Operations/Resources mean "all".
+//
+// The tenant comparison is first and is not optional. The relay cross-products
+// every enabled subscription against every chain it can see, and it can see all
+// of them — so without this check a subscription with no Operations and no
+// Resources filter, which is the documented way to subscribe to everything,
+// received every other tenant's governance events signed with its own HMAC
+// secret. Verified against the running service: an attacker's endpoint received
+// the victim's chain_id, cfg_id, operation, actor and event_id.
+//
+// Both sides are compared as empty-safe: an event or subscription that somehow
+// carries no owner matches nothing, so a missing value fails closed rather than
+// matching everything.
 func (w Webhook) Matches(ev Event) bool {
 	if !w.Enabled {
+		return false
+	}
+	if w.TenantID == "" || ev.TenantID == "" || w.TenantID != ev.TenantID {
 		return false
 	}
 	if len(w.Operations) > 0 && !contains(w.Operations, ev.Operation) {
@@ -55,6 +76,8 @@ func (w Webhook) Matches(ev Event) bool {
 
 // Event is a committed governance event projected from an audit event.
 type Event struct {
+	// TenantID owns the event. Populated from the audit row, never inferred.
+	TenantID    string
 	ChainID     string
 	Seq         int64
 	EventID     string
@@ -68,6 +91,7 @@ type Event struct {
 // eventFrom projects a committed audit event into a delivery Event.
 func eventFrom(a domain.AuditEvent) Event {
 	return Event{
+		TenantID:    a.TenantID,
 		ChainID:     a.ChainID,
 		Seq:         a.Seq,
 		EventID:     a.EventID,

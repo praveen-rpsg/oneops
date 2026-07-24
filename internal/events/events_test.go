@@ -196,9 +196,16 @@ func resp(code int) *http.Response {
 	return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(""))}
 }
 
+// testTenant owns every fixture in the single-tenant relay tests. Matching now
+// requires the subscription and the event to agree on an owner, so a fixture
+// without one matches nothing — which is the fail-closed behaviour these tests
+// would otherwise silently depend on.
+const testTenant = "t-test"
+
 func auditEvt(chain string, seq int64, op string) domain.AuditEvent {
 	return domain.AuditEvent{
-		ChainID: chain, Seq: seq, EventID: "evt_" + strconv.FormatInt(seq, 10),
+		TenantID: testTenant,
+		ChainID:  chain, Seq: seq, EventID: "evt_" + strconv.FormatInt(seq, 10),
 		OperationID: "op-" + strconv.FormatInt(seq, 10), Operation: domain.ConfigurationOperation(op),
 		Actor: "user:alice", OccurredAt: time.Now().UTC(),
 	}
@@ -234,7 +241,7 @@ func TestRelay_EnqueuesForCommittedEvents(t *testing.T) {
 		"c1": {auditEvt("c1", 1, "ratification"), auditEvt("c1", 2, "deprecation")},
 	}}
 	cur := newFakeCursors()
-	wh := newFakeWebhooks(Webhook{ID: "w1", URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 3})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 3})
 	del := newFakeDeliveries()
 	r := NewRelay(src, cur, wh, del, nil, quiet(), RelayConfig{})
 
@@ -255,7 +262,7 @@ func TestRelay_EnqueuesForCommittedEvents(t *testing.T) {
 func TestRelay_NoEventsMeansNoDeliveries(t *testing.T) {
 	// A rolled-back operation leaves no audit event, so the source yields nothing.
 	src := &fakeSource{chains: map[string][]domain.AuditEvent{"c1": nil}}
-	wh := newFakeWebhooks(Webhook{ID: "w1", Enabled: true, MaxRetries: 1})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, Enabled: true, MaxRetries: 1})
 	del := newFakeDeliveries()
 	r := NewRelay(src, newFakeCursors(), wh, del, nil, quiet(), RelayConfig{})
 
@@ -271,10 +278,10 @@ func TestRelay_Subscriptions(t *testing.T) {
 		"c2": {auditEvt("c2", 1, "deprecation")},
 	}}
 	wh := newFakeWebhooks(
-		Webhook{ID: "all", Enabled: true, MaxRetries: 1},                                              // all
-		Webhook{ID: "onlyRatify", Enabled: true, Operations: []string{"ratification"}, MaxRetries: 1}, // op filter
-		Webhook{ID: "onlyC2", Enabled: true, Resources: []string{"c2"}, MaxRetries: 1},                // resource filter
-		Webhook{ID: "disabled", Enabled: false, MaxRetries: 1},                                        // disabled
+		Webhook{ID: "all", TenantID: testTenant, Enabled: true, MaxRetries: 1},                                              // all
+		Webhook{ID: "onlyRatify", TenantID: testTenant, Enabled: true, Operations: []string{"ratification"}, MaxRetries: 1}, // op filter
+		Webhook{ID: "onlyC2", TenantID: testTenant, Enabled: true, Resources: []string{"c2"}, MaxRetries: 1},                // resource filter
+		Webhook{ID: "disabled", TenantID: testTenant, Enabled: false, MaxRetries: 1},                                        // disabled
 	)
 	del := newFakeDeliveries()
 	NewRelay(src, newFakeCursors(), wh, del, nil, quiet(), RelayConfig{}).RunOnce(context.Background())
@@ -291,11 +298,11 @@ func TestRelay_Subscriptions(t *testing.T) {
 // ---- dispatcher: delivery, retry, dead-letter, rotation ---------------------
 
 func newDelivery(id, webhookID string, at time.Time) Delivery {
-	return Delivery{ID: id, WebhookID: webhookID, Event: Event{Operation: "ratification", ChainID: "c1", CfgID: "c1", Seq: 1}, Status: StatusPending, NextAttemptAt: at, CreatedAt: at}
+	return Delivery{ID: id, WebhookID: webhookID, Event: Event{TenantID: testTenant, Operation: "ratification", ChainID: "c1", CfgID: "c1", Seq: 1}, Status: StatusPending, NextAttemptAt: at, CreatedAt: at}
 }
 
 func TestDispatcher_DeliversSignedPayload(t *testing.T) {
-	wh := newFakeWebhooks(Webhook{ID: "w1", URL: "http://x", Secret: "s3cr3t", Enabled: true, MaxRetries: 3})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, URL: "http://x", Secret: "s3cr3t", Enabled: true, MaxRetries: 3})
 	del := newFakeDeliveries()
 	_ = del.Enqueue(context.Background(), []Delivery{newDelivery("d1", "w1", time.Now())})
 
@@ -321,7 +328,7 @@ func TestDispatcher_DeliversSignedPayload(t *testing.T) {
 }
 
 func TestDispatcher_RetryThenDeadLetter(t *testing.T) {
-	wh := newFakeWebhooks(Webhook{ID: "w1", URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 2})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 2})
 	del := newFakeDeliveries()
 	_ = del.Enqueue(context.Background(), []Delivery{newDelivery("d1", "w1", time.Unix(0, 0))})
 	doer := doerFunc(func(*http.Request) (*http.Response, error) { return resp(500), nil })
@@ -341,12 +348,12 @@ func TestDispatcher_RetryThenDeadLetter(t *testing.T) {
 }
 
 func TestDispatcher_SecretRotationAppliesToPending(t *testing.T) {
-	wh := newFakeWebhooks(Webhook{ID: "w1", URL: "http://x", Secret: "old", Enabled: true, MaxRetries: 3})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, URL: "http://x", Secret: "old", Enabled: true, MaxRetries: 3})
 	del := newFakeDeliveries()
 	_ = del.Enqueue(context.Background(), []Delivery{newDelivery("d1", "w1", time.Now())})
 
 	// Rotate the secret before delivery; the dispatcher reads it live.
-	_ = wh.Update(context.Background(), Webhook{ID: "w1", URL: "http://x", Secret: "new", Enabled: true, MaxRetries: 3})
+	_ = wh.Update(context.Background(), Webhook{ID: "w1", TenantID: testTenant, URL: "http://x", Secret: "new", Enabled: true, MaxRetries: 3})
 
 	var gotSig, gotTS string
 	var gotBody []byte
@@ -388,7 +395,7 @@ func (m *countMetrics) ObserveDeliveryLatency(time.Duration) { m.latencies++ }
 func (m *countMetrics) SetActiveWebhooks(n int)              { m.active = n }
 
 func TestDispatcher_MetricsRecorded(t *testing.T) {
-	wh := newFakeWebhooks(Webhook{ID: "w1", URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 2})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 2})
 	del := newFakeDeliveries()
 	_ = del.Enqueue(context.Background(), []Delivery{newDelivery("d1", "w1", time.Now())})
 	m := &countMetrics{}
@@ -396,5 +403,82 @@ func TestDispatcher_MetricsRecorded(t *testing.T) {
 	NewDispatcher(del, wh, doer, m, quiet(), DispatcherConfig{BaseBackoff: time.Millisecond}).RunOnce(context.Background())
 	if m.failure != 1 || m.retry != 1 || m.latencies != 1 {
 		t.Fatalf("metrics = %+v", m)
+	}
+}
+
+// A worker that reads across tenants must re-establish tenant identity before
+// acting on what it read.
+//
+// The relay lists every chain and every enabled subscription on a privileged
+// connection — row-level security is bypassed there by design — and then
+// cross-products them. Matching on operation and resource alone meant a
+// subscription with no filters, which is the documented way to subscribe to
+// everything, received every other tenant's governance events signed with its
+// own HMAC secret.
+//
+// Verified against the running service before the fix: an attacker's endpoint
+// received the victim's chain_id, cfg_id, operation, actor and event_id.
+func TestMatches_RequiresSameTenant(t *testing.T) {
+	victimEvent := Event{
+		TenantID: "t-victim", ChainID: "c-victim", CfgID: "c-victim",
+		Operation: "ratification", Seq: 1,
+	}
+
+	// The unfiltered subscription — the shape that made this total.
+	attacker := Webhook{ID: "atk", TenantID: "t-attacker", Enabled: true, MaxRetries: 1}
+	if attacker.Matches(victimEvent) {
+		t.Fatal("a subscription matched another tenant's event; the relay would deliver it")
+	}
+
+	// The owner still receives its own.
+	owner := Webhook{ID: "own", TenantID: "t-victim", Enabled: true, MaxRetries: 1}
+	if !owner.Matches(victimEvent) {
+		t.Error("the owning tenant must still receive its own events")
+	}
+}
+
+// A missing owner on either side must match nothing. Treating an absent tenant
+// as a wildcard would restore the vulnerability for any row written before the
+// column existed, or by any future path that forgets to populate it.
+func TestMatches_MissingTenantFailsClosed(t *testing.T) {
+	ev := Event{TenantID: "t-a", ChainID: "c", CfgID: "c", Operation: "ratification"}
+
+	if (Webhook{ID: "w", Enabled: true}).Matches(ev) {
+		t.Error("a subscription with no owner must match nothing")
+	}
+	if (Webhook{ID: "w", TenantID: "t-a", Enabled: true}).Matches(
+		Event{ChainID: "c", CfgID: "c", Operation: "ratification"}) {
+		t.Error("an event with no owner must match nothing")
+	}
+	if (Webhook{ID: "w", Enabled: true}).Matches(
+		Event{ChainID: "c", CfgID: "c", Operation: "ratification"}) {
+		t.Error("two absent owners must not be treated as equal")
+	}
+}
+
+// The relay must not deliver across tenants even when every other filter agrees.
+func TestRelay_DoesNotCrossTenantBoundary(t *testing.T) {
+	victim := auditEvt("c-victim", 1, "ratification")
+	victim.TenantID = "t-victim"
+
+	src := &fakeSource{chains: map[string][]domain.AuditEvent{"c-victim": {victim}}}
+	wh := newFakeWebhooks(
+		Webhook{ID: "attacker", TenantID: "t-attacker", Enabled: true, MaxRetries: 1},
+		Webhook{ID: "owner", TenantID: "t-victim", Enabled: true, MaxRetries: 1},
+	)
+	deliv := newFakeDeliveries()
+	r := NewRelay(src, newFakeCursors(), wh, deliv, NopMetrics{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)), RelayConfig{})
+
+	r.RunOnce(context.Background())
+
+	for _, d := range deliv.all() {
+		if d.WebhookID == "attacker" {
+			t.Errorf("the relay enqueued the victim's event for another tenant's endpoint "+
+				"(delivery %s, chain %s)", d.ID, d.Event.ChainID)
+		}
+	}
+	if len(deliv.all()) == 0 {
+		t.Error("the owning tenant's subscription received nothing")
 	}
 }

@@ -29,12 +29,16 @@ var (
 	_ events.CursorStore   = (*WebhookStore)(nil)
 )
 
-const webhookCols = `id, url, secret, enabled, operations, resources, max_retries, created_at, updated_at`
+// tenant_id is read on every path so subscription matching can compare
+// ownership. The relay lists subscriptions across all tenants on a privileged
+// connection, so a subscription without its owner would match every tenant's
+// events — which it did.
+const webhookCols = `id, url, secret, enabled, operations, resources, max_retries, created_at, updated_at, tenant_id`
 
 // Create inserts a webhook.
 func (s *WebhookStore) Create(ctx context.Context, w events.Webhook) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO webhook (`+webhookCols+`, tenant_id)
+		INSERT INTO webhook (`+webhookCols+`)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now(),$8)`,
 		w.ID, w.URL, w.Secret, w.Enabled, textArray(w.Operations), textArray(w.Resources), w.MaxRetries,
 		domain.TenantIDFrom(ctx))
@@ -128,11 +132,18 @@ func (s *WebhookStore) Enqueue(ctx context.Context, ds []events.Delivery) error 
 		batch.Queue(`
 			INSERT INTO webhook_delivery
 				(id, webhook_id, chain_id, seq, event_id, operation_id, operation, actor,
-				 cfg_id, occurred_at, status, retry_count, next_attempt_at, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,0,$12,now())
+				 cfg_id, occurred_at, status, retry_count, next_attempt_at, created_at, tenant_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,0,$12,now(),$13)
 			ON CONFLICT (id) DO NOTHING`,
 			d.ID, d.WebhookID, d.Event.ChainID, d.Event.Seq, d.Event.EventID, d.Event.OperationID,
-			d.Event.Operation, d.Event.Actor, d.Event.CfgID, d.Event.OccurredAt, string(d.Status), d.NextAttemptAt)
+			d.Event.Operation, d.Event.Actor, d.Event.CfgID, d.Event.OccurredAt, string(d.Status),
+			d.NextAttemptAt,
+			// The owner comes from the event, not from the enqueuing context.
+			// The relay enqueues on the privileged pool with no tenant bound, so
+			// deriving it from context labelled every delivery `system` — leaving
+			// tenants unable to see their own delivery history through the
+			// scoped administration API.
+			d.Event.TenantID)
 	}
 	br := s.pool.SendBatch(ctx, batch)
 	defer func() { _ = br.Close() }()
@@ -237,7 +248,7 @@ func (s *WebhookStore) SetCursor(ctx context.Context, chainID string, seq int64)
 func scanWebhook(sc rowScanner) (events.Webhook, error) {
 	var w events.Webhook
 	err := sc.Scan(&w.ID, &w.URL, &w.Secret, &w.Enabled, &w.Operations, &w.Resources,
-		&w.MaxRetries, &w.CreatedAt, &w.UpdatedAt)
+		&w.MaxRetries, &w.CreatedAt, &w.UpdatedAt, &w.TenantID)
 	return w, err
 }
 
