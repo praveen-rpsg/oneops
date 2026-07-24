@@ -64,8 +64,16 @@ test: ## Run all tests with the race detector and coverage
 cover: ## Produce an HTML coverage report
 	go test ./... -coverprofile=coverage.out && go tool cover -html=coverage.out -o coverage.html
 
-lint: ## Run golangci-lint
-	golangci-lint run ./...
+GOLANGCI_VERSION ?= v2.12.2
+GOBIN_DIR := $(shell go env GOPATH)/bin
+
+lint: ## Run golangci-lint (installs it on first use)
+	@command -v golangci-lint >/dev/null 2>&1 || \
+		[ -x "$(GOBIN_DIR)/golangci-lint" ] || { \
+			echo "installing golangci-lint $(GOLANGCI_VERSION)..."; \
+			go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION); \
+		}
+	@PATH="$(GOBIN_DIR):$$PATH" golangci-lint run ./...
 
 fmt: ## Format Go sources
 	gofmt -w .

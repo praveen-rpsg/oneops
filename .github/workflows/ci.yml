@@ -86,7 +86,11 @@ jobs:
           go-version-file: go.mod
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          # Pinned, and kept identical to GOLANGCI_VERSION in the Makefile.
+          # `latest` silently changes the gate under the team: a release that
+          # adds a check turns an unrelated push red, and local `make lint`
+          # would disagree with CI about what passes.
+          version: v2.12.2
 
   security:
     runs-on: ubuntu-latest

@@ -82,7 +82,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.cfg.AuthEnabled {
 			ctx := withClaims(r.Context(), &auth.Claims{Subject: "system", Roles: []string{"oneops-admin"}})
-			next.ServeHTTP(w, r.WithContext(s.resolveTenant(w, r, ctx, "")))
+			next.ServeHTTP(w, r.WithContext(s.resolveTenant(ctx, w, r, "")))
 			return
 		}
 		const prefix = "Bearer "
@@ -97,7 +97,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			writeProblem(w, r, http.StatusUnauthorized, "unauthorized", "invalid token")
 			return
 		}
-		ctx := s.resolveTenant(w, r, withClaims(r.Context(), claims), claims.Tenant)
+		ctx := s.resolveTenant(withClaims(r.Context(), claims), w, r, claims.Tenant)
 		if ctx == nil {
 			return // resolveTenant has already written the rejection
 		}
@@ -119,7 +119,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 // suspended, or revoked — which is why the registry is consulted here and not
 // merely recorded.
 func (s *Server) resolveTenant(
-	w http.ResponseWriter, r *http.Request, ctx context.Context, external string,
+	ctx context.Context, w http.ResponseWriter, r *http.Request, external string,
 ) context.Context {
 	// A token that asserts no tenant resolves to the system tenant. This keeps
 	// single-tenant deployments and unauthenticated local runs working without
