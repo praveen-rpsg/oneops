@@ -35,6 +35,10 @@ func (s *Server) createArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	obj := req.toDomain()
+	if err := obj.ValidateInception(); err != nil {
+		s.mapError(w, r, err)
+		return
+	}
 	if err := obj.Validate(); err != nil {
 		s.mapError(w, r, err)
 		return
@@ -113,7 +117,34 @@ func (s *Server) patchArtifact(w http.ResponseWriter, r *http.Request) {
 		s.mapError(w, r, verr)
 		return
 	}
-	updated, err := s.repo.Update(r.Context(), chi.URLParam(r, "id"), expected, patch)
+	// §9.3 enforcement on the patch path (CP-1.1 completed the invariants; this
+	// is the caller that was missing). The merge is validated BEFORE it is
+	// persisted. Patch can no longer touch a constitutional dimension, so the
+	// dimensions are carried through unchanged and the invariants hold by
+	// construction; what this catches is a field-level violation such as
+	// clearing retention_policy.
+	id := chi.URLParam(r, "id")
+	current, err := s.repo.Get(r.Context(), id)
+	if err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+	merged := *current
+	if patch.RatifiedBy != nil {
+		merged.RatifiedBy = *patch.RatifiedBy
+	}
+	if patch.ReviewCycle != nil {
+		merged.ReviewCycle = *patch.ReviewCycle
+	}
+	if patch.RetentionPolicy != nil {
+		merged.RetentionPolicy = *patch.RetentionPolicy
+	}
+	if err := merged.Validate(); err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+
+	updated, err := s.repo.Update(r.Context(), id, expected, patch)
 	if err != nil {
 		s.mapError(w, r, err)
 		return
@@ -143,6 +174,10 @@ func (s *Server) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 	objs := make([]*domain.ConfigObject, 0, len(req.Items))
 	for i, it := range req.Items {
 		o := it.toDomain()
+		if err := o.ValidateInception(); err != nil {
+			s.mapError(w, r, err)
+			return
+		}
 		if err := o.Validate(); err != nil {
 			writeProblem(w, r, http.StatusUnprocessableEntity, "validation failed",
 				fmt.Sprintf("items[%d]: %s", i, err.Error()))

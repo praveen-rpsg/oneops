@@ -37,6 +37,11 @@ type Config struct {
 	JWTHMACKey  string // HS256 dev/test secret; empty => RS256/JWKS
 	JWKSURL     string // RS256 public keys (OIDC)
 
+	// OIDC client identity for the browser console. The server never uses it —
+	// it is published at /auth/config so a per-deployment console can configure
+	// itself against the customer's own identity provider without a rebuild.
+	OIDCClientID string
+
 	// Observability.
 	ServiceName  string
 	OTLPEndpoint string // empty => tracing exporter disabled
@@ -106,6 +111,7 @@ func Load() (*Config, error) {
 		JWTAudience:     getEnv("ONEOPS_JWT_AUDIENCE", "oneops"),
 		JWTHMACKey:      getEnv("ONEOPS_JWT_HMAC_KEY", "dev-insecure-secret-change-me"),
 		JWKSURL:         getEnv("ONEOPS_JWKS_URL", ""),
+		OIDCClientID:    getEnv("ONEOPS_OIDC_CLIENT_ID", ""),
 		ServiceName:     getEnv("ONEOPS_SERVICE_NAME", "oneops-controlplane"),
 		OTLPEndpoint:    getEnv("ONEOPS_OTLP_ENDPOINT", ""),
 

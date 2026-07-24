@@ -89,18 +89,25 @@ func TestRepoUpdateOptimistic(t *testing.T) {
 	ctx := context.Background()
 	created, _ := repo.Create(ctx, sample("B.md", "1.0.0"))
 
-	lc := domain.LifecycleComplete
-	updated, err := repo.Update(ctx, created.CfgID, 1, &domain.Patch{Lifecycle: &lc})
+	// Optimistic locking is exercised with a non-constitutional field: Patch no
+	// longer carries a dimension (ADR-CP5).
+	rc := "event-driven"
+	updated, err := repo.Update(ctx, created.CfgID, 1, &domain.Patch{ReviewCycle: &rc})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if updated.RowVersion != 2 || updated.Lifecycle != domain.LifecycleComplete {
+	if updated.RowVersion != 2 || updated.ReviewCycle != "event-driven" {
 		t.Fatalf("unexpected: %+v", updated)
 	}
-	if _, err := repo.Update(ctx, created.CfgID, 1, &domain.Patch{Lifecycle: &lc}); err != domain.ErrVersionMismatch {
+	// The dimensions are untouched by a registry update.
+	if updated.Lifecycle != created.Lifecycle || updated.RetentionClass != created.RetentionClass ||
+		updated.Authority != created.Authority {
+		t.Fatalf("registry update altered a dimension: %+v", updated)
+	}
+	if _, err := repo.Update(ctx, created.CfgID, 1, &domain.Patch{ReviewCycle: &rc}); err != domain.ErrVersionMismatch {
 		t.Errorf("expected ErrVersionMismatch, got %v", err)
 	}
-	if _, err := repo.Update(ctx, "missing", 1, &domain.Patch{Lifecycle: &lc}); err != domain.ErrNotFound {
+	if _, err := repo.Update(ctx, "missing", 1, &domain.Patch{ReviewCycle: &rc}); err != domain.ErrNotFound {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
 }
@@ -108,12 +115,43 @@ func TestRepoUpdateOptimistic(t *testing.T) {
 func TestRepoDelete(t *testing.T) {
 	repo := NewConfigObjectRepo(testPool(t))
 	ctx := context.Background()
-	created, _ := repo.Create(ctx, sample("C.md", "1.0.0"))
+
+	// sample() builds a governance-role object, which §8 never permits to be
+	// deleted. Use a deletable role for the round-trip assertion.
+	deletable := sample("C.md", "1.0.0")
+	deletable.Role = domain.RoleReference
+	created, _ := repo.Create(ctx, deletable)
 	if err := repo.Delete(ctx, created.CfgID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if err := repo.Delete(ctx, created.CfgID); err != domain.ErrNotFound {
 		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+// The registry DELETE path does not go through the governance engine, so it
+// enforces §8's role prohibition itself. Before this guard a protected artifact
+// could be destroyed here outright.
+func TestRepoDeleteForbiddenForProtectedRoles(t *testing.T) {
+	repo := NewConfigObjectRepo(testPool(t))
+	ctx := context.Background()
+	for i, role := range []domain.Role{
+		domain.RoleConstitution, domain.RoleGovernance,
+		domain.RoleValidation, domain.RoleEvidence, domain.RoleAudit,
+	} {
+		o := sample(fmt.Sprintf("Protected-%d.md", i), "1.0.0")
+		o.Role = role
+		o.RetentionClass = domain.RetentionWorkingMaterial // the exploitable case
+		created, err := repo.Create(ctx, o)
+		if err != nil {
+			t.Fatalf("%s: create: %v", role, err)
+		}
+		if err := repo.Delete(ctx, created.CfgID); err != domain.ErrDeletionForbidden {
+			t.Errorf("%s: Delete() = %v, want ErrDeletionForbidden", role, err)
+		}
+		if _, err := repo.Get(ctx, created.CfgID); err != nil {
+			t.Errorf("%s: object was destroyed despite the refusal: %v", role, err)
+		}
 	}
 }
 

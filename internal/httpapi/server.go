@@ -124,10 +124,20 @@ func (s *Server) Router() http.Handler {
 
 	r.Get("/healthz", s.health.Live)
 	r.Get("/readyz", s.health.Ready)
+	r.Get("/auth/config", s.serveAuthConfig)
 	r.Handle("/metrics", s.metrics.Handler())
 	r.Get("/openapi.yaml", serveOpenAPI)
 	r.Get("/docs", serveDocs)
-	r.Get("/", s.serveRoot)
+
+	// The console, when built, is served from this origin so the browser and the
+	// API share it — no CORS layer required. Falls back to the JSON service
+	// descriptor when the console has not been built.
+	if root, ok := webFS(); ok {
+		r.Get("/", serveConsoleIndex(root))
+		r.Handle("/assets/*", serveConsoleAssets(root))
+	} else {
+		r.Get("/", s.serveRoot)
+	}
 
 	// Operational diagnostics: read-only, authenticated, no secrets. Additive.
 	if s.diag != nil {
@@ -157,6 +167,7 @@ func (s *Server) Router() http.Handler {
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/ratify", s.ratifyGovernance)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/approve", s.approveGovernance)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/extend", s.extendGovernance)
+		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/replace", s.replaceGovernance)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/suspend", s.suspendGovernance)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/deprecate", s.deprecateGovernance)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/withdraw", s.withdrawGovernance)

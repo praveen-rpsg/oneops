@@ -15,6 +15,7 @@ import (
 
 	"github.com/rpsg/oneops/internal/audit"
 	"github.com/rpsg/oneops/internal/auth"
+	"github.com/rpsg/oneops/internal/authority"
 	"github.com/rpsg/oneops/internal/compliance"
 	"github.com/rpsg/oneops/internal/config"
 	"github.com/rpsg/oneops/internal/diag"
@@ -93,6 +94,29 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+
+	// M4 WP-1 — first runtime construction of the Authority Resolution Engine
+	// (M3.1–M3.5). Until now it existed only under test: nothing in the running
+	// system instantiated it. One AuthorityStore satisfies all four graph ports
+	// and backs one Resolver, which the four evaluators share; ReplacementTest
+	// composes them into §8 Replacement's precondition.
+	//
+	// Wiring is additive: it changes no existing operation. Without it the engine
+	// refuses Replacement outright (ErrReplacementTesterUnavailable) rather than
+	// performing it untested.
+	authorityStore := postgres.NewAuthorityStore(pool)
+	authorityResolver := authority.NewResolver(authorityStore)
+	replacementTest, err := authority.NewReplacementTest(
+		authority.NewActiveDependencyEvaluator(authorityResolver),
+		authority.NewResponsibilityEvaluator(authorityStore),
+		authority.NewArtifactCitationEvaluator(authorityResolver, authorityStore),
+		authority.NewGapEvaluator(authorityResolver, authorityStore),
+	)
+	if err != nil {
+		return err
+	}
+	engine.SetReplacementTester(replacementTest)
+
 	srv.SetGovernance(engine)
 
 	httpServer := srv.HTTPServer()

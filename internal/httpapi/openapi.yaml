@@ -269,6 +269,43 @@ paths:
         '409': { $ref: '#/components/responses/Problem' }
         '412': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
+  /v1/governance/{id}/replace:
+    post:
+      summary: Supersede this configuration object with a successor
+      description: >
+        Configuration State Model §8 Replacement. Gated by the four-part
+        Replacement Test (§9.1): the successor must own every responsibility of
+        the base, no Active artifact may cite the base, no Active configuration
+        may depend on it, and its removal must leave no operational gap. On
+        success the base moves to Authority=historical and
+        Retention=historical_record, and a supersedes edge is recorded. A failed
+        test returns 409 naming the clause that failed.
+      operationId: replaceGovernance
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/IfMatch' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [successor_id]
+              properties:
+                successor_id:
+                  type: string
+                  description: The configuration object that supersedes this one.
+      responses:
+        '200': { $ref: '#/components/responses/GovernanceResult' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
   /v1/governance/{id}/suspend:
     post:
       summary: Suspend a configuration object
@@ -1403,24 +1440,38 @@ components:
       enum: [current_baseline, current_planning, historical_record, superseded_planning, historical_evidence, audit_record, working_material]
     CreateRequest:
       type: object
+      description: >
+        Creates a Configuration Object in its inception state (INT-3): lifecycle
+        must be draft or in_progress, and retention_class must be
+        working_material. Every other state is reached through a §8 governance
+        operation. Authority is not accepted — it is a computed field (§6) and
+        is assigned by the platform.
       required: [artifact, version, role, lifecycle, retention_class]
       properties:
         artifact: { type: string }
         version: { type: string, example: "1.0.0" }
         role: { $ref: '#/components/schemas/Role' }
-        lifecycle: { $ref: '#/components/schemas/Lifecycle' }
-        retention_class: { $ref: '#/components/schemas/RetentionClass' }
-        authority: { $ref: '#/components/schemas/Authority' }
+        lifecycle:
+          type: string
+          enum: [draft, in_progress]
+          description: Inception lifecycle only (INT-3).
+        retention_class:
+          type: string
+          enum: [working_material]
+          description: Inception retention only (INT-3).
         ratified_by: { type: string }
         review_cycle: { type: string }
         retention_policy: { type: string }
         metadata: { type: object, additionalProperties: { type: string } }
     PatchRequest:
       type: object
+      description: >
+        Non-constitutional fields only. Lifecycle, retention_class and authority
+        cannot be patched: §8 permits no dimension change except through a
+        governance operation, and authority is computed (§6). The metadata keys
+        responsibilities, citations and coverage are §9.1 inputs and are
+        rejected here.
       properties:
-        lifecycle: { $ref: '#/components/schemas/Lifecycle' }
-        retention_class: { $ref: '#/components/schemas/RetentionClass' }
-        authority: { $ref: '#/components/schemas/Authority' }
         ratified_by: { type: string }
         review_cycle: { type: string }
         retention_policy: { type: string }

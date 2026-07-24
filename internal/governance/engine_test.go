@@ -184,7 +184,9 @@ func TestExecuteDeleteHappyAndDependents(t *testing.T) {
 func TestExecuteUnsupportedOperation(t *testing.T) {
 	s := &mockStore{getObj: obj(domain.LifecycleRatified, domain.RetentionCurrentBaseline, domain.AuthorityActive)}
 	e := newEngine(t, s, AllowAllAuthorizer{})
-	if _, err := e.Execute(context.Background(), Command{Operation: domain.OpReplacement, CfgID: "c1", Actor: "a"}); !errors.Is(err, ErrUnsupportedOperation) {
+	// Amendment stands in for "not yet implemented"; Replacement was implemented
+	// in WP-1 and no longer belongs here.
+	if _, err := e.Execute(context.Background(), Command{Operation: domain.OpAmendment, CfgID: "c1", Actor: "a"}); !errors.Is(err, ErrUnsupportedOperation) {
 		t.Fatalf("expected ErrUnsupportedOperation, got %v", err)
 	}
 	if s.tx.committed {

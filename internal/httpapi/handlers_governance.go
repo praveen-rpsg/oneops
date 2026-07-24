@@ -117,6 +117,9 @@ func (s *Server) approveGovernance(w http.ResponseWriter, r *http.Request) {
 func (s *Server) extendGovernance(w http.ResponseWriter, r *http.Request) {
 	s.execGovernance(w, r, domain.OpExtension)
 }
+func (s *Server) replaceGovernance(w http.ResponseWriter, r *http.Request) {
+	s.execGovernance(w, r, domain.OpReplacement)
+}
 func (s *Server) suspendGovernance(w http.ResponseWriter, r *http.Request) {
 	s.execGovernance(w, r, domain.OpSuspension)
 }
@@ -188,9 +191,17 @@ func (s *Server) execGovernance(w http.ResponseWriter, r *http.Request, op domai
 		writeProblem(w, r, http.StatusBadRequest, "bad request", "target_retention is required for archive")
 		return
 	}
-	if op == domain.OpExtension && cmd.SuccessorID == "" {
-		writeProblem(w, r, http.StatusBadRequest, "bad request", "successor_id is required for extend")
-		return
+	// Both successor-edge operations (§8 Extension and Replacement) require a
+	// successor. The engine re-validates; this only avoids a pointless round trip.
+	if cmd.SuccessorID == "" {
+		switch op {
+		case domain.OpExtension:
+			writeProblem(w, r, http.StatusBadRequest, "bad request", "successor_id is required for extend")
+			return
+		case domain.OpReplacement:
+			writeProblem(w, r, http.StatusBadRequest, "bad request", "successor_id is required for replace")
+			return
+		}
 	}
 
 	res, err := s.governance.Execute(r.Context(), cmd)

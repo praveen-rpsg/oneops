@@ -121,3 +121,24 @@ type AuthorityGraph interface {
 	// RecursiveDependencies returns the transitive forward closure (M2.2).
 	RecursiveDependencies(ctx context.Context, cfgID string) ([]TraversalNode, error)
 }
+
+// ReplacementTestResult is the PROSPECTIVE verdict of the four-part Replacement
+// Test (§9.1) for a specific (base, successor) pair.
+//
+// It is prospective, not observed: §8 Replacement CREATES the supersedes edge,
+// so at command time the base is not yet superseded and its computed Authority
+// cannot answer the question. AuthorityResult reports what IS; this reports what
+// WOULD hold if the replacement were applied.
+type ReplacementTestResult struct {
+	OldCfgID string
+	NewCfgID string
+	// Passed is true only when all four §9.1 conjuncts hold.
+	Passed bool
+	// FailedClause names the FIRST conjunct that failed, in the same precedence
+	// order the resolver applies. Empty when Passed.
+	FailedClause AuthorityReason
+	// Evidence carries the failing conjunct's specifics — active dependents,
+	// missing responsibilities, remaining citers, or uncovered coverage ids.
+	// §8 requires test evidence on the audit record.
+	Evidence []string
+}

@@ -43,10 +43,16 @@ type ConfigObjectRepository interface {
 }
 
 // Patch carries partial-update fields. Nil pointers are left unchanged.
+//
+// It carries NO constitutional dimension. Lifecycle, Retention and Authority
+// were removed by ADR-CP5: the registry owns persistence, governance owns
+// constitutional mutation (§8: "No dimension changes except as an operation
+// specifies"), and Authority is computed rather than asserted (§6).
+//
+// A dimension reaches storage through exactly one path —
+// governance.Store.ApplyDimensions, inside the engine's own transaction and
+// atomically with its audit event.
 type Patch struct {
-	Lifecycle       *Lifecycle
-	RetentionClass  *RetentionClass
-	Authority       *Authority
 	RatifiedBy      *string
 	ReviewCycle     *string
 	RetentionPolicy *string

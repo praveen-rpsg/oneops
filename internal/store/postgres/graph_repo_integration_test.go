@@ -146,7 +146,20 @@ func TestGraphCascadeOnConfigDelete(t *testing.T) {
 	co := NewConfigObjectRepo(pool)
 	g := NewGraphRepo(pool)
 	ctx := context.Background()
-	from, to := twoNodes(t, co)
+
+	// sample() defaults to a governance role, which §8 never permits to be
+	// deleted. This test needs a deletable endpoint to exercise the FK cascade.
+	oa := sample("Cascade-A.md", "1.0.0")
+	oa.Role = domain.RoleReference
+	a, err := co.Create(ctx, oa)
+	if err != nil {
+		t.Fatalf("seed A: %v", err)
+	}
+	b, err := co.Create(ctx, sample("Cascade-B.md", "1.0.0"))
+	if err != nil {
+		t.Fatalf("seed B: %v", err)
+	}
+	from, to := a.CfgID, b.CfgID
 
 	edge, err := g.CreateEdge(ctx, &domain.DependencyEdge{FromCfg: from, ToCfg: to, EdgeKind: domain.EdgeKindDepends})
 	if err != nil {

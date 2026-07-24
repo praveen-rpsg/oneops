@@ -223,15 +223,6 @@ func (r *ConfigObjectRepo) Update(ctx context.Context, cfgID string, expected in
 
 	a := &argset{}
 	var sets []string
-	if patch.Lifecycle != nil {
-		sets = append(sets, "lifecycle = "+a.add(string(*patch.Lifecycle)))
-	}
-	if patch.RetentionClass != nil {
-		sets = append(sets, "retention_class = "+a.add(string(*patch.RetentionClass)))
-	}
-	if patch.Authority != nil {
-		sets = append(sets, "authority = "+a.add(string(*patch.Authority)))
-	}
 	if patch.RatifiedBy != nil {
 		sets = append(sets, "ratified_by = "+a.add(*patch.RatifiedBy))
 	}
@@ -286,13 +277,29 @@ func (r *ConfigObjectRepo) Update(ctx context.Context, cfgID string, expected in
 }
 
 // Delete removes an object, or returns domain.ErrNotFound.
+//
+// The §8-protected roles are excluded in the statement itself, so this registry
+// path cannot destroy a Constitution/Governance/Validation/Evidence/Audit object
+// even though it does not go through the governance engine. The exclusion is
+// part of the DELETE rather than a preceding read, so no window exists between
+// the check and the delete. Role is immutable, so the set cannot be evaded.
 func (r *ConfigObjectRepo) Delete(ctx context.Context, cfgID string) error {
-	tag, err := r.pool.Exec(ctx, `DELETE FROM configuration_object WHERE cfg_id = $1`, cfgID)
+	tag, err := r.pool.Exec(ctx,
+		`DELETE FROM configuration_object WHERE cfg_id = $1 AND role <> ALL($2::text[])`,
+		cfgID, domain.ProtectedDeletionRoles())
 	if err != nil {
 		return fmt.Errorf("delete: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return domain.ErrNotFound
+		// Nothing was removed: either the object is absent, or its role forbids
+		// deletion. Distinguish only on this rare path so the caller gets the
+		// right status (404 vs a refusal).
+		var role string
+		qerr := r.pool.QueryRow(ctx, `SELECT role FROM configuration_object WHERE cfg_id = $1`, cfgID).Scan(&role)
+		if qerr != nil {
+			return domain.ErrNotFound
+		}
+		return domain.ErrDeletionForbidden
 	}
 	return nil
 }

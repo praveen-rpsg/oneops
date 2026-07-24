@@ -300,3 +300,52 @@ func TestGovernance_ExtendResponseCarriesSuccessor(t *testing.T) {
 		t.Fatalf("successor_id = %q, want c2", resp.SuccessorID)
 	}
 }
+
+// M4 WP-1 step 4 — the replace endpoint (§8 Replacement). Transport only: the
+// successor is required and the operation reaches the engine unchanged. Every
+// constitutional decision, including the four-part Replacement Test, is the
+// engine's.
+func TestGovernance_ReplaceRequiresSuccessor(t *testing.T) {
+	gov := &fakeGov{res: governance.Result{RowVersion: 1}}
+	h := newGovAPI(t, false, gov)
+
+	rec := do(h, http.MethodPost, "/v1/governance/c1/replace", nil, idemHdr("op-r"))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if gov.calls != 0 {
+		t.Fatalf("engine called %d times for invalid replace, want 0", gov.calls)
+	}
+
+	rec = do(h, http.MethodPost, "/v1/governance/c1/replace",
+		map[string]string{"successor_id": "c2"}, idemHdr("op-r"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if gov.lastCmd.Operation != domain.OpReplacement {
+		t.Fatalf("Operation = %q, want %q", gov.lastCmd.Operation, domain.OpReplacement)
+	}
+	if gov.lastCmd.SuccessorID != "c2" {
+		t.Fatalf("SuccessorID = %q, want c2", gov.lastCmd.SuccessorID)
+	}
+}
+
+// A failed Replacement Test is a precondition failure and must surface as 409,
+// reusing the existing TransitionError mapping — no new error contract.
+func TestGovernance_ReplaceFailedTestMapsTo409(t *testing.T) {
+	gov := &fakeGov{err: &governance.TransitionError{
+		Operation: domain.OpReplacement,
+		From:      domain.LifecycleRatified,
+		Reason:    "replacement test failed on superseded_active_dependency: [c9]",
+	}}
+	h := newGovAPI(t, false, gov)
+
+	rec := do(h, http.MethodPost, "/v1/governance/c1/replace",
+		map[string]string{"successor_id": "c2"}, idemHdr("op-r2"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "replacement test failed") {
+		t.Errorf("body does not name the failing clause: %s", rec.Body.String())
+	}
+}

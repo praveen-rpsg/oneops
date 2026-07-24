@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -122,17 +123,17 @@ func (r *fakeRepo) Update(_ context.Context, id string, expected int64, patch *d
 		return nil, domain.ErrVersionMismatch
 	}
 	c := clone(o)
-	if patch.Lifecycle != nil {
-		c.Lifecycle = *patch.Lifecycle
-	}
-	if patch.RetentionClass != nil {
-		c.RetentionClass = *patch.RetentionClass
-	}
-	if patch.Authority != nil {
-		c.Authority = *patch.Authority
-	}
 	if patch.RatifiedBy != nil {
 		c.RatifiedBy = *patch.RatifiedBy
+	}
+	// ReviewCycle and RetentionPolicy were missing here while the real
+	// repository has always written them; no test patched those fields, so the
+	// divergence went unnoticed.
+	if patch.ReviewCycle != nil {
+		c.ReviewCycle = *patch.ReviewCycle
+	}
+	if patch.RetentionPolicy != nil {
+		c.RetentionPolicy = *patch.RetentionPolicy
 	}
 	if patch.Metadata != nil {
 		c.Metadata = patch.Metadata
@@ -228,10 +229,13 @@ func do(h http.Handler, method, path string, body any, headers map[string]string
 	return rec
 }
 
+// validCreate is the INT-3 inception state — the only state Registry Create may
+// produce (CP-1.2). It previously asserted approved/current_baseline/active,
+// which fabricated a ratified baseline artifact without a §8 operation.
 func validCreate() createRequest {
 	return createRequest{
 		Artifact: "OneOps-Test.md", Version: "1.0.0", Role: "governance",
-		Lifecycle: "approved", RetentionClass: "current_baseline", Authority: "active",
+		Lifecycle: "draft", RetentionClass: "working_material",
 		Metadata: map[string]string{"owner": "platform"},
 	}
 }
@@ -285,7 +289,10 @@ func TestCreateGetDelete(t *testing.T) {
 		t.Errorf("ETag = %q", rec.Header().Get("ETag"))
 	}
 	created := decodeCO(t, rec)
-	if created.CfgID == "" || created.Authority != "active" {
+	// Create yields the INT-3 inception state, and Authority is server-computed
+	// (§6, RFC-AUTH) — never echoed back from the request.
+	if created.CfgID == "" || created.Authority != "non_normative" ||
+		created.Lifecycle != "draft" || created.RetentionClass != "working_material" {
 		t.Fatalf("unexpected created: %+v", created)
 	}
 
@@ -365,8 +372,10 @@ func TestPatchOptimisticLocking(t *testing.T) {
 	h, _ := newTestAPI(false)
 	created := decodeCO(t, do(h, http.MethodPost, "/v1/artifacts", validCreate(), nil))
 
-	lc := "complete"
-	patch := patchRequest{Lifecycle: &lc}
+	// Optimistic locking is exercised with a NON-constitutional field: patch may
+	// no longer mutate lifecycle (CP-1.3).
+	rc := "event-driven"
+	patch := patchRequest{ReviewCycle: &rc}
 
 	// Missing If-Match => 428.
 	if rec := do(h, http.MethodPatch, "/v1/artifacts/"+created.CfgID, patch, nil); rec.Code != http.StatusPreconditionRequired {
@@ -382,13 +391,20 @@ func TestPatchOptimisticLocking(t *testing.T) {
 		t.Fatalf("patch = %d (%s)", rec.Code, rec.Body.String())
 	}
 	updated := decodeCO(t, rec)
-	if updated.RowVersion != 2 || updated.Lifecycle != "complete" {
+	if updated.RowVersion != 2 || updated.ReviewCycle != "event-driven" {
 		t.Fatalf("unexpected update: %+v", updated)
 	}
-	// Bad enum in patch => 422.
-	blc := "bogus"
-	if rec := do(h, http.MethodPatch, "/v1/artifacts/"+created.CfgID, patchRequest{Lifecycle: &blc}, map[string]string{"If-Match": `"2"`}); rec.Code != 422 {
-		t.Errorf("expected 422, got %d", rec.Code)
+	// The dimensions are untouched by a patch.
+	if updated.Lifecycle != "draft" || updated.RetentionClass != "working_material" ||
+		updated.Authority != "non_normative" {
+		t.Fatalf("patch altered a constitutional dimension: %+v", updated)
+	}
+	// Validate() now runs on the patch path: clearing retention_policy is a
+	// field-level violation and must be refused rather than persisted.
+	empty := ""
+	if rec := do(h, http.MethodPatch, "/v1/artifacts/"+created.CfgID,
+		patchRequest{RetentionPolicy: &empty}, map[string]string{"If-Match": `"2"`}); rec.Code != 422 {
+		t.Errorf("clearing retention_policy: expected 422, got %d", rec.Code)
 	}
 }
 
@@ -445,4 +461,131 @@ func TestAuthAndRBAC(t *testing.T) {
 	if rec := do(h, http.MethodGet, "/v1/artifacts", nil, map[string]string{"Authorization": "Bearer garbage"}); rec.Code != 401 {
 		t.Errorf("garbage token = %d, want 401", rec.Code)
 	}
+}
+
+// CP-1.2 — Registry Create yields the INT-3 inception state and nothing else.
+// Before this, a single POST could fabricate a ratified baseline artifact with
+// Authority asserted by the client, no §8 operation, and no audit event.
+func TestCreateRejectsNonInceptionState(t *testing.T) {
+	h, _ := newTestAPI(false)
+
+	cases := []struct {
+		name      string
+		lifecycle string
+		retention string
+	}{
+		{"ratified lifecycle", "ratified", "working_material"},
+		{"approved lifecycle", "approved", "working_material"},
+		{"withdrawn lifecycle", "withdrawn", "working_material"},
+		{"current_baseline retention", "draft", "current_baseline"},
+		{"historical_record retention", "draft", "historical_record"},
+		{"audit_record retention", "draft", "audit_record"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := validCreate()
+			req.Lifecycle, req.RetentionClass = tc.lifecycle, tc.retention
+			rec := do(h, http.MethodPost, "/v1/artifacts", req, nil)
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want 422 (INT-3)", rec.Code)
+			}
+		})
+	}
+
+	// The two inception lifecycles remain accepted.
+	for _, lc := range []string{"draft", "in_progress"} {
+		req := validCreate()
+		req.Lifecycle = lc
+		req.Artifact = "Inception-" + lc + ".md"
+		if rec := do(h, http.MethodPost, "/v1/artifacts", req, nil); rec.Code != http.StatusCreated {
+			t.Errorf("lifecycle %s: status = %d, want 201", lc, rec.Code)
+		}
+	}
+}
+
+// Authority is computed (§6). A client-supplied value must be ignored entirely
+// rather than honoured — the field no longer exists on the request contract.
+func TestCreateIgnoresClientSuppliedAuthority(t *testing.T) {
+	h, _ := newTestAPI(false)
+	body := map[string]any{
+		"artifact": "Asserted.md", "version": "1.0.0", "role": "reference",
+		"lifecycle": "draft", "retention_class": "working_material",
+		"authority": "active", // must not be honoured
+	}
+	rec := do(h, http.MethodPost, "/v1/artifacts", body, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", rec.Code)
+	}
+	if got := decodeCO(t, rec); got.Authority != "non_normative" {
+		t.Fatalf("authority = %q, want non_normative — a client asserted it", got.Authority)
+	}
+}
+
+// Bulk create enforces the same constraint per item.
+func TestBulkCreateRejectsNonInceptionState(t *testing.T) {
+	h, _ := newTestAPI(false)
+	ok := validCreate()
+	bad := validCreate()
+	bad.Artifact, bad.Lifecycle, bad.RetentionClass = "Bad.md", "ratified", "current_baseline"
+
+	rec := do(h, http.MethodPost, "/v1/artifacts/bulk",
+		map[string]any{"items": []createRequest{ok, bad}}, nil)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 for a non-inception item", rec.Code)
+	}
+}
+
+// CP-1.3 — PATCH may no longer carry constitutional state. Before this, a single
+// PATCH moved a draft artifact to ratified/current_baseline/active with no §8
+// operation and no audit event (PM/CP-0.2 measured 0 audit rows).
+func TestPatchRejectsConstitutionalDimensions(t *testing.T) {
+	h, _ := newTestAPI(false)
+	created := decodeCO(t, do(h, http.MethodPost, "/v1/artifacts", validCreate(), nil))
+	hdr := map[string]string{"If-Match": `"1"`}
+
+	// The fields no longer exist on the contract, so they are sent as raw JSON.
+	for _, body := range []map[string]any{
+		{"lifecycle": "ratified"},
+		{"retention_class": "current_baseline"},
+		{"authority": "active"},
+		{"lifecycle": "ratified", "retention_class": "current_baseline", "authority": "active"},
+	} {
+		rec := do(h, http.MethodPatch, "/v1/artifacts/"+created.CfgID, body, hdr)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("body %v: status = %d, want 200 (unknown fields ignored)", body, rec.Code)
+		}
+		got := decodeCO(t, rec)
+		if got.Lifecycle != "draft" || got.RetentionClass != "working_material" ||
+			got.Authority != "non_normative" {
+			t.Fatalf("body %v mutated a constitutional dimension: %+v", body, got)
+		}
+		hdr = map[string]string{"If-Match": `"` + itoa(got.RowVersion) + `"`}
+	}
+}
+
+// The three §9.1 input keys are constitutional inputs carried in metadata
+// (CP-0.1); patching them would change computed Authority and the Replacement
+// Test verdict without a §8 operation.
+func TestPatchRejectsConstitutionalMetadataKeys(t *testing.T) {
+	h, _ := newTestAPI(false)
+	created := decodeCO(t, do(h, http.MethodPost, "/v1/artifacts", validCreate(), nil))
+
+	for _, key := range []string{"responsibilities", "citations", "coverage"} {
+		rec := do(h, http.MethodPatch, "/v1/artifacts/"+created.CfgID,
+			patchRequest{Metadata: map[string]string{key: "x"}}, map[string]string{"If-Match": `"1"`})
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("metadata key %q: status = %d, want 422", key, rec.Code)
+		}
+	}
+
+	// Descriptive metadata remains writable.
+	rec := do(h, http.MethodPatch, "/v1/artifacts/"+created.CfgID,
+		patchRequest{Metadata: map[string]string{"owner": "platform"}}, map[string]string{"If-Match": `"1"`})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("descriptive metadata: status = %d, want 200", rec.Code)
+	}
+}
+
+func itoa(v int64) string {
+	return strconv.FormatInt(v, 10)
 }

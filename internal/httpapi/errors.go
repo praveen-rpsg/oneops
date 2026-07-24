@@ -54,6 +54,10 @@ func (s *Server) mapError(w http.ResponseWriter, r *http.Request, err error) {
 		writeProblem(w, r, http.StatusConflict, "conflict", "artifact/version already exists")
 	case errors.Is(err, domain.ErrVersionMismatch):
 		writeProblem(w, r, http.StatusPreconditionFailed, "precondition failed", "row version mismatch")
+	case errors.Is(err, domain.ErrDeletionForbidden):
+		// §8: the role may never be deleted. A refusal on constitutional grounds,
+		// not a client error in the request itself.
+		writeProblem(w, r, http.StatusConflict, "conflict", err.Error())
 	default:
 		if ve, ok := domain.AsValidation(err); ok {
 			writeProblem(w, r, http.StatusUnprocessableEntity, "validation failed", ve.Error())

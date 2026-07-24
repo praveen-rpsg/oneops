@@ -11,6 +11,10 @@ LDFLAGS := -s -w -X $(PKG)/pkg/version.Version=$(VERSION) -X $(PKG)/pkg/version.
 MIGRATIONS_DIR := internal/store/migrate/sql
 ATLAS := docker run --rm -v $(PWD):/src -w /src arigaio/atlas:latest
 
+# Load .env (gitignored) so local runs hit this machine's port mapping rather
+# than the compose defaults, which other projects here already occupy.
+DOTENV := set -a; if [ -f .env ]; then . ./.env; fi; set +a;
+
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -25,7 +29,7 @@ build: ## Build the control-plane binary into ./bin
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/controlplane ./cmd/controlplane
 
 run: ## Run the control plane locally
-	go run ./cmd/controlplane
+	@$(DOTENV) go run ./cmd/controlplane
 
 test: ## Run all tests with the race detector and coverage
 	go test ./... -race -cover
@@ -45,8 +49,8 @@ vet: ## Run go vet
 tidy: ## Tidy go modules
 	go mod tidy
 
-test-integration: ## Run integration tests (requires TEST_DATABASE_URL)
-	go test ./... -tags=integration -race -cover
+test-integration: ## Run integration tests (TEST_DATABASE_URL, from .env if present)
+	@$(DOTENV) go test ./... -tags=integration -race -cover
 
 docker: ## Build the container image
 	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t oneops/controlplane:$(VERSION) .
@@ -64,3 +68,11 @@ migrate-validate: ## Validate the Atlas migration directory
 
 clean: ## Remove build artifacts
 	rm -rf bin coverage.out coverage.html cover.out
+
+web: ## Build the console into the Go embed directory
+	pnpm --dir web install --frozen-lockfile
+	pnpm --dir web build
+
+web-test: ## Typecheck and unit-test the console
+	pnpm --dir web exec tsc -b --noEmit
+	pnpm --dir web exec vitest run
