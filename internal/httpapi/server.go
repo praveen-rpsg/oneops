@@ -72,6 +72,10 @@ type Server struct {
 	// Read-only compliance & evidence engine; nil until SetCompliance.
 	compliance       complianceService
 	complianceExport func()
+
+	// Tenant registry; nil until SetTenants. While nil the platform resolves
+	// every request to the system tenant, which is the pre-tenancy behaviour.
+	tenants domain.TenantRepository
 }
 
 // SetGovernance wires the Governance Engine behind the constitutional-operation
@@ -190,6 +194,13 @@ func (s *Server) Router() http.Handler {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/metrics", s.adminMetrics)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/config", s.adminConfig)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/report", s.adminReport)
+
+		// Tenant registry — the isolation boundary every other row belongs to.
+		// Administering tenants is strictly more privileged than administering
+		// data inside one, so these require admin like the rest of /admin.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/tenants", s.listTenants)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/tenants", s.createTenant)
+		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/tenants/{id}", s.patchTenant)
 
 		// Event delivery — webhook administration (admin permission).
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/webhooks", s.listWebhooks)

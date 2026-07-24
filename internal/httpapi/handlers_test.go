@@ -202,7 +202,9 @@ func (f *fakeIdem) Save(_ context.Context, key, _, _ string, status int, body []
 
 // ---- harness ----------------------------------------------------------------
 
-func newTestAPI(authEnabled bool) (http.Handler, *fakeRepo) {
+// newTestServer builds the server itself, for tests that need to wire an
+// optional subsystem (SetTenants, SetGraph, ...) before routing.
+func newTestServer(authEnabled bool) (*Server, *fakeRepo) {
 	repo := newFakeRepo()
 	cfg := &config.Config{
 		HTTPAddr: ":0", DefaultPageSize: 50, MaxPageSize: 200,
@@ -211,6 +213,11 @@ func newTestAPI(authEnabled bool) (http.Handler, *fakeRepo) {
 	s := NewServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)),
 		repo, newFakeIdem(), auth.NewVerifier(tIss, tAud, tSecret, ""),
 		observability.NewMetrics(), func(context.Context) error { return nil })
+	return s, repo
+}
+
+func newTestAPI(authEnabled bool) (http.Handler, *fakeRepo) {
+	s, repo := newTestServer(authEnabled)
 	return s.Router(), repo
 }
 
@@ -256,6 +263,25 @@ func mintToken(t *testing.T, roles []string) string {
 		"exp": time.Now().Add(time.Hour).Unix(), "roles": roles,
 	})
 	s, err := tok.SignedString([]byte(tSecret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// mintTenantToken mints an admin token asserting a tenant. An empty external id
+// omits the claim entirely, which is the case a pre-tenancy token represents.
+func mintTenantToken(t *testing.T, external string) string {
+	t.Helper()
+	claims := jwt.MapClaims{
+		"sub": "u", "iss": tIss, "aud": tAud,
+		"exp":   time.Now().Add(time.Hour).Unix(),
+		"roles": []string{"oneops-admin"},
+	}
+	if external != "" {
+		claims["tenant"] = external
+	}
+	s, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(tSecret))
 	if err != nil {
 		t.Fatal(err)
 	}

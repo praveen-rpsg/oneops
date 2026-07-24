@@ -733,6 +733,71 @@ paths:
 
   # Policy automation (admin). Policies react to committed governance events; they
   # never participate in governance execution.
+  /v1/admin/tenants:
+    get:
+      summary: List tenants
+      description: >-
+        Returns every registered tenant. Administering tenants is strictly more
+        privileged than administering data inside one, so this requires admin.
+      operationId: listTenants
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Tenants
+          content: { application/json: { schema: { $ref: '#/components/schemas/TenantList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Register a tenant
+      description: >-
+        Creates an isolation boundary. The tenant_id is minted server-side so a
+        caller cannot choose an identifier that collides with the system tenant.
+      operationId: createTenant
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateTenantRequest' } } }
+      responses:
+        '201':
+          description: Created tenant
+          content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/tenants/{id}:
+    patch:
+      summary: Suspend or reactivate a tenant
+      description: >-
+        Suspension is the only mutation the registry exposes. A tenant is never
+        deleted: its audit history is append-only by constitutional guarantee,
+        so removing the tenant would orphan records that cannot be removed. The
+        system tenant cannot be suspended — doing so would lock the platform out
+        of every row written before tenancy existed.
+      operationId: patchTenant
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PatchTenantRequest' } } }
+      responses:
+        '200':
+          description: Updated tenant
+          content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
   /v1/admin/policies:
     get:
       summary: List policies
@@ -1013,6 +1078,59 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/GovernanceResponse' }
   schemas:
+    Tenant:
+      type: object
+      required: [tenant_id, slug, name, status, row_version, created_at, updated_at]
+      properties:
+        tenant_id:
+          type: string
+          description: Platform-minted identifier. Never supplied by the caller.
+        slug:
+          type: string
+          description: Lowercase DNS-style label, 2-63 characters.
+          pattern: '^[a-z0-9][a-z0-9-]{1,62}$'
+        name: { type: string }
+        external_id:
+          type: string
+          description: >-
+            Identifier the identity provider asserts for this tenant (Entra tid,
+            Okta org id). Bearer tokens are resolved against this, never against
+            tenant_id, so the IdP can change without rewriting foreign keys.
+            Empty until an identity provider is bound.
+        status:
+          type: string
+          enum: [active, suspended]
+        row_version:
+          type: integer
+          format: int64
+          description: Optimistic-concurrency guard.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TenantList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Tenant' }
+    CreateTenantRequest:
+      type: object
+      required: [slug, name]
+      properties:
+        slug:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9-]{1,62}$'
+        name: { type: string }
+        external_id:
+          type: string
+          description: Optional. Must be unique across tenants when non-empty.
+    PatchTenantRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [active, suspended]
     GovernanceArchiveRequest:
       type: object
       required: [target_retention]

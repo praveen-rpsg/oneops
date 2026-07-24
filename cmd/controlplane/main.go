@@ -232,6 +232,13 @@ func run(logger *slog.Logger) error {
 	complianceSvc := compliance.NewService(repo, auditVerifier, timelineSvc, complianceMetrics)
 	srv.SetCompliance(complianceSvc, complianceMetrics.IncExport)
 
+	// Tenant registry: the isolation boundary a bearer token is resolved
+	// against. Wiring it makes the authentication boundary reject tokens
+	// asserting an unregistered or suspended tenant; while unwired every
+	// request resolves to the system tenant, which is the pre-tenancy
+	// behaviour and keeps single-tenant deployments working unchanged.
+	srv.SetTenants(postgres.NewTenantStore(pool))
+
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.
 	diagBuilder := buildDiagnostics(cfg, startedAt, pool, scheduler)
