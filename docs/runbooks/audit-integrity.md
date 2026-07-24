@@ -74,3 +74,32 @@ is safe to log or surface to an operator. No separate tooling or DB writes.
   write. Investigate durability of the PostgreSQL volume/backups first.
 - After root-cause, remediation is a governance decision recorded via the
   amendment/ADR process — not an operational hotfix.
+
+## 7. Adding an audit_event partition
+
+`audit_event` is LIST-partitioned by `chain_id`, with a DEFAULT partition today
+and per-chain (later per-month) partitions expected operationally under ECR-09.
+
+**Any new partition must carry the TRUNCATE guard.** PostgreSQL propagates
+row-level triggers from a partitioned parent to its partitions, but *not*
+statement-level `TRUNCATE` triggers. A partition added without the guard is
+directly truncatable, which erases audit history that `DELETE` correctly
+refuses — the exact bypass migration `20260728000002` was written to close.
+
+In the same migration that creates the partition:
+
+```sql
+CREATE OR REPLACE TRIGGER trg_audit_event_no_truncate
+    BEFORE TRUNCATE ON <new_partition>
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_event_immutable();
+```
+
+`TestAuditPartitionsCannotBeTruncatedDirectly` enumerates every partition from
+`pg_inherits` and fails the build if any one of them can be truncated, so an
+omission is caught in CI rather than discovered during an incident.
+
+A DDL event trigger to attach this automatically was implemented and rejected —
+event triggers are database-wide while the function they call is schema-scoped,
+so it broke migrations in every other schema and would fail all DDL if the
+schema holding the function were dropped. The rationale is recorded in the
+migration itself.
