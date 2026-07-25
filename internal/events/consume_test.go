@@ -190,7 +190,7 @@ func TestRetry_ReusesExistingDispatcher(t *testing.T) {
 		t.Fatalf("requeue failed: n=%d status=%q", n, del.status("d1"))
 	}
 	doer := doerFunc(func(*http.Request) (*http.Response, error) { return resp(200), nil })
-	NewDispatcher(del, wh, doer, nil, quiet(), DispatcherConfig{}).RunOnce(context.Background())
+	NewDispatcher(del, wh, newFakeOwners(), doer, nil, quiet(), DispatcherConfig{}).RunOnce(context.Background())
 	if del.status("d1") != StatusDelivered {
 		t.Fatalf("existing dispatcher did not deliver requeued item: %q", del.status("d1"))
 	}

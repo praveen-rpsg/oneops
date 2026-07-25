@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/rpsg/oneops/internal/domain"
+	"github.com/rpsg/oneops/internal/events"
 )
 
 // AuditStore persists the tamper-evident audit chain (audit_event) and its
@@ -188,6 +189,30 @@ func (s *AuditStore) ReadEvent(ctx context.Context, chainID string, seq int64) (
 		return nil, fmt.Errorf("read audit event: %w", err)
 	}
 	return e, nil
+}
+
+// ResolveEventOwner returns the tenant that owns the committed event at
+// (chainID, seq), read straight from the append-only audit log.
+//
+// This is the authoritative source for execution-time ownership (ADR-TENANCY-003).
+// It reads only tenant_id, and reads it from audit_event rather than from any
+// queue row, because the queue row's owner is a forgeable label while this
+// value is written inside the governance transaction and never rewritten. A
+// missing row is events.ErrEventNotFound: an event absent from an append-only
+// log will never appear, so the delivery referencing it is refused rather than
+// retried.
+func (s *AuditStore) ResolveEventOwner(ctx context.Context, chainID string, seq int64) (string, error) {
+	var tenantID string
+	err := s.pool.QueryRow(ctx,
+		`SELECT tenant_id FROM audit_event WHERE chain_id = $1 AND seq = $2`,
+		chainID, seq).Scan(&tenantID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", events.ErrEventNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve event owner: %w", err)
+	}
+	return tenantID, nil
 }
 
 // VerifyRangeReader streams the events of chainID with seq in [fromSeq, toSeq]

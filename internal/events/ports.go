@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -46,3 +47,26 @@ type DeliveryStore interface {
 type HTTPDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
+
+// EventOwnerResolver returns the authoritative tenant that owns a committed
+// event, read from the audit log rather than from any queue row.
+//
+// This is the source of truth for execution-time ownership. A delivery row
+// carries an owner label, but that label is queue metadata: it can be forged
+// self-consistently by anyone with database write access, and the dispatcher
+// dead-lettering a mismatch between two fields of the same forged row proves
+// nothing. audit_event is append-only and its tenant_id is written inside the
+// single governance transaction (ADR-AUDIT-005), so it is the one place an
+// event's owner cannot be rewritten after the fact.
+//
+// ErrEventNotFound means no committed event matches — the delivery references
+// an event that does not exist, which is itself grounds to refuse.
+type EventOwnerResolver interface {
+	ResolveEventOwner(ctx context.Context, chainID string, seq int64) (string, error)
+}
+
+// ErrEventNotFound is returned by EventOwnerResolver when no committed event
+// matches the chain and sequence. Execution treats it as a refusal, not a
+// transient error: an event that is not in the authoritative log will never
+// appear there, because the log is append-only and sequence numbers are dense.
+var ErrEventNotFound = errors.New("no committed event for chain and sequence")

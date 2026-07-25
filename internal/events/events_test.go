@@ -203,6 +203,28 @@ func resp(code int) *http.Response {
 // would otherwise silently depend on.
 const testTenant = "t-test"
 
+// fakeOwners is a stand-in EventOwnerResolver. It returns the authoritative
+// owner for a chain from a map, defaulting to testTenant so the existing
+// self-consistent fixtures resolve to the same tenant their webhook and event
+// already name. A test that needs the authoritative owner to DISAGREE with the
+// queue label sets it explicitly — that is the forged-row case.
+type fakeOwners struct {
+	byChain map[string]string
+	err     error
+}
+
+func newFakeOwners() *fakeOwners { return &fakeOwners{byChain: map[string]string{}} }
+
+func (f *fakeOwners) ResolveEventOwner(_ context.Context, chainID string, _ int64) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	if owner, ok := f.byChain[chainID]; ok {
+		return owner, nil
+	}
+	return testTenant, nil
+}
+
 func auditEvt(chain string, seq int64, op string) domain.AuditEvent {
 	return domain.AuditEvent{
 		TenantID: testTenant,
@@ -316,7 +338,7 @@ func TestDispatcher_DeliversSignedPayload(t *testing.T) {
 		gotBody, _ = io.ReadAll(r.Body)
 		return resp(200), nil
 	})
-	d := NewDispatcher(del, wh, doer, nil, quiet(), DispatcherConfig{})
+	d := NewDispatcher(del, wh, newFakeOwners(), doer, nil, quiet(), DispatcherConfig{})
 	d.RunOnce(context.Background())
 
 	if del.status("d1") != StatusDelivered {
@@ -333,7 +355,7 @@ func TestDispatcher_RetryThenDeadLetter(t *testing.T) {
 	del := newFakeDeliveries()
 	_ = del.Enqueue(context.Background(), []Delivery{newDelivery("d1", "w1", time.Unix(0, 0))})
 	doer := doerFunc(func(*http.Request) (*http.Response, error) { return resp(500), nil })
-	d := NewDispatcher(del, wh, doer, nil, quiet(), DispatcherConfig{BaseBackoff: time.Millisecond})
+	d := NewDispatcher(del, wh, newFakeOwners(), doer, nil, quiet(), DispatcherConfig{BaseBackoff: time.Millisecond})
 
 	// Attempt 1: fail -> retry (retryCount 1 < 2).
 	d.RunOnce(context.Background())
@@ -364,7 +386,7 @@ func TestDispatcher_SecretRotationAppliesToPending(t *testing.T) {
 		gotBody, _ = io.ReadAll(r.Body)
 		return resp(200), nil
 	})
-	NewDispatcher(del, wh, doer, nil, quiet(), DispatcherConfig{}).RunOnce(context.Background())
+	NewDispatcher(del, wh, newFakeOwners(), doer, nil, quiet(), DispatcherConfig{}).RunOnce(context.Background())
 
 	ts, _ := strconv.ParseInt(gotTS, 10, 64)
 	if !Verify("new", ts, "d1", gotBody, gotSig) || Verify("old", ts, "d1", gotBody, gotSig) {
@@ -376,7 +398,7 @@ func TestDispatcher_MissingWebhookDeadLetters(t *testing.T) {
 	wh := newFakeWebhooks() // empty
 	del := newFakeDeliveries()
 	_ = del.Enqueue(context.Background(), []Delivery{newDelivery("d1", "gone", time.Now())})
-	NewDispatcher(del, wh, doerFunc(func(*http.Request) (*http.Response, error) { return resp(200), nil }), nil, quiet(), DispatcherConfig{}).RunOnce(context.Background())
+	NewDispatcher(del, wh, newFakeOwners(), doerFunc(func(*http.Request) (*http.Response, error) { return resp(200), nil }), nil, quiet(), DispatcherConfig{}).RunOnce(context.Background())
 	if del.status("d1") != StatusDeadLetter {
 		t.Fatalf("status = %q, want dead_letter", del.status("d1"))
 	}
@@ -401,7 +423,7 @@ func TestDispatcher_MetricsRecorded(t *testing.T) {
 	_ = del.Enqueue(context.Background(), []Delivery{newDelivery("d1", "w1", time.Now())})
 	m := &countMetrics{}
 	doer := doerFunc(func(*http.Request) (*http.Response, error) { return resp(500), nil })
-	NewDispatcher(del, wh, doer, m, quiet(), DispatcherConfig{BaseBackoff: time.Millisecond}).RunOnce(context.Background())
+	NewDispatcher(del, wh, newFakeOwners(), doer, m, quiet(), DispatcherConfig{BaseBackoff: time.Millisecond}).RunOnce(context.Background())
 	if m.failure != 1 || m.retry != 1 || m.latencies != 1 {
 		t.Fatalf("metrics = %+v", m)
 	}
@@ -504,32 +526,35 @@ func TestRelay_DoesNotCrossTenantBoundary(t *testing.T) {
 	}
 }
 
-// A queue is storage, and storage is untrusted.
+// A queue is storage, and storage is untrusted — and the delivery row's own
+// owner label is part of the untrusted storage.
 //
-// The producer refusing to create a cross-tenant pairing does not stop one
-// existing: a row may predate ownership, arrive from a restore, or be written
-// by a future regression. Verified against the running service — a delivery
-// inserted directly into webhook_delivery, pairing one tenant's audit event
-// with another tenant's endpoint, was dispatched and marked delivered while the
-// producer was correctly refusing that exact pairing.
-func TestDispatcher_RefusesCrossTenantDelivery(t *testing.T) {
+// The authoritative owner is re-derived from the audit log, never read from the
+// delivery. This is the test the previous fix could not pass: the forged row is
+// self-consistent — its label names the attacker, matching the attacker's
+// webhook — yet the audit log says the event belongs to the victim. Against the
+// running service the earlier, label-trusting validator delivered exactly this.
+func TestDispatcher_ForgedSelfConsistentRowIsRefused(t *testing.T) {
 	wh := newFakeWebhooks(Webhook{
 		ID: "w-attacker", TenantID: "t-attacker", URL: "http://attacker.example",
 		Secret: "s", Enabled: true, MaxRetries: 3,
 	})
 	del := newFakeDeliveries()
 
-	// The forged item: the attacker's endpoint, the victim's event.
+	// The forged delivery: label says t-attacker, matching the webhook.
 	forged := Delivery{
 		ID: "dlv-forged", WebhookID: "w-attacker", Status: StatusPending,
 		Event: Event{
-			TenantID: "t-victim", ChainID: "c-victim", CfgID: "c-victim",
+			TenantID: "t-attacker", ChainID: "c-victim", CfgID: "c-victim",
 			Operation: "ratification", Seq: 1, EventID: "evt-1",
 		},
 	}
+	// The authoritative log disagrees: the event at c-victim/1 belongs to the victim.
+	owners := newFakeOwners()
+	owners.byChain["c-victim"] = "t-victim"
 
 	called := false
-	d := NewDispatcher(del, wh, doerFunc(func(*http.Request) (*http.Response, error) {
+	d := NewDispatcher(del, wh, owners, doerFunc(func(*http.Request) (*http.Response, error) {
 		called = true
 		return resp(200), nil
 	}), nil, quiet(), DispatcherConfig{})
@@ -537,39 +562,69 @@ func TestDispatcher_RefusesCrossTenantDelivery(t *testing.T) {
 	status, err := d.Deliver(context.Background(), forged)
 
 	if called {
-		t.Fatal("the dispatcher made an outbound request for another tenant's event")
+		t.Fatal("the dispatcher delivered a forged self-consistent row across tenants")
 	}
 	if !errors.Is(err, domain.ErrOwnershipMismatch) {
 		t.Fatalf("err = %v, want ErrOwnershipMismatch", err)
 	}
-	// Dead-lettered, not retried: a mismatch is never transient, and retrying
-	// would repeatedly attempt a cross-tenant delivery.
 	if status != StatusDeadLetter {
 		t.Errorf("status = %q, want %q", status, StatusDeadLetter)
 	}
 }
 
-// A delivery whose owner is unknown — the shape a row predating ownership has —
-// must also be refused rather than treated as universally deliverable.
-func TestDispatcher_RefusesUnownedDelivery(t *testing.T) {
+// An event absent from the authoritative log — a delivery referencing a chain
+// and seq that never committed — is refused, not retried. It will never appear:
+// the log is append-only.
+func TestDispatcher_UnknownEventIsRefused(t *testing.T) {
 	wh := newFakeWebhooks(Webhook{
 		ID: "w", TenantID: "t-a", URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 3,
 	})
 	del := newFakeDeliveries()
+	owners := newFakeOwners()
+	owners.err = ErrEventNotFound
+
 	called := false
-	d := NewDispatcher(del, wh, doerFunc(func(*http.Request) (*http.Response, error) {
+	d := NewDispatcher(del, wh, owners, doerFunc(func(*http.Request) (*http.Response, error) {
 		called = true
 		return resp(200), nil
 	}), nil, quiet(), DispatcherConfig{})
 
 	_, err := d.Deliver(context.Background(), Delivery{
-		ID: "dlv-unowned", WebhookID: "w", Status: StatusPending,
-		Event: Event{ChainID: "c", CfgID: "c", Operation: "ratification"},
+		ID: "dlv-phantom", WebhookID: "w", Status: StatusPending,
+		Event: Event{TenantID: "t-a", ChainID: "c-nonexistent", Seq: 99},
 	})
 	if called {
-		t.Fatal("the dispatcher delivered work of unknown ownership")
+		t.Fatal("the dispatcher delivered an event absent from the authoritative log")
 	}
-	if !errors.Is(err, domain.ErrOwnershipMismatch) {
-		t.Fatalf("err = %v, want ErrOwnershipMismatch", err)
+	if !errors.Is(err, ErrEventNotFound) {
+		t.Fatalf("err = %v, want ErrEventNotFound", err)
+	}
+}
+
+// A resolver failure fails closed: the dispatcher must not deliver when it
+// cannot establish ownership.
+func TestDispatcher_ResolverFailureFailsClosed(t *testing.T) {
+	wh := newFakeWebhooks(Webhook{
+		ID: "w", TenantID: "t-a", URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 3,
+	})
+	del := newFakeDeliveries()
+	owners := newFakeOwners()
+	owners.err = errors.New("database unavailable")
+
+	called := false
+	d := NewDispatcher(del, wh, owners, doerFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return resp(200), nil
+	}), nil, quiet(), DispatcherConfig{})
+
+	_, err := d.Deliver(context.Background(), Delivery{
+		ID: "dlv-x", WebhookID: "w", Status: StatusPending,
+		Event: Event{TenantID: "t-a", ChainID: "c", Seq: 1},
+	})
+	if called {
+		t.Fatal("the dispatcher delivered while ownership was unresolvable")
+	}
+	if err == nil {
+		t.Fatal("a resolver failure must refuse the delivery")
 	}
 }

@@ -387,3 +387,55 @@ func TestWorkersFanOutThroughOwnershipFramework(t *testing.T) {
 		}
 	}
 }
+
+// Execution-time ownership must be re-derived, never read from the queue.
+//
+// The dispatcher's first ownership fix compared the delivery row's owner label
+// against the webhook. A row forged self-consistently — label naming the
+// attacker, matching the attacker's webhook, while its event content belonged
+// to the victim — passed, and was delivered against the running service. The
+// label is queue metadata and queue metadata is forgeable.
+//
+// The fix re-derives ownership from the audit log via EventOwnerResolver. This
+// test fails if the dispatcher ever reads del.OwnerTenantID or del.Event.TenantID
+// to make an authorization decision instead of resolving it, which is the shape
+// the regression would take.
+func TestDispatcherResolvesOwnershipAuthoritatively(t *testing.T) {
+	src, err := os.ReadFile("../events/dispatcher.go")
+	if err != nil {
+		t.Fatalf("read dispatcher: %v", err)
+	}
+	body := string(src)
+
+	if !strings.Contains(body, "ResolveEventOwner") {
+		t.Error("the dispatcher does not call ResolveEventOwner; execution-time " +
+			"ownership must be re-derived from the audit log, not read from the queue row")
+	}
+
+	// AuthorizeExecution must be handed the authoritative owner, not the
+	// delivery. Passing del (which carries the forgeable label) into the check
+	// is precisely the defect this replaced.
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "../events/dispatcher.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse dispatcher: %v", err)
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "AuthorizeExecution" {
+			return true
+		}
+		for _, arg := range call.Args {
+			if id, ok := arg.(*ast.Ident); ok && id.Name == "del" {
+				t.Errorf("AuthorizeExecution is passed the delivery row (%q) at %s; it "+
+					"must receive the authoritatively resolved owner, or a forged queue "+
+					"label defeats the check", id.Name, fset.Position(call.Pos()))
+			}
+		}
+		return true
+	})
+}

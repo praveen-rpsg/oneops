@@ -246,7 +246,14 @@ func run(logger *slog.Logger) error {
 	webhookAdminStore := postgres.NewWebhookStore(appPool)
 	eventMetrics := events.NewPromMetrics(metrics.Registry())
 	relay := events.NewRelay(auditStore, webhookStore, webhookStore, webhookStore, eventMetrics, logger, events.RelayConfig{})
-	dispatcher := events.NewDispatcher(webhookStore, webhookStore, &http.Client{Timeout: 15 * time.Second}, eventMetrics, logger, events.DispatcherConfig{})
+	// auditStore resolves event ownership authoritatively for the dispatcher.
+	// It reads audit_event.tenant_id — written inside the governance transaction
+	// and never rewritten — rather than trusting the owner label on the queued
+	// delivery, which is forgeable by anyone with database write access
+	// (ADR-TENANCY-003). It is on the privileged pool by design: the dispatcher
+	// serves every tenant, and this read is the security source, not tenant
+	// data returned to a caller.
+	dispatcher := events.NewDispatcher(webhookStore, webhookStore, auditStore, &http.Client{Timeout: 15 * time.Second}, eventMetrics, logger, events.DispatcherConfig{})
 	go func() { _ = relay.Run(ctx) }()
 	go func() { _ = dispatcher.Run(ctx) }()
 	srv.SetWebhooks(webhookAdminStore, func(ctx context.Context, wh events.Webhook) (events.DeliveryStatus, error) {

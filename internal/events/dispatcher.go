@@ -55,6 +55,7 @@ func (c *DispatcherConfig) withDefaults() {
 type Dispatcher struct {
 	deliv    DeliveryStore
 	webhooks WebhookStore
+	owners   EventOwnerResolver
 	http     HTTPDoer
 	metrics  Metrics
 	log      *slog.Logger
@@ -62,8 +63,10 @@ type Dispatcher struct {
 	cfg      DispatcherConfig
 }
 
-// NewDispatcher builds a dispatcher. deliv, webhooks, and doer are required.
-func NewDispatcher(deliv DeliveryStore, webhooks WebhookStore, doer HTTPDoer, metrics Metrics, log *slog.Logger, cfg DispatcherConfig) *Dispatcher {
+// NewDispatcher builds a dispatcher. deliv, webhooks, owners and doer are
+// required. owners is the authoritative source of event ownership; a dispatcher
+// built without it refuses every delivery rather than trusting the queue.
+func NewDispatcher(deliv DeliveryStore, webhooks WebhookStore, owners EventOwnerResolver, doer HTTPDoer, metrics Metrics, log *slog.Logger, cfg DispatcherConfig) *Dispatcher {
 	if metrics == nil {
 		metrics = NopMetrics{}
 	}
@@ -72,7 +75,7 @@ func NewDispatcher(deliv DeliveryStore, webhooks WebhookStore, doer HTTPDoer, me
 	}
 	cfg.withDefaults()
 	return &Dispatcher{
-		deliv: deliv, webhooks: webhooks, http: doer, metrics: metrics, log: log,
+		deliv: deliv, webhooks: webhooks, owners: owners, http: doer, metrics: metrics, log: log,
 		now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
 	}
 }
@@ -124,19 +127,39 @@ func (d *Dispatcher) attempt(ctx context.Context, del Delivery) (DeliveryStatus,
 		return StatusDeadLetter, err
 	}
 
-	// The queue is storage and storage is untrusted. A delivery row may predate
-	// ownership, come from a restore, or be written by a future regression —
-	// the producer refusing to create a cross-tenant pairing does not stop one
-	// existing. Verified against the running service: a row inserted directly
-	// into webhook_delivery, pairing one tenant's event with another tenant's
-	// endpoint, was dispatched and marked delivered.
+	// The queue is storage and storage is untrusted. The delivery row carries an
+	// owner label, but a label is only a claim: anyone with database write
+	// access can forge a row whose label agrees with itself while its content
+	// belongs to another tenant, and comparing two fields of the same forged row
+	// proves nothing. Verified against the running service — such a row was
+	// dispatched and delivered after an earlier fix that trusted the label.
 	//
-	// Dead-lettered rather than retried: a mismatch is never transient, and
-	// retrying would repeatedly attempt a cross-tenant delivery.
-	if err := domain.AuthorizeExecution(wh, del); err != nil {
+	// So ownership is re-derived from the audit log, which is append-only and
+	// whose tenant_id is written inside the governance transaction
+	// (ADR-AUDIT-005). That is the one owner an attacker cannot rewrite after
+	// the event is committed. The delivery's own label is never consulted here.
+	owner, err := d.owners.ResolveEventOwner(ctx, del.Event.ChainID, del.Event.Seq)
+	if err != nil {
+		// Either the event is not in the authoritative log, or the resolver is
+		// unavailable. Both fail closed: an event absent from an append-only log
+		// will never appear, and a delivery that cannot be authorised must not
+		// be delivered. Dead-lettered, not retried — a cross-tenant or
+		// phantom delivery is never made transiently valid by trying again.
+		d.log.Error("event dispatcher: refused delivery, ownership unresolved",
+			"delivery_id", del.ID, "webhook_id", wh.ID,
+			"chain_id", del.Event.ChainID, "seq", del.Event.Seq, "err", err.Error())
+		_ = d.deliv.MarkResult(ctx, del.ID, StatusDeadLetter, del.RetryCount, 0, d.now(), time.Time{})
+		return StatusDeadLetter, err
+	}
+
+	// The authoritative owner, not the queue label, is compared against the
+	// subscription. authoritativeEvent carries only the re-derived owner, so a
+	// forged label on the delivery cannot influence the decision.
+	if err := domain.AuthorizeExecution(wh, authoritativeEvent{owner}); err != nil {
 		d.log.Error("event dispatcher: refused cross-tenant delivery",
 			"delivery_id", del.ID, "webhook_id", wh.ID,
-			"webhook_tenant", wh.OwnerTenantID(), "delivery_tenant", del.OwnerTenantID())
+			"webhook_tenant", wh.OwnerTenantID(), "authoritative_event_tenant", owner,
+			"claimed_delivery_tenant", del.OwnerTenantID())
 		_ = d.deliv.MarkResult(ctx, del.ID, StatusDeadLetter, del.RetryCount, 0, d.now(), time.Time{})
 		return StatusDeadLetter, err
 	}
@@ -211,3 +234,10 @@ func newDeliveryID() string {
 	}
 	return "dlv_" + hex.EncodeToString(b[:])
 }
+
+// authoritativeEvent carries only the owner re-derived from the audit log, so
+// AuthorizeExecution compares the subscription against the authoritative tenant
+// and never against a queue-supplied label.
+type authoritativeEvent struct{ owner string }
+
+func (a authoritativeEvent) OwnerTenantID() string { return a.owner }
