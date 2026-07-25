@@ -444,3 +444,60 @@ func TestExecutionConsumersReDeriveOwnership(t *testing.T) {
 		})
 	}
 }
+
+// Replay owns no outbound action, and therefore no ownership authority.
+//
+// Replay is a producer: the time-window worker re-enqueues deliveries and the
+// delivery-id worker requeues existing rows, both of which are then delivered by
+// the dispatcher, which re-derives ownership through domain.ResolveAndAuthorize
+// (ADR-TENANCY-003/004). Verified live: a cross-tenant replay produced nothing,
+// and a replay of a split-brain event was refused at the dispatcher.
+//
+// That guarantee rests entirely on replay having no way to send. If a future
+// change gave the replay worker an HTTP client and a direct-send path, it would
+// bypass the authoritative check — the exact class this whole phase closes. This
+// test fails if replay ever acquires an outbound capability, so replay stays a
+// producer by construction rather than by discipline.
+//
+// The policy consumer and the webhook relay are producers for the same reason
+// and are held to the same rule.
+var producerOnlyWorkers = []string{
+	"../events/replay.go",
+	"../events/relay.go",
+	"../policy/consumer.go",
+}
+
+func TestProducersHaveNoOutboundCapability(t *testing.T) {
+	for _, file := range producerOnlyWorkers {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, file, nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		for _, imp := range f.Imports {
+			if imp.Path.Value == `"net/http"` {
+				t.Errorf("%s imports net/http; a producer must not be able to perform "+
+					"an outbound request. Outbound work goes through the dispatcher, which "+
+					"re-derives ownership — a direct-send producer would bypass it.", file)
+			}
+		}
+
+		// Belt and braces: no call expression named Do (the HTTP client verb),
+		// in case the client arrived by interface rather than by importing http.
+		full, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		ast.Inspect(full, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Do" {
+				t.Errorf("%s calls .Do() at %s; a producer must not perform outbound "+
+					"requests directly", file, fset.Position(call.Pos()))
+			}
+			return true
+		})
+	}
+}

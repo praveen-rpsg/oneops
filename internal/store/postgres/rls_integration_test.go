@@ -425,3 +425,59 @@ func TestRLS_PoliciesAreTenantIsolated(t *testing.T) {
 		}
 	}
 }
+
+// A real tenant must be able to create a replay job, and must not see another
+// tenant's. The RLS rollout left webhook_replay_job.CreateJob without a
+// tenant_id, so under the tenant-scoped pool the insert failed WITH CHECK and
+// every non-system tenant got HTTP 500 on POST .../replay — replay was broken
+// for real customers and, incidentally, unusable as an attack. Verified against
+// the running service before the fix.
+func TestRLS_ReplayJobsAreTenantIsolated(t *testing.T) {
+	priv := testPool(t)
+	ctx := context.Background()
+
+	tenants := NewTenantStore(priv)
+	a, err := tenants.Create(ctx, newTenant("rls-replay-a", "ext-rls-replay-a"))
+	if err != nil {
+		t.Fatalf("create tenant a: %v", err)
+	}
+
+	scoped := tenantScopedPool(t)
+	store := NewWebhookStore(scoped)
+
+	// Tenant A creates a replay job under its own scoped connection.
+	aCtx := domain.WithTenant(ctx, a)
+	job := events.ReplayJob{
+		ID: "rpl_tenant_a", WebhookID: "wh_a",
+		DeliveryIDs: []string{"d1"}, Status: events.JobPending,
+	}
+	if err := store.CreateJob(aCtx, job); err != nil {
+		t.Fatalf("a real tenant must be able to create a replay job: %v", err)
+	}
+
+	// A second tenant must not see it.
+	b, err := tenants.Create(ctx, newTenant("rls-replay-b", "ext-rls-replay-b"))
+	if err != nil {
+		t.Fatalf("create tenant b: %v", err)
+	}
+	bCtx := domain.WithTenant(ctx, b)
+	if _, found, err := store.GetJob(bCtx, "rpl_tenant_a"); err == nil && found {
+		t.Fatal("another tenant could read the replay job")
+	}
+
+	// The privileged worker still sees it, because replay processing spans
+	// tenants from one process.
+	pend, err := NewWebhookStore(priv).ClaimPendingJobs(ctx, 100)
+	if err != nil {
+		t.Fatalf("claim pending: %v", err)
+	}
+	found := false
+	for _, j := range pend {
+		if j.ID == "rpl_tenant_a" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the privileged replay worker must still see the tenant's pending job")
+	}
+}

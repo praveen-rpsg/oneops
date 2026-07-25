@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/rpsg/oneops/internal/events"
+
+	"github.com/rpsg/oneops/internal/domain"
 )
 
 // This file adds the read/admin and replay-job persistence for PRS-019. It is
@@ -126,9 +128,10 @@ const replayJobCols = `id, webhook_id, from_ts, to_ts, delivery_ids, status, eve
 func (s *WebhookStore) CreateJob(ctx context.Context, j events.ReplayJob) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO webhook_replay_job
-			(id, webhook_id, from_ts, to_ts, delivery_ids, status, events_replayed, error, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,0,'',now(),now())`,
-		j.ID, j.WebhookID, nullTime(j.From), nullTime(j.To), textArray(j.DeliveryIDs), string(j.Status))
+			(id, webhook_id, from_ts, to_ts, delivery_ids, status, events_replayed, error, created_at, updated_at, tenant_id)
+		VALUES ($1,$2,$3,$4,$5,$6,0,'',now(),now(),$7)`,
+		j.ID, j.WebhookID, nullTime(j.From), nullTime(j.To), textArray(j.DeliveryIDs), string(j.Status),
+		domain.TenantIDFrom(ctx))
 	if err != nil {
 		return fmt.Errorf("create replay job: %w", err)
 	}
