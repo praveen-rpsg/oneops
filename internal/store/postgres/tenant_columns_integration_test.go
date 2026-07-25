@@ -12,23 +12,9 @@ import (
 	"github.com/rpsg/oneops/internal/domain"
 )
 
-// tenantOwnedTables is the set ADR-TENANCY-001 §1 requires to carry ownership.
-// Listing them explicitly means a table added later without a tenant_id fails
-// this test rather than silently becoming a cross-tenant hole.
-var tenantOwnedTables = []string{
-	"configuration_object",
-	"configuration_metadata",
-	"artifact_version",
-	"dependency_edge",
-	"idempotency_key",
-	"audit_event",
-	"audit_chain_head",
-	"webhook",
-	"webhook_delivery",
-	"webhook_replay_job",
-	"policy",
-	"policy_execution",
-}
+// tenantOwnedTables aliases the canonical production list so these tests and the
+// startup validators cannot drift apart.
+var tenantOwnedTables = TenantOwnedTables
 
 func TestTenantColumns_EveryOwnedTableCarriesTenant(t *testing.T) {
 	pool := testPool(t)

@@ -128,6 +128,24 @@ func run(logger *slog.Logger) error {
 	// a transaction cannot span two pools.
 	auditStore := postgres.NewAuditStore(pool)
 
+	// Startup schema validation (ADR-TENANCY-007). Ownership resolution and
+	// isolation are only as strong as the schema underneath them: row-level
+	// security must be enabled and forced, the tenant_id columns must be
+	// mandatory, and every migration the binary was built for must be applied. A
+	// migration or an operator can weaken any of these, and nothing else at
+	// runtime would notice — a disabled RLS policy is a silent, total
+	// cross-tenant leak. This runs before the ownership-graph check because that
+	// check queries columns this one proves exist.
+	if problems, verr := postgres.NewSchemaValidator(pool).Validate(rootCtx); verr != nil {
+		return fmt.Errorf("startup schema validation failed: %w", verr)
+	} else if len(problems) > 0 {
+		for _, p := range problems {
+			logger.Error("startup schema validation", "problem", p)
+		}
+		return fmt.Errorf("refusing to start: the schema no longer enforces the ownership model "+
+			"(%d problem(s)); repair before starting (see ADR-TENANCY-007)", len(problems))
+	}
+
 	// Startup ownership validation (ADR-TENANCY-004, ADR-TENANCY-006). Recovery
 	// is a verification boundary, not a repair mechanism: a restored database may
 	// be internally inconsistent — split-brain history, or data owned by a tenant

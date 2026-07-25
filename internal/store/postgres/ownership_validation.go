@@ -22,29 +22,6 @@ func NewOwnershipValidator(pool *pgxpool.Pool) *OwnershipValidator {
 	return &OwnershipValidator{pool: pool}
 }
 
-// danglingCheck is one referential-integrity probe: rows in a tenant-owned table
-// whose tenant_id has no matching row in the tenant registry.
-type danglingCheck struct {
-	table string
-	// key is the column reported as an example, so an operator can locate the
-	// offending rows.
-	key string
-}
-
-// referentialChecks enumerates every tenant-owned table whose ownership must
-// reference a live tenant. Foreign keys enforce this during normal operation,
-// but a restore with triggers disabled bypasses them, and audit_event carries no
-// foreign key at all because it is partitioned — so startup re-verifies what the
-// constraints normally guarantee.
-var referentialChecks = []danglingCheck{
-	{"configuration_object", "cfg_id"},
-	{"audit_event", "chain_id"},
-	{"webhook", "id"},
-	{"webhook_delivery", "id"},
-	{"policy", "id"},
-	{"policy_execution", "id"},
-}
-
 // Validate returns one problem string per category that has dangling ownership,
 // plus the divergence check from ADR-TENANCY-004. An empty slice means the
 // ownership graph is sound. The caller refuses to boot on any problem.
@@ -69,21 +46,24 @@ func (v *OwnershipValidator) Validate(ctx context.Context) ([]string, error) {
 	}
 
 	// Dangling ownership: data owned by a tenant that is not in the registry.
-	for _, c := range referentialChecks {
+	// Foreign keys enforce this during normal operation, but a restore with
+	// triggers disabled bypasses them, and audit_event carries no foreign key at
+	// all because it is partitioned — so startup re-verifies every tenant-owned
+	// table.
+	for _, table := range TenantOwnedTables {
 		var n int
 		var example string
 		q := fmt.Sprintf(`
-			SELECT count(*), COALESCE(min(%s), '')
+			SELECT count(*), COALESCE(min(x.tenant_id), '')
 			  FROM %s x
-			 WHERE NOT EXISTS (SELECT 1 FROM tenant t WHERE t.tenant_id = x.tenant_id)`,
-			c.key, c.table)
+			 WHERE NOT EXISTS (SELECT 1 FROM tenant t WHERE t.tenant_id = x.tenant_id)`, table)
 		if err := v.pool.QueryRow(ctx, q).Scan(&n, &example); err != nil {
-			return nil, fmt.Errorf("dangling check on %s: %w", c.table, err)
+			return nil, fmt.Errorf("dangling check on %s: %w", table, err)
 		}
 		if n > 0 {
 			problems = append(problems, fmt.Sprintf(
-				"%s has %d row(s) owned by a tenant not in the registry (e.g. %s=%s)",
-				c.table, n, c.key, example))
+				"%s has %d row(s) owned by a tenant not in the registry (e.g. tenant_id=%s)",
+				table, n, example))
 		}
 	}
 

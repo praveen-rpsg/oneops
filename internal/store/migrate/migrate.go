@@ -70,6 +70,44 @@ func Latest() (string, error) {
 	return strings.TrimSuffix(files[len(files)-1], ".sql"), nil
 }
 
+// Pending returns the embedded migration versions this binary carries that are
+// not yet recorded in schema_migrations. It is read-only and applies nothing.
+//
+// A non-empty result means the running binary expects schema that the database
+// does not have — a rolling deployment that put the new binary ahead of the
+// migrations, or a migration interrupted partway. Startup uses it to refuse
+// rather than run against a schema it was not built for.
+func Pending(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+	files, err := forwardFiles()
+	if err != nil {
+		return nil, err
+	}
+	// If the table does not exist yet, everything is pending.
+	rows, err := pool.Query(ctx, `SELECT version FROM schema_migrations`)
+	applied := map[string]bool{}
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var v string
+			if err := rows.Scan(&v); err != nil {
+				return nil, fmt.Errorf("scan applied migration: %w", err)
+			}
+			applied[v] = true
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("read applied migrations: %w", err)
+		}
+	}
+	var pending []string
+	for _, name := range files {
+		version := strings.TrimSuffix(name, ".sql")
+		if !applied[version] {
+			pending = append(pending, version)
+		}
+	}
+	return pending, nil
+}
+
 func applyOne(ctx context.Context, pool *pgxpool.Pool, version, body string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
