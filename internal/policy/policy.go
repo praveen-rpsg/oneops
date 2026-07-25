@@ -9,10 +9,17 @@ package policy
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/rpsg/oneops/internal/domain"
 )
+
+// ErrStaleClaim is returned by MarkResult when the execution row was reclaimed by
+// another worker before this one recorded its result: the fencing token no longer
+// matches, so nothing was written. Not a failure — the signal that this worker
+// was evicted mid-flight and its result must be discarded (ADR-CONCURRENCY-005).
+var ErrStaleClaim = errors.New("policy: execution result fenced — row reclaimed by another worker")
 
 // Event is a committed governance event projected from an audit event and
 // evaluated by policy conditions. Conditions match ONLY this published event.
@@ -157,6 +164,12 @@ type Execution struct {
 	EndedAt       time.Time
 	NextAttemptAt time.Time
 	CreatedAt     time.Time
+	// ClaimedAt is the fencing token (see events.Delivery.ClaimedAt): the moment
+	// this execution row was claimed by the worker now holding it. A worker whose
+	// lease expired and whose row was reclaimed holds a stale token and is fenced
+	// out of MarkResult, so its late completion cannot corrupt the reclaimer's
+	// state (ADR-CONCURRENCY-005). Zero on rows never claimed (the admin test path).
+	ClaimedAt time.Time
 }
 
 func contains(xs []string, x string) bool {

@@ -37,7 +37,7 @@ type WebhookStore interface {
 type DeliveryStore interface {
 	Enqueue(ctx context.Context, ds []Delivery) error
 	ClaimDue(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]Delivery, error)
-	MarkResult(ctx context.Context, id string, status DeliveryStatus, retryCount, statusCode int, lastAttempt, nextAttempt time.Time) error
+	MarkResult(ctx context.Context, id string, claimToken time.Time, status DeliveryStatus, retryCount, statusCode int, lastAttempt, nextAttempt time.Time) error
 	ListByWebhook(ctx context.Context, webhookID string, limit int) ([]Delivery, error)
 }
 

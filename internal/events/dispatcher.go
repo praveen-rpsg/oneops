@@ -130,7 +130,7 @@ func (d *Dispatcher) attempt(ctx context.Context, del Delivery) (DeliveryStatus,
 	wh, err := d.webhooks.Get(ctx, del.WebhookID)
 	if err != nil {
 		// The subscriber is gone; the delivery can never succeed.
-		_ = d.deliv.MarkResult(ctx, del.ID, StatusDeadLetter, del.RetryCount, 0, d.now(), time.Time{})
+		_ = d.deliv.MarkResult(ctx, del.ID, del.ClaimedAt, StatusDeadLetter, del.RetryCount, 0, d.now(), time.Time{})
 		return StatusDeadLetter, err
 	}
 
@@ -159,7 +159,7 @@ func (d *Dispatcher) attempt(ctx context.Context, del Delivery) (DeliveryStatus,
 			"chain_id", del.Event.ChainID, "seq", del.Event.Seq,
 			"webhook_tenant", wh.OwnerTenantID(), "claimed_delivery_tenant", del.OwnerTenantID(),
 			"err", err.Error())
-		_ = d.deliv.MarkResult(ctx, del.ID, StatusDeadLetter, del.RetryCount, 0, d.now(), time.Time{})
+		_ = d.deliv.MarkResult(ctx, del.ID, del.ClaimedAt, StatusDeadLetter, del.RetryCount, 0, d.now(), time.Time{})
 		return StatusDeadLetter, err
 	}
 
@@ -175,7 +175,14 @@ func (d *Dispatcher) attempt(ctx context.Context, del Delivery) (DeliveryStatus,
 	d.metrics.ObserveDeliveryLatency(time.Since(now))
 
 	if derr == nil && code >= 200 && code < 300 {
-		_ = d.deliv.MarkResult(ctx, del.ID, StatusDelivered, del.RetryCount, code, now, time.Time{})
+		if err := d.deliv.MarkResult(ctx, del.ID, del.ClaimedAt, StatusDelivered, del.RetryCount, code, now, time.Time{}); errors.Is(err, ErrStaleClaim) {
+			// This worker's lease expired and the row was reclaimed mid-flight; the
+			// reclaiming worker owns the outcome. The POST still happened (the
+			// receiver dedups on the stable id, ADR-CONCURRENCY-003) — but we do not
+			// record it, so we never overwrite the reclaimer's state.
+			d.log.Info("event dispatcher: delivery result fenced — row reclaimed by another worker", "delivery_id", del.ID)
+			return StatusDelivered, nil
+		}
 		d.metrics.IncDelivered()
 		return StatusDelivered, nil
 	}
@@ -184,13 +191,16 @@ func (d *Dispatcher) attempt(ctx context.Context, del Delivery) (DeliveryStatus,
 	d.metrics.IncFailure()
 	retry := del.RetryCount + 1
 	if retry >= wh.MaxRetries {
-		_ = d.deliv.MarkResult(ctx, del.ID, StatusDeadLetter, retry, code, now, time.Time{})
+		_ = d.deliv.MarkResult(ctx, del.ID, del.ClaimedAt, StatusDeadLetter, retry, code, now, time.Time{})
 		d.log.Warn("event dispatcher: dead-letter", "delivery_id", del.ID, "webhook_id", wh.ID, "retries", retry)
 		return StatusDeadLetter, derr
 	}
 	d.metrics.IncRetry()
 	next := now.Add(d.backoff(retry))
-	_ = d.deliv.MarkResult(ctx, del.ID, StatusFailed, retry, code, now, next)
+	if err := d.deliv.MarkResult(ctx, del.ID, del.ClaimedAt, StatusFailed, retry, code, now, next); errors.Is(err, ErrStaleClaim) {
+		// Reclaimed mid-flight: do not reschedule against the reclaimer's owned row.
+		d.log.Info("event dispatcher: failed result fenced — row reclaimed by another worker", "delivery_id", del.ID)
+	}
 	return StatusFailed, derr
 }
 
@@ -225,6 +235,13 @@ func (d *Dispatcher) backoff(retry int) time.Duration {
 }
 
 var errNoID = errors.New("events: id generation failed")
+
+// ErrStaleClaim is returned by MarkResult when the row was reclaimed by another
+// worker before this one recorded its result: the fencing token no longer
+// matches, so nothing was written. It is not a failure — the current owner will
+// record the authoritative outcome — it is the signal that this worker was
+// evicted mid-flight and its result must be discarded (ADR-CONCURRENCY-005).
+var ErrStaleClaim = errors.New("events: delivery result fenced — row reclaimed by another worker")
 
 func newDeliveryID() string {
 	var b [16]byte

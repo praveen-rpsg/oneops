@@ -162,7 +162,7 @@ func (f *fakeExecs) ClaimDue(_ context.Context, now time.Time, _ time.Duration, 
 	}
 	return out, nil
 }
-func (f *fakeExecs) MarkResult(_ context.Context, id string, status ExecutionStatus, retry int, errMsg string, started, ended, next time.Time) error {
+func (f *fakeExecs) MarkResult(_ context.Context, id string, _ time.Time, status ExecutionStatus, retry int, errMsg string, started, ended, next time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	x := f.m[id]
@@ -340,7 +340,7 @@ func TestExecutor_RetryThenDeadLetter(t *testing.T) {
 	if execs.status("x1") != ExecFailed {
 		t.Fatalf("after attempt 1: %q, want failed", execs.status("x1"))
 	}
-	_ = execs.MarkResult(context.Background(), "x1", ExecFailed, 1, "", time.Unix(0, 0), time.Unix(0, 0), time.Unix(0, 0))
+	_ = execs.MarkResult(context.Background(), "x1", time.Time{}, ExecFailed, 1, "", time.Unix(0, 0), time.Unix(0, 0), time.Unix(0, 0))
 	ex.RunOnce(context.Background())
 	if execs.status("x1") != ExecDeadLetter {
 		t.Fatalf("after attempt 2: %q, want dead_letter", execs.status("x1"))

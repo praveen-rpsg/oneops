@@ -112,6 +112,14 @@ type Delivery struct {
 	LastAttempt    time.Time
 	NextAttemptAt  time.Time
 	CreatedAt      time.Time
+	// ClaimedAt is the fencing token: the moment this row was claimed by the
+	// worker now holding it. A worker carries it from ClaimDue into MarkResult,
+	// which writes only if the row is still claimed under the same token. A
+	// worker whose lease expired and whose row was reclaimed holds a stale token
+	// and is fenced out — its late completion cannot corrupt the reclaimer's
+	// state (ADR-CONCURRENCY-005). Zero on rows never claimed (the admin test
+	// path), which are written unfenced.
+	ClaimedAt time.Time
 }
 
 // OwnerTenantID implements domain.Owned. A delivery belongs to the tenant that

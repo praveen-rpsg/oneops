@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -113,7 +114,7 @@ func (e *Executor) attempt(ctx context.Context, ex Execution) ExecutionStatus {
 
 	p, err := e.policies.Get(ctx, ex.PolicyID)
 	if err != nil {
-		_ = e.execs.MarkResult(ctx, ex.ID, ExecDeadLetter, ex.RetryCount, "policy not found: "+err.Error(), start, e.now(), time.Time{})
+		_ = e.execs.MarkResult(ctx, ex.ID, ex.ClaimedAt, ExecDeadLetter, ex.RetryCount, "policy not found: "+err.Error(), start, e.now(), time.Time{})
 		return ExecDeadLetter
 	}
 
@@ -135,7 +136,7 @@ func (e *Executor) attempt(ctx context.Context, ex Execution) ExecutionStatus {
 		e.log.Error("policy executor: refused execution",
 			"execution_id", ex.ID, "policy_id", p.ID, "policy_tenant", p.OwnerTenantID(),
 			"event_chain", ex.Event.CfgID, "event_seq", ex.Event.Seq, "err", err.Error())
-		_ = e.execs.MarkResult(ctx, ex.ID, ExecDeadLetter, ex.RetryCount, "ownership refused: "+err.Error(), start, e.now(), time.Time{})
+		_ = e.execs.MarkResult(ctx, ex.ID, ex.ClaimedAt, ExecDeadLetter, ex.RetryCount, "ownership refused: "+err.Error(), start, e.now(), time.Time{})
 		e.metrics.IncFailure()
 		return ExecDeadLetter
 	}
@@ -144,20 +145,27 @@ func (e *Executor) attempt(ctx context.Context, ex Execution) ExecutionStatus {
 	e.metrics.ObserveDuration(e.now().Sub(start))
 
 	if runErr == nil {
-		_ = e.execs.MarkResult(ctx, ex.ID, ExecSucceeded, ex.RetryCount, "", start, e.now(), time.Time{})
+		if err := e.execs.MarkResult(ctx, ex.ID, ex.ClaimedAt, ExecSucceeded, ex.RetryCount, "", start, e.now(), time.Time{}); errors.Is(err, ErrStaleClaim) {
+			// Lease expired and the row was reclaimed mid-run; the reclaiming worker
+			// owns the outcome. The action already ran (at-least-once); we do not
+			// record it, so we never overwrite the reclaimer's state (ADR-CONCURRENCY-005).
+			e.log.Info("policy executor: result fenced — row reclaimed by another worker", "execution_id", ex.ID)
+		}
 		return ExecSucceeded
 	}
 
 	e.metrics.IncFailure()
 	retry := ex.RetryCount + 1
 	if retry >= p.MaxRetries {
-		_ = e.execs.MarkResult(ctx, ex.ID, ExecDeadLetter, retry, runErr.Error(), start, e.now(), time.Time{})
+		_ = e.execs.MarkResult(ctx, ex.ID, ex.ClaimedAt, ExecDeadLetter, retry, runErr.Error(), start, e.now(), time.Time{})
 		e.log.Warn("policy executor: dead-letter", "execution_id", ex.ID, "policy_id", p.ID, "err", runErr)
 		return ExecDeadLetter
 	}
 	e.metrics.IncRetry()
 	next := e.now().Add(e.backoff(retry))
-	_ = e.execs.MarkResult(ctx, ex.ID, ExecFailed, retry, runErr.Error(), start, e.now(), next)
+	if err := e.execs.MarkResult(ctx, ex.ID, ex.ClaimedAt, ExecFailed, retry, runErr.Error(), start, e.now(), next); errors.Is(err, ErrStaleClaim) {
+		e.log.Info("policy executor: failed result fenced — row reclaimed by another worker", "execution_id", ex.ID)
+	}
 	return ExecFailed
 }
 

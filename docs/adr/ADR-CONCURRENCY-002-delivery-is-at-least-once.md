@@ -98,13 +98,18 @@ at-least-once. Policy executions also carry a stable id.
   and is the consumer's responsibility.
 - **Lease tuning is a trade.** Too short risks re-delivering a still-running slow
   request as a duplicate; too long delays recovery after a crash. The default
-  (two minutes) sits well above the request timeout; it is configurable.
+  (two minutes) sits well above the request timeout; it is configurable. **Update
+  (ADR-CONCURRENCY-005):** the *duplicate send* a short lease can cause remains
+  (at-least-once, dedup-able), but the *state corruption* it used to cause — an
+  evicted worker's completion resurrecting a delivered row — is eliminated by
+  fencing `MarkResult` on the claim token.
 - **The lock-loss overlap is narrowed, not eliminated.** A paused leader (GC,
   SIGSTOP) can still perform one in-flight POST after losing its lock before it
   notices; the atomic claim ensures it cannot also claim new rows the standby is
   working, so the exposure is a single already-claimed in-flight request, which
-  the dedup key covers. True fencing of the outbound call is possible future work
-  and is not claimed here.
+  the dedup key covers. True fencing of the outbound *call* is possible future
+  work and is not claimed here; fencing of the *result write* is done in
+  ADR-CONCURRENCY-005.
 
 ## The invariant
 

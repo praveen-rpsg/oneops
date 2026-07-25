@@ -32,6 +32,7 @@ fail-closed startup validator.
 | 15 | **Non-dedup-able duplicate delivery** (random ids; a re-processed event becomes a new row with a new dedup key) | **Content-derived, idempotent production** (`DeliveryID`/`ExecutionID`); re-production collides on the primary key | ✓ | arch, int, unit | **ADR-CONCURRENCY-003** |
 | 16 | **Demoted leader keeps running its workers** (lock-loss only logged; permanent two-leader overlap) | **Leadership context cancelled on lock loss; re-enters the election** | ✓ | int | **ADR-CONCURRENCY-003** |
 | 17 | **Non-monotonic cursor** (blind overwrite; a stale/overlapping writer rewinds the watermark) | **Monotonic write (`GREATEST`); the watermark can only rise** | ✓ | arch, int | **ADR-CONCURRENCY-004** |
+| 18 | **Unfenced completion of an evicted worker** (lease expires, row reclaimed; the stale worker's `MarkResult` resurrects a delivered row / corrupts the reclaimer's state) | **`MarkResult` fenced on the claim token (`claimed_at`); a stale write is rejected with `ErrStaleClaim`** | ✓ | arch, int | **ADR-CONCURRENCY-005** |
 
 ## Guarantees stated, not overstated
 
@@ -102,6 +103,40 @@ evidence, residual risks, status. New investigations add their boundary here.
 - **Status.** ✓ Closed. Enforced by `arch.TestCursorWriters_AreMonotonic`,
   `postgres.TestCursor_{Webhook,Policy}WriteIsMonotonic`, and
   `postgres.TestAppenderConcurrentSerialization`.
+
+### Claim fencing — an evicted worker cannot corrupt the row (ADR-CONCURRENCY-005)
+
+- **Property.** A worker records a delivery/execution outcome only while it still
+  holds the claim it was granted; an evicted (lease-expired, reclaimed) worker's
+  late completion changes nothing.
+- **Threat model.** A slow outbound call outlives the lease; another worker
+  reclaims the row and acts; the first worker then completes and (a) resurrects a
+  terminal row into a retry state, (b) overwrites the reclaimer's outcome, or (c)
+  corrupts retry/backoff bookkeeping — amplifying duplicates.
+- **Root authority.** The claim state on the row: `claimed_at`, stamped by
+  `ClaimDue` and advanced on every reclaim. It is the fencing token.
+- **Failure assumptions.** A worker can be paused (GC, SIGSTOP) or simply slow
+  past the lease; the row will be reclaimed under it. Its later write must be a
+  no-op against the row it no longer owns.
+- **Recovery assumptions.** None specific; the fence is per-write. After a crash,
+  the lease reclaim (ADR-CONCURRENCY-002) still applies and the new claim carries
+  a new token.
+- **Operational assumptions.** `MarkResult` is only reached by the workers (and
+  the admin test path, which passes a zero token and writes unfenced by design).
+- **Startup validation.** None.
+- **Runtime validation.** `MarkResult` fences on `claimed_at = $token`; a
+  mismatch yields zero rows and `ErrStaleClaim`, which the dispatcher/executor
+  observe and discard.
+- **Evidence.** Live exploit: an evicted worker resurrected a `delivered` row to
+  `failed` with a reschedule. Live fix: the same write returns `ErrStaleClaim`
+  and the row keeps the owner's `delivered` state; the reclaim advances the token;
+  policy executions behave identically.
+- **Residual risks.** The concurrent double-*send* remains (at-least-once ceiling,
+  dedup-able on the stable id). `claimed_at` as the token is sound because
+  reclaims are ≥ lease apart; a dedicated monotonic counter is future hardening.
+  The lease is not yet operator-tunable.
+- **Status.** ✓ Closed. Enforced by `arch.TestMarkResult_IsFencedOnTheClaim` and
+  `postgres.TestLeaseFencing_{Webhook,Policy}EvictedWorkerIsFenced`.
 
 ## How to add an entry
 

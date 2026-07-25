@@ -64,10 +64,10 @@ func TestPolicyStore_Integration(t *testing.T) {
 	if due[0].Event.EventID != "evt_1" || due[0].Event.Metadata["new_lifecycle"] != "ratified" {
 		t.Fatalf("event jsonb not restored: %+v", due[0].Event)
 	}
-	if err := s.MarkResult(ctx, "pex_1", policy.ExecSucceeded, 0, "", now, now, time.Time{}); err != nil {
+	if err := s.MarkResult(ctx, "pex_1", time.Time{}, policy.ExecSucceeded, 0, "", now, now, time.Time{}); err != nil {
 		t.Fatalf("MarkResult: %v", err)
 	}
-	if err := s.MarkResult(ctx, "pex_2", policy.ExecDeadLetter, 3, "boom", now, now, time.Time{}); err != nil {
+	if err := s.MarkResult(ctx, "pex_2", time.Time{}, policy.ExecDeadLetter, 3, "boom", now, now, time.Time{}); err != nil {
 		t.Fatalf("MarkResult dl: %v", err)
 	}
 	hist, err := s.ListByPolicy(ctx, "pol_1", 10)

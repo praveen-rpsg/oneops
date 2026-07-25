@@ -147,7 +147,7 @@ func (f *fakeDeliveries) ClaimDue(_ context.Context, now time.Time, _ time.Durat
 	}
 	return out, nil
 }
-func (f *fakeDeliveries) MarkResult(_ context.Context, id string, status DeliveryStatus, retry, code int, last, next time.Time) error {
+func (f *fakeDeliveries) MarkResult(_ context.Context, id string, _ time.Time, status DeliveryStatus, retry, code int, last, next time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	d := f.m[id]
@@ -363,7 +363,7 @@ func TestDispatcher_RetryThenDeadLetter(t *testing.T) {
 		t.Fatalf("after attempt 1: status = %q, want failed", s)
 	}
 	// Make it due again and attempt 2: retryCount 2 >= 2 -> dead-letter.
-	_ = del.MarkResult(context.Background(), "d1", StatusFailed, 1, 500, time.Unix(0, 0), time.Unix(0, 0))
+	_ = del.MarkResult(context.Background(), "d1", time.Time{}, StatusFailed, 1, 500, time.Unix(0, 0), time.Unix(0, 0))
 	d.RunOnce(context.Background())
 	if s := del.status("d1"); s != StatusDeadLetter {
 		t.Fatalf("after attempt 2: status = %q, want dead_letter", s)

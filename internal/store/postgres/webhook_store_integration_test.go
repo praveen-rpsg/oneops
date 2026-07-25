@@ -63,7 +63,7 @@ func TestWebhookStore_Integration(t *testing.T) {
 	if err != nil || len(due) != 2 {
 		t.Fatalf("ClaimDue: %d %v", len(due), err)
 	}
-	if err := s.MarkResult(ctx, "d1", events.StatusDelivered, 0, 200, now, time.Time{}); err != nil {
+	if err := s.MarkResult(ctx, "d1", time.Time{}, events.StatusDelivered, 0, 200, now, time.Time{}); err != nil {
 		t.Fatalf("MarkResult: %v", err)
 	}
 	if d, ok, _ := s.GetDelivery(ctx, "d1"); !ok || d.Status != events.StatusDelivered || d.LastStatusCode != 200 {
@@ -74,7 +74,7 @@ func TestWebhookStore_Integration(t *testing.T) {
 	}
 
 	// --- dead-letter recovery -------------------------------------------------
-	if err := s.MarkResult(ctx, "d2", events.StatusDeadLetter, 3, 500, now, time.Time{}); err != nil {
+	if err := s.MarkResult(ctx, "d2", time.Time{}, events.StatusDeadLetter, 3, 500, now, time.Time{}); err != nil {
 		t.Fatalf("dead-letter: %v", err)
 	}
 	if dl, err := s.ListDeadLetters(ctx, "wh_1", 10); err != nil || len(dl) != 1 {
@@ -94,7 +94,7 @@ func TestWebhookStore_Integration(t *testing.T) {
 	}
 
 	// --- retention delete (terminal only) -------------------------------------
-	if err := s.MarkResult(ctx, "d1", events.StatusDelivered, 0, 200, now.Add(-72*time.Hour), time.Time{}); err != nil {
+	if err := s.MarkResult(ctx, "d1", time.Time{}, events.StatusDelivered, 0, 200, now.Add(-72*time.Hour), time.Time{}); err != nil {
 		t.Fatalf("mark old: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE webhook_delivery SET created_at=$1 WHERE id='d1'`, now.Add(-72*time.Hour)); err != nil {

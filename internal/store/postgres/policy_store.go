@@ -126,7 +126,7 @@ func (s *PolicyStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-const execCols = `id, policy_id, event_id, event, status, retry_count, error, started_at, ended_at, next_attempt_at, created_at`
+const execCols = `id, policy_id, event_id, event, status, retry_count, error, started_at, ended_at, next_attempt_at, created_at, claimed_at`
 
 // Enqueue inserts pending executions (idempotent by id).
 func (s *PolicyStore) Enqueue(ctx context.Context, xs []policy.Execution) error {
@@ -181,16 +181,28 @@ func (s *PolicyStore) ClaimDue(ctx context.Context, now time.Time, lease time.Du
 	return scanExecutions(rows)
 }
 
-// MarkResult records an execution attempt outcome.
-func (s *PolicyStore) MarkResult(ctx context.Context, id string, status policy.ExecutionStatus, retry int, errMsg string, started, ended, next time.Time) error {
-	_, err := s.pool.Exec(ctx, `
+// MarkResult records an execution attempt outcome, fenced by the claim token
+// (ADR-CONCURRENCY-005). The write lands only if the row is still claimed under
+// `claimToken`; a worker whose lease expired and whose row was reclaimed holds a
+// stale token, matches zero rows, and gets policy.ErrStaleClaim — so its late
+// completion cannot overwrite the reclaimer's outcome or re-run the action's
+// bookkeeping. A zero token (the admin test path) writes unfenced.
+func (s *PolicyStore) MarkResult(ctx context.Context, id string, claimToken time.Time, status policy.ExecutionStatus, retry int, errMsg string, started, ended, next time.Time) error {
+	var tokenPtr *time.Time
+	if !claimToken.IsZero() {
+		tokenPtr = &claimToken
+	}
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE policy_execution
 		   SET status=$2, retry_count=$3, error=$4, started_at=$5, ended_at=$6,
 		       next_attempt_at=COALESCE($7, next_attempt_at)
-		 WHERE id=$1`,
-		id, string(status), retry, errMsg, nullTime(started), nullTime(ended), nullTime(next))
+		 WHERE id=$1 AND ($8::timestamptz IS NULL OR claimed_at = $8)`,
+		id, string(status), retry, errMsg, nullTime(started), nullTime(ended), nullTime(next), tokenPtr)
 	if err != nil {
 		return fmt.Errorf("mark execution: %w", err)
+	}
+	if tag.RowsAffected() == 0 && tokenPtr != nil {
+		return policy.ErrStaleClaim
 	}
 	return nil
 }
@@ -270,9 +282,9 @@ func scanExecution(sc rowScanner) (policy.Execution, error) {
 	var x policy.Execution
 	var status string
 	var ev []byte
-	var started, ended *time.Time
+	var started, ended, claimedAt *time.Time
 	if err := sc.Scan(&x.ID, &x.PolicyID, new(string), &ev, &status, &x.RetryCount, &x.Error,
-		&started, &ended, &x.NextAttemptAt, &x.CreatedAt); err != nil {
+		&started, &ended, &x.NextAttemptAt, &x.CreatedAt, &claimedAt); err != nil {
 		return policy.Execution{}, err
 	}
 	x.Status = policy.ExecutionStatus(status)
@@ -286,6 +298,9 @@ func scanExecution(sc rowScanner) (policy.Execution, error) {
 	}
 	if ended != nil {
 		x.EndedAt = *ended
+	}
+	if claimedAt != nil {
+		x.ClaimedAt = *claimedAt
 	}
 	return x, nil
 }
