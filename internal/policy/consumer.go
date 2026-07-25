@@ -2,8 +2,6 @@ package policy
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"log/slog"
 	"time"
 
@@ -37,7 +35,6 @@ type Consumer struct {
 	execs    ExecutionStore
 	metrics  Metrics
 	log      *slog.Logger
-	newID    func() string
 	now      func() time.Time
 	cfg      ConsumerConfig
 }
@@ -53,7 +50,7 @@ func NewConsumer(source EventSource, cursor CursorStore, policies Store, execs E
 	cfg.withDefaults()
 	return &Consumer{
 		source: source, cursor: cursor, policies: policies, execs: execs, metrics: metrics,
-		log: log, newID: newExecutionID, now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
+		log: log, now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
 	}
 }
 
@@ -151,18 +148,13 @@ func (c *Consumer) Evaluate(ev Event, pols []Policy, now time.Time) []Execution 
 	}) {
 		{
 			out = append(out, Execution{
-				ID: c.newID(), PolicyID: p.ID, Event: ev, Status: ExecPending,
+				// Deterministic id makes production idempotent: a re-processed
+				// event collides rather than running the action twice
+				// (ADR-CONCURRENCY-003).
+				ID: ExecutionID(p.ID, ev.CfgID, ev.Seq), PolicyID: p.ID, Event: ev, Status: ExecPending,
 				NextAttemptAt: now, CreatedAt: now,
 			})
 		}
 	}
 	return out
-}
-
-func newExecutionID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic("policy: id generation failed")
-	}
-	return "pex_" + hex.EncodeToString(b[:])
 }

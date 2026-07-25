@@ -404,10 +404,13 @@ func run(logger *slog.Logger) error {
 	// but only the leader runs the singleton workers, so a webhook is delivered
 	// once and a policy action executes once regardless of replica count. A
 	// standby promotes itself if the leader's advisory-lock connection drops.
-	ops.RunAsLeader(ctx, cfg.DatabaseURL, ops.WorkerLeaderKey, logger, func() {
+	// Workers run under the leadership context, not the process context: when this
+	// instance loses the lock it is demoted and lctx is cancelled, so its workers
+	// stop rather than keep producing and dispatching alongside the new leader.
+	ops.RunAsLeader(ctx, cfg.DatabaseURL, ops.WorkerLeaderKey, logger, func(lctx context.Context) {
 		for _, run := range workers {
 			run := run
-			go func() { _ = run(ctx) }()
+			go func() { _ = run(lctx) }()
 		}
 	})
 

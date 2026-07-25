@@ -35,7 +35,6 @@ type ReplayWorker struct {
 	ops      DeliveryOps
 	metrics  ConsumeMetrics
 	log      *slog.Logger
-	newID    IDGen
 	now      func() time.Time
 	cfg      ReplayConfig
 }
@@ -51,7 +50,7 @@ func NewReplayWorker(jobs ReplayJobStore, source EventSource, webhooks WebhookSt
 	cfg.withDefaults()
 	return &ReplayWorker{
 		jobs: jobs, source: source, webhooks: webhooks, deliv: deliv, ops: ops,
-		metrics: metrics, log: log, newID: newDeliveryID, now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
+		metrics: metrics, log: log, now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
 	}
 }
 
@@ -162,7 +161,9 @@ func (w *ReplayWorker) replayWindow(ctx context.Context, job ReplayJob) (int, er
 					continue
 				}
 				batch = append(batch, Delivery{
-					ID: w.newID(), WebhookID: wh.ID, Event: ev,
+					// Deterministic id: replaying the same window is idempotent,
+					// re-enqueuing collides rather than duplicating (ADR-CONCURRENCY-003).
+					ID: DeliveryID(wh.ID, ev.ChainID, ev.Seq), WebhookID: wh.ID, Event: ev,
 					Status: StatusPending, NextAttemptAt: now, CreatedAt: now,
 				})
 			}

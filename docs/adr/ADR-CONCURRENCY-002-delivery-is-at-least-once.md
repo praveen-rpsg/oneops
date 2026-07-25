@@ -2,10 +2,21 @@
 
 | | |
 |---|---|
-| **Status** | Accepted |
+| **Status** | Accepted — superseded in part by ADR-CONCURRENCY-003 |
 | **Date** | 2026-07-25 |
 | **Decider** | Acting CTO |
-| **Related** | ADR-CONCURRENCY-001 (leadership), ADR-TENANCY-003/004 (execution ownership) |
+| **Related** | ADR-CONCURRENCY-001 (leadership), ADR-CONCURRENCY-003 (idempotent production), ADR-TENANCY-003/004 (execution ownership) |
+
+> **Amendment (ADR-CONCURRENCY-003).** Point 3 below assumed the stable dedup key
+> was stable across *re-production*. It was not: the producer minted random ids,
+> so a re-processed event became a second row with a *new* id — a duplicate the
+> receiver could not deduplicate, defeating this mechanism. ADR-CONCURRENCY-003
+> makes production idempotent with a content-derived id, so the key is now
+> genuinely stable, and makes a demoted leader stop its workers (this ADR's
+> "lock-loss overlap … paused leader can still perform one in-flight POST" risk is
+> now bounded by a real step-down, not only by the atomic claim). Read this ADR
+> for the at-least-once contract; read ADR-CONCURRENCY-003 for why the dedup key
+> can be trusted.
 
 ## Context
 
