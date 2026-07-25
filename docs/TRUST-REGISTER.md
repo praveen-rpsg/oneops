@@ -31,6 +31,7 @@ fail-closed startup validator.
 | 14 | Concurrent double-claim of a queue row (plain-SELECT claim; overlap double-send) | Atomic compare-and-set claim with a lease (`FOR UPDATE SKIP LOCKED`) | ✓ | int | ADR-CONCURRENCY-002 |
 | 15 | **Non-dedup-able duplicate delivery** (random ids; a re-processed event becomes a new row with a new dedup key) | **Content-derived, idempotent production** (`DeliveryID`/`ExecutionID`); re-production collides on the primary key | ✓ | arch, int, unit | **ADR-CONCURRENCY-003** |
 | 16 | **Demoted leader keeps running its workers** (lock-loss only logged; permanent two-leader overlap) | **Leadership context cancelled on lock loss; re-enters the election** | ✓ | int | **ADR-CONCURRENCY-003** |
+| 17 | **Non-monotonic cursor** (blind overwrite; a stale/overlapping writer rewinds the watermark) | **Monotonic write (`GREATEST`); the watermark can only rise** | ✓ | arch, int | **ADR-CONCURRENCY-004** |
 
 ## Guarantees stated, not overstated
 
@@ -50,6 +51,57 @@ The register records what was *eliminated*. Two properties are deliberately
   *safe* by idempotent production and the atomic claim, not eliminated
   (ADR-CONCURRENCY-003). True fencing of an in-flight outbound call is unclaimed
   future work.
+
+## Boundary dossiers
+
+The mandated long form for a boundary: property, threat model, root authority,
+failure/recovery/operational assumptions, startup and runtime validation,
+evidence, residual risks, status. New investigations add their boundary here.
+
+### Cursor completeness — no lost events (ADR-CONCURRENCY-004)
+
+- **Property.** The relay and the policy consumer never silently drop a committed
+  event: each per-chain cursor is a monotonic watermark over a gapless committed
+  prefix, advanced only past events already durably enqueued.
+- **Threat model.** (a) Commit reorder — a lower seq becomes visible after the
+  cursor passed a higher one, skipping it. (b) Non-monotonic cursor — a stale or
+  overlapping writer (a demoted leader in the bounded step-down window) rewinds
+  the watermark. (c) Advance-before-enqueue — the cursor leads the enqueued set,
+  so a crash drops the gap. (d) Genesis race — two first events collide on seq.
+- **Root authority.** The `audit_event` log, whose per-chain `seq` is assigned
+  `last_seq + 1` under the chain-head `SELECT … FOR UPDATE` (ADR-AUDIT-004), with
+  a unique `(chain_id, seq)` backstop. This is what makes the committed log a
+  gapless prefix per chain. The cursor is derived, never authoritative.
+- **Failure assumptions.** A worker can crash between enqueue and cursor advance
+  (cursor stays; events re-read — safe with idempotent production,
+  ADR-CONCURRENCY-003). Two workers can run during the bounded leadership overlap
+  (ADR-CONCURRENCY-003); neither can rewind the watermark now, and neither can
+  advance past un-enqueued events.
+- **Recovery assumptions.** `webhook_cursor`/`policy_cursor` and `audit_event`
+  are restored from one consistent snapshot (ADR-TENANCY-006). A cursor restored
+  ahead of its log would skip the missing range; a periodic "no cursor exceeds
+  its chain head" check is noted future hardening.
+- **Operational assumptions.** The only writers of these cursors are the tail
+  loops; replay and administration do not move them. No operator tooling advances
+  a cursor.
+- **Startup validation.** None specific to cursors (the schema-invariant
+  validator, ADR-TENANCY-007, guards the ownership columns the workers read).
+- **Runtime validation.** Monotonic write (`GREATEST`) enforces "watermark only
+  rises" on every advance. Enqueue-before-advance ordering is preserved in the
+  tail loops.
+- **Evidence.** Live exploit: cursor regressed 10 → 5 under the blind write.
+  Live fix: stale write ignored, holds at 10, advances to 12. Live end-to-end
+  across failover: 12 committed ratifications → 12 deliveries → 12 distinct ids;
+  every cursor exactly at its chain head (0 ahead, 0 behind); 0 lost, 0 phantom
+  by `(chain_id, seq)`. Gapless prefix: `TestAppenderConcurrentSerialization`
+  (12 concurrent appends → seqs 1..12 contiguous).
+- **Residual risks.** No cross-chain global order (not claimed). Delivery order to
+  a receiver is not guaranteed — receivers needing per-object order sort on
+  `(chain_id, seq)`. Restore consistency depends on ADR-TENANCY-006. Genesis race
+  is fail-closed and retryable.
+- **Status.** ✓ Closed. Enforced by `arch.TestCursorWriters_AreMonotonic`,
+  `postgres.TestCursor_{Webhook,Policy}WriteIsMonotonic`, and
+  `postgres.TestAppenderConcurrentSerialization`.
 
 ## How to add an entry
 

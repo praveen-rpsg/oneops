@@ -220,12 +220,17 @@ func (s *PolicyStore) GetPolicyCursor(ctx context.Context, chainID string) (int6
 	return seq, nil
 }
 
-// SetPolicyCursor advances the consumer cursor for a chain.
+// SetPolicyCursor advances the consumer cursor for a chain. The write is
+// monotonic (GREATEST): the watermark never moves backward, so a stale or
+// overlapping consumer cannot rewind it under a concurrent advance
+// (ADR-CONCURRENCY-004). A cursor never legitimately regresses — the consumer only
+// advances to the max seq of events it has already enqueued.
 func (s *PolicyStore) SetPolicyCursor(ctx context.Context, chainID string, seq int64) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO policy_cursor (chain_id, last_seq, updated_at)
 		VALUES ($1,$2,now())
-		ON CONFLICT (chain_id) DO UPDATE SET last_seq=EXCLUDED.last_seq, updated_at=now()`,
+		ON CONFLICT (chain_id) DO UPDATE
+		   SET last_seq=GREATEST(policy_cursor.last_seq, EXCLUDED.last_seq), updated_at=now()`,
 		chainID, seq)
 	if err != nil {
 		return fmt.Errorf("set policy cursor: %w", err)

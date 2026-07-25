@@ -248,12 +248,20 @@ func (s *WebhookStore) GetCursor(ctx context.Context, chainID string) (int64, er
 	return seq, nil
 }
 
-// Set advances the relay cursor for a chain.
+// SetCursor advances the relay cursor for a chain. The write is monotonic: the
+// stored watermark is GREATEST(current, seq), so it never moves backward. A stale
+// or overlapping writer — a demoted leader still running its relay for the
+// bounded step-down window (ADR-CONCURRENCY-003) — carrying an older sequence
+// cannot rewind the watermark under a concurrent advance and force already-
+// processed events to be re-read (ADR-CONCURRENCY-004). A cursor never legitimately
+// regresses: the relay only ever advances to the max seq of a batch it has already
+// enqueued.
 func (s *WebhookStore) SetCursor(ctx context.Context, chainID string, seq int64) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO webhook_cursor (chain_id, last_seq, updated_at)
 		VALUES ($1,$2,now())
-		ON CONFLICT (chain_id) DO UPDATE SET last_seq=EXCLUDED.last_seq, updated_at=now()`,
+		ON CONFLICT (chain_id) DO UPDATE
+		   SET last_seq=GREATEST(webhook_cursor.last_seq, EXCLUDED.last_seq), updated_at=now()`,
 		chainID, seq)
 	if err != nil {
 		return fmt.Errorf("set cursor: %w", err)
