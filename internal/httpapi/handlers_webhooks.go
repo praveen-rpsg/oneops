@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/rpsg/oneops/internal/events"
+	"github.com/rpsg/oneops/internal/safehttp"
 )
 
 // webhookRegistry is the read/write surface the admin webhook API depends on.
@@ -119,6 +120,13 @@ func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.URL == "" {
 		writeProblem(w, r, http.StatusBadRequest, "bad request", "url is required")
+		return
+	}
+	// Reject non-http(s) schemes at creation for fast feedback; the authoritative
+	// SSRF egress guard (non-public IPs) is enforced at dial time in safehttp
+	// (ADR-SECURITY-001), because a hostname's resolution can change afterwards.
+	if err := safehttp.ValidateWebhookURL(req.URL); err != nil {
+		writeProblem(w, r, http.StatusBadRequest, "bad request", err.Error())
 		return
 	}
 	enabled := true

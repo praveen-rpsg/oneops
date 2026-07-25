@@ -33,6 +33,7 @@ fail-closed startup validator.
 | 16 | **Demoted leader keeps running its workers** (lock-loss only logged; permanent two-leader overlap) | **Leadership context cancelled on lock loss; re-enters the election** | ✓ | int | **ADR-CONCURRENCY-003** |
 | 17 | **Non-monotonic cursor** (blind overwrite; a stale/overlapping writer rewinds the watermark) | **Monotonic write (`GREATEST`); the watermark can only rise** | ✓ | arch, int | **ADR-CONCURRENCY-004** |
 | 18 | **Unfenced completion of an evicted worker** (lease expires, row reclaimed; the stale worker's `MarkResult` resurrects a delivered row / corrupts the reclaimer's state) | **`MarkResult` fenced on the claim token (`claimed_at`); a stale write is rejected with `ErrStaleClaim`** | ✓ | arch, int | **ADR-CONCURRENCY-005** |
+| 19 | **SSRF via tenant-supplied delivery URLs** (webhook / policy-action URLs dialed through a default client; loopback + `169.254.169.254` metadata + private ranges reachable; `last_status_code` an internal scanner oracle) | **`safehttp` dialer refuses non-public IPs at dial time (DNS-rebinding-safe); applied to both outbound clients; secure by default** | ✓ | arch, unit | **ADR-SECURITY-001** |
 
 ## Guarantees stated, not overstated
 
@@ -137,6 +138,40 @@ evidence, residual risks, status. New investigations add their boundary here.
   The lease is not yet operator-tunable.
 - **Status.** ✓ Closed. Enforced by `arch.TestMarkResult_IsFencedOnTheClaim` and
   `postgres.TestLeaseFencing_{Webhook,Policy}EvictedWorkerIsFenced`.
+
+### Outbound egress — no SSRF to internal addresses (ADR-SECURITY-001)
+
+- **Property.** The platform never opens an outbound connection to a non-public IP
+  address on behalf of a tenant (webhook delivery, policy HTTP actions).
+- **Threat model.** A tenant registers a delivery URL pointing at loopback, the
+  cloud metadata endpoint (`169.254.169.254`), or a private-range host. The
+  platform, as a confused deputy, POSTs to it — reaching internal services,
+  metadata/credentials, and (via the returned `last_status_code`) scanning and
+  fingerprinting the internal network. DNS rebinding defeats string blocklists.
+- **Root authority.** The resolved IP at dial time — not the spelling of the URL.
+  `safehttp` resolves the host, refuses if any resolved address is non-public, and
+  dials the exact validated address.
+- **Failure assumptions.** DNS can resolve a public name to a private address
+  (rebinding); redirects can point at private addresses; encodings of `127.0.0.1`
+  are unbounded. All are handled at the dial, per-hop, on the IP.
+- **Recovery assumptions.** None; the guard is stateless per connection.
+- **Operational assumptions.** Only the dispatcher and policy registry dial
+  operator-supplied URLs; both use `safehttp.Client`. Network egress policy is a
+  defence-in-depth complement.
+- **Startup validation.** None (the guard is per-dial). Config
+  `ONEOPS_WEBHOOK_ALLOW_PRIVATE_TARGETS` (default false) is the only knob.
+- **Runtime validation.** `guardedDialContext` refuses non-public addresses on
+  every dial; webhook creation rejects non-http(s) schemes.
+- **Evidence.** Live exploit: a loopback webhook received a signed POST from the
+  platform; the tenant read `last_status_code=200`. Live fix: the same webhook
+  reaches nothing (internal service received 0 requests); delivery is
+  `status=failed, last_status_code=0`, uniform across all blocked targets.
+- **Residual risks.** Create-time accepts literal private IPs (blocked at dial);
+  policy-action URLs guarded at dial, not create; a fully hostile DNS resolver is
+  outside scope (network egress policy backstops).
+- **Status.** ✓ Closed. Enforced by `arch.TestOutboundClients_AreSSRFGuarded`,
+  `safehttp.TestIsPublicIP_BlocksNonPublic`, `safehttp.TestClient_RefusesLoopbackDial`,
+  `safehttp.TestValidateWebhookURL`.
 
 ## How to add an entry
 

@@ -64,6 +64,15 @@ type Config struct {
 	// Webhook delivery retention in hours (terminal deliveries older than this are
 	// pruned; pending/failed are never deleted). 0 disables deletion.
 	WebhookRetentionHours int
+
+	// WebhookAllowPrivateTargets disables the SSRF egress guard, permitting
+	// webhook and policy-action delivery to loopback, link-local, and private
+	// addresses. The secure default is false: the platform refuses to POST to
+	// non-public addresses so a tenant cannot make it a confused deputy against
+	// internal services or the cloud metadata endpoint (ADR-SECURITY-001). Set
+	// true only for a deployment whose delivery targets are legitimately on a
+	// private network and whose tenants are trusted to address them.
+	WebhookAllowPrivateTargets bool
 }
 
 // IsProduction reports whether the service runs in a production environment,
@@ -136,7 +145,8 @@ func Load() (*Config, error) {
 
 		PProfEnabled: getEnvBool("ONEOPS_PPROF_ENABLED", false),
 
-		WebhookRetentionHours: getEnvInt("ONEOPS_WEBHOOK_RETENTION_HOURS", 720),
+		WebhookRetentionHours:      getEnvInt("ONEOPS_WEBHOOK_RETENTION_HOURS", 720),
+		WebhookAllowPrivateTargets: getEnvBool("ONEOPS_WEBHOOK_ALLOW_PRIVATE_TARGETS", false),
 	}
 	if c.ShutdownGrace < 0 {
 		return nil, fmt.Errorf("ONEOPS_SHUTDOWN_GRACE_SECONDS must be >= 0, got %d", c.ShutdownGrace)

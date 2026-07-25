@@ -26,6 +26,7 @@ import (
 	"github.com/rpsg/oneops/internal/observability"
 	"github.com/rpsg/oneops/internal/ops"
 	"github.com/rpsg/oneops/internal/policy"
+	"github.com/rpsg/oneops/internal/safehttp"
 	"github.com/rpsg/oneops/internal/store/migrate"
 	"github.com/rpsg/oneops/internal/store/postgres"
 	"github.com/rpsg/oneops/internal/timeline"
@@ -299,7 +300,12 @@ func run(logger *slog.Logger) error {
 	// (ADR-TENANCY-003). It is on the privileged pool by design: the dispatcher
 	// serves every tenant, and this read is the security source, not tenant
 	// data returned to a caller.
-	dispatcher := events.NewDispatcher(webhookStore, webhookStore, auditStore, &http.Client{Timeout: 15 * time.Second}, eventMetrics, logger, events.DispatcherConfig{})
+	// Outbound delivery uses the SSRF-safe client: it refuses to dial loopback,
+	// link-local (cloud metadata), or private addresses unless explicitly allowed,
+	// so a tenant-supplied webhook URL cannot make the platform a confused deputy
+	// against internal services (ADR-SECURITY-001).
+	deliveryClient := safehttp.Client(15*time.Second, cfg.WebhookAllowPrivateTargets)
+	dispatcher := events.NewDispatcher(webhookStore, webhookStore, auditStore, deliveryClient, eventMetrics, logger, events.DispatcherConfig{})
 	workers = append(workers, relay.Run, dispatcher.Run)
 	srv.SetWebhooks(webhookAdminStore, func(ctx context.Context, wh events.Webhook) (events.DeliveryStatus, error) {
 		return dispatcher.Deliver(ctx, events.Delivery{
@@ -330,7 +336,10 @@ func run(logger *slog.Logger) error {
 	policyStore := postgres.NewPolicyStore(pool)
 	policyAdminStore := postgres.NewPolicyStore(appPool)
 	policyMetrics := policy.NewPromMetrics(metrics.Registry())
-	policyRegistry := policy.DefaultRegistry(&http.Client{Timeout: 15 * time.Second}, nil, nil, nil, logger)
+	// Policy HTTP actions POST to operator-supplied URLs too, so they share the
+	// SSRF-safe client (ADR-SECURITY-001).
+	policyActionClient := safehttp.Client(15*time.Second, cfg.WebhookAllowPrivateTargets)
+	policyRegistry := policy.DefaultRegistry(policyActionClient, nil, nil, nil, logger)
 	policyConsumer := policy.NewConsumer(auditStore, policyStore, policyStore, policyStore, policyMetrics, logger, policy.ConsumerConfig{})
 	// auditStore is the authoritative event-owner resolver, exactly as for the
 	// webhook dispatcher: the executor re-derives the triggering event's owner
