@@ -288,7 +288,12 @@ func run(logger *slog.Logger) error {
 	policyMetrics := policy.NewPromMetrics(metrics.Registry())
 	policyRegistry := policy.DefaultRegistry(&http.Client{Timeout: 15 * time.Second}, nil, nil, nil, logger)
 	policyConsumer := policy.NewConsumer(auditStore, policyStore, policyStore, policyStore, policyMetrics, logger, policy.ConsumerConfig{})
-	policyExecutor := policy.NewExecutor(policyStore, policyStore, policyRegistry, policyMetrics, logger, policy.ExecutorConfig{})
+	// auditStore is the authoritative event-owner resolver, exactly as for the
+	// webhook dispatcher: the executor re-derives the triggering event's owner
+	// from audit_event and refuses to run a policy against another tenant's
+	// event, rather than trusting the event snapshot in the queued execution
+	// row (ADR-TENANCY-003).
+	policyExecutor := policy.NewExecutor(policyStore, policyStore, auditStore, policyRegistry, policyMetrics, logger, policy.ExecutorConfig{})
 	go func() { _ = policyConsumer.Run(ctx) }()
 	go func() { _ = policyExecutor.Run(ctx) }()
 	srv.SetPolicies(policyAdminStore, func(ctx context.Context, p policy.Policy) (policy.ExecutionStatus, error) {

@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/rpsg/oneops/internal/domain"
-	"github.com/rpsg/oneops/internal/events"
 )
 
 // AuditStore persists the tamper-evident audit chain (audit_event) and its
@@ -198,7 +197,7 @@ func (s *AuditStore) ReadEvent(ctx context.Context, chainID string, seq int64) (
 // It reads only tenant_id, and reads it from audit_event rather than from any
 // queue row, because the queue row's owner is a forgeable label while this
 // value is written inside the governance transaction and never rewritten. A
-// missing row is events.ErrEventNotFound: an event absent from an append-only
+// missing row is domain.ErrEventNotFound: an event absent from an append-only
 // log will never appear, so the delivery referencing it is refused rather than
 // retried.
 func (s *AuditStore) ResolveEventOwner(ctx context.Context, chainID string, seq int64) (string, error) {
@@ -207,7 +206,7 @@ func (s *AuditStore) ResolveEventOwner(ctx context.Context, chainID string, seq 
 		`SELECT tenant_id FROM audit_event WHERE chain_id = $1 AND seq = $2`,
 		chainID, seq).Scan(&tenantID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", events.ErrEventNotFound
+		return "", domain.ErrEventNotFound
 	}
 	if err != nil {
 		return "", fmt.Errorf("resolve event owner: %w", err)

@@ -138,28 +138,20 @@ func (d *Dispatcher) attempt(ctx context.Context, del Delivery) (DeliveryStatus,
 	// whose tenant_id is written inside the governance transaction
 	// (ADR-AUDIT-005). That is the one owner an attacker cannot rewrite after
 	// the event is committed. The delivery's own label is never consulted here.
-	owner, err := d.owners.ResolveEventOwner(ctx, del.Event.ChainID, del.Event.Seq)
-	if err != nil {
-		// Either the event is not in the authoritative log, or the resolver is
-		// unavailable. Both fail closed: an event absent from an append-only log
-		// will never appear, and a delivery that cannot be authorised must not
-		// be delivered. Dead-lettered, not retried — a cross-tenant or
-		// phantom delivery is never made transiently valid by trying again.
-		d.log.Error("event dispatcher: refused delivery, ownership unresolved",
+	// Ownership is re-derived from the audit log and compared against the
+	// subscription through the shared framework. The delivery row's own owner
+	// label is never read: it is forgeable, and a self-consistent forged row
+	// (label matching the webhook, event content belonging to another tenant)
+	// was delivered against the running service before this. The check refuses
+	// unless the authoritative event owner equals the webhook's owner.
+	if err := domain.ResolveAndAuthorize(ctx, d.owners, wh, del.Event.ChainID, del.Event.Seq); err != nil {
+		// Fail closed and dead-letter, never retry: a cross-tenant or phantom
+		// delivery is never made transiently valid by trying again.
+		d.log.Error("event dispatcher: refused delivery",
 			"delivery_id", del.ID, "webhook_id", wh.ID,
-			"chain_id", del.Event.ChainID, "seq", del.Event.Seq, "err", err.Error())
-		_ = d.deliv.MarkResult(ctx, del.ID, StatusDeadLetter, del.RetryCount, 0, d.now(), time.Time{})
-		return StatusDeadLetter, err
-	}
-
-	// The authoritative owner, not the queue label, is compared against the
-	// subscription. authoritativeEvent carries only the re-derived owner, so a
-	// forged label on the delivery cannot influence the decision.
-	if err := domain.AuthorizeExecution(wh, authoritativeEvent{owner}); err != nil {
-		d.log.Error("event dispatcher: refused cross-tenant delivery",
-			"delivery_id", del.ID, "webhook_id", wh.ID,
-			"webhook_tenant", wh.OwnerTenantID(), "authoritative_event_tenant", owner,
-			"claimed_delivery_tenant", del.OwnerTenantID())
+			"chain_id", del.Event.ChainID, "seq", del.Event.Seq,
+			"webhook_tenant", wh.OwnerTenantID(), "claimed_delivery_tenant", del.OwnerTenantID(),
+			"err", err.Error())
 		_ = d.deliv.MarkResult(ctx, del.ID, StatusDeadLetter, del.RetryCount, 0, d.now(), time.Time{})
 		return StatusDeadLetter, err
 	}
@@ -234,10 +226,3 @@ func newDeliveryID() string {
 	}
 	return "dlv_" + hex.EncodeToString(b[:])
 }
-
-// authoritativeEvent carries only the owner re-derived from the audit log, so
-// AuthorizeExecution compares the subscription against the authoritative tenant
-// and never against a queue-supplied label.
-type authoritativeEvent struct{ owner string }
-
-func (a authoritativeEvent) OwnerTenantID() string { return a.owner }

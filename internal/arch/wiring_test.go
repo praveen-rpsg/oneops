@@ -390,52 +390,57 @@ func TestWorkersFanOutThroughOwnershipFramework(t *testing.T) {
 
 // Execution-time ownership must be re-derived, never read from the queue.
 //
-// The dispatcher's first ownership fix compared the delivery row's owner label
-// against the webhook. A row forged self-consistently — label naming the
-// attacker, matching the attacker's webhook, while its event content belonged
-// to the victim — passed, and was delivered against the running service. The
-// label is queue metadata and queue metadata is forgeable.
+// A privileged execution consumer performs an outbound action from a queued
+// item. The queued item carries an owner label, but the label is forgeable: a
+// row forged self-consistently — label matching the action's target while the
+// event content belongs to another tenant — passed the dispatcher's first fix
+// and was delivered, and the policy executor exfiltrated a victim's event to an
+// attacker's endpoint the same way. Both were verified against the running
+// service.
 //
-// The fix re-derives ownership from the audit log via EventOwnerResolver. This
-// test fails if the dispatcher ever reads del.OwnerTenantID or del.Event.TenantID
-// to make an authorization decision instead of resolving it, which is the shape
-// the regression would take.
-func TestDispatcherResolvesOwnershipAuthoritatively(t *testing.T) {
-	src, err := os.ReadFile("../events/dispatcher.go")
-	if err != nil {
-		t.Fatalf("read dispatcher: %v", err)
-	}
-	body := string(src)
+// The fix re-derives ownership from the audit log through
+// domain.ResolveAndAuthorize. This test fails if a consumer stops calling it,
+// or authorises from a queue-supplied owner instead — the two shapes the
+// regression takes.
+var executionConsumers = []string{
+	"../events/dispatcher.go",
+	"../policy/executor.go",
+}
 
-	if !strings.Contains(body, "ResolveEventOwner") {
-		t.Error("the dispatcher does not call ResolveEventOwner; execution-time " +
-			"ownership must be re-derived from the audit log, not read from the queue row")
-	}
+func TestExecutionConsumersReDeriveOwnership(t *testing.T) {
+	for _, file := range executionConsumers {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		if !strings.Contains(string(src), "domain.ResolveAndAuthorize") {
+			t.Errorf("%s does not call domain.ResolveAndAuthorize; a privileged "+
+				"execution consumer must re-derive ownership from the authoritative "+
+				"source, not authorise from the queued item's label", file)
+		}
 
-	// AuthorizeExecution must be handed the authoritative owner, not the
-	// delivery. Passing del (which carries the forgeable label) into the check
-	// is precisely the defect this replaced.
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "../events/dispatcher.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse dispatcher: %v", err)
-	}
-	ast.Inspect(f, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "AuthorizeExecution" {
-			return true
-		}
-		for _, arg := range call.Args {
-			if id, ok := arg.(*ast.Ident); ok && id.Name == "del" {
-				t.Errorf("AuthorizeExecution is passed the delivery row (%q) at %s; it "+
-					"must receive the authoritatively resolved owner, or a forged queue "+
-					"label defeats the check", id.Name, fset.Position(call.Pos()))
+		// AuthorizeExecution must never be called directly by a consumer: it
+		// authorises whatever Owned it is handed, so passing the queued item
+		// (del / ex) reinstates label trust. Ownership must flow only through
+		// ResolveAndAuthorize, which re-derives the owner first.
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
 			}
-		}
-		return true
-	})
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "AuthorizeExecution" {
+				return true
+			}
+			t.Errorf("%s calls AuthorizeExecution directly at %s; consumers must go "+
+				"through domain.ResolveAndAuthorize so the owner is re-derived, never "+
+				"taken from the queued item", file, fset.Position(call.Pos()))
+			return true
+		})
+	}
 }

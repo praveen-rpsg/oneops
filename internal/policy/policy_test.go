@@ -19,6 +19,27 @@ import (
 // without an owner is selected for nothing — which is the intended default.
 const testTenant = "t-test"
 
+// fakePolicyOwners is a stand-in domain.EventOwnerResolver. It returns the
+// authoritative owner per chain, defaulting to testTenant so existing fixtures
+// (whose policy and event both name testTenant) resolve consistently. A test
+// that needs the authoritative owner to disagree sets it explicitly.
+type fakePolicyOwners struct {
+	byChain map[string]string
+	err     error
+}
+
+func newFakePolicyOwners() *fakePolicyOwners { return &fakePolicyOwners{byChain: map[string]string{}} }
+
+func (f *fakePolicyOwners) ResolveEventOwner(_ context.Context, chainID string, _ int64) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	if o, ok := f.byChain[chainID]; ok {
+		return o, nil
+	}
+	return testTenant, nil
+}
+
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // ---- fakes ------------------------------------------------------------------
@@ -301,7 +322,7 @@ func TestExecutor_SuccessRunsAction(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register("http", HTTPAction{Doer: doerFunc(func(*http.Request) (*http.Response, error) { called = true; return resp(200), nil })})
 
-	NewExecutor(execs, pols, reg, nil, quiet(), ExecutorConfig{}).RunOnce(context.Background())
+	NewExecutor(execs, pols, newFakePolicyOwners(), reg, nil, quiet(), ExecutorConfig{}).RunOnce(context.Background())
 	if !called || execs.status("x1") != ExecSucceeded {
 		t.Fatalf("action not run or status wrong: called=%v status=%q", called, execs.status("x1"))
 	}
@@ -313,7 +334,7 @@ func TestExecutor_RetryThenDeadLetter(t *testing.T) {
 	_ = execs.Enqueue(context.Background(), []Execution{execPending("x1", "p1")})
 	reg := NewRegistry()
 	reg.Register("http", HTTPAction{Doer: doerFunc(func(*http.Request) (*http.Response, error) { return resp(500), nil })})
-	ex := NewExecutor(execs, pols, reg, nil, quiet(), ExecutorConfig{BaseBackoff: time.Millisecond})
+	ex := NewExecutor(execs, pols, newFakePolicyOwners(), reg, nil, quiet(), ExecutorConfig{BaseBackoff: time.Millisecond})
 
 	ex.RunOnce(context.Background())
 	if execs.status("x1") != ExecFailed {
@@ -336,7 +357,7 @@ func TestExecutor_FailureIsolated(t *testing.T) {
 	reg.Register("boom", actionFunc(func(context.Context, Event, json.RawMessage) error { panic("kaboom") }))
 
 	// Must not panic; execution dead-letters with the captured error.
-	NewExecutor(execs, pols, reg, nil, quiet(), ExecutorConfig{}).RunOnce(context.Background())
+	NewExecutor(execs, pols, newFakePolicyOwners(), reg, nil, quiet(), ExecutorConfig{}).RunOnce(context.Background())
 	got := execs.any()
 	if got.Status != ExecDeadLetter || got.Error == "" {
 		t.Fatalf("panic not isolated onto execution: %+v", got)
@@ -382,3 +403,109 @@ func TestActions_Builtins(t *testing.T) {
 		t.Errorf("unknown: %v", err)
 	}
 }
+
+// The exploit, as a regression. A queued execution pairs the attacker's policy
+// with the victim's event; the event snapshot in the row is queue metadata, and
+// a policy action POSTs it outbound. Against the running service this
+// exfiltrated a victim's governance event to the attacker's endpoint. The
+// executor must re-derive the event's owner from the audit log and refuse when
+// it does not match the policy — regardless of what the queued row claims.
+func TestExecutor_RefusesForgedCrossTenantExecution(t *testing.T) {
+	// Policy owned by the attacker.
+	pols := newFakePolicies(Policy{
+		ID: "p-attacker", TenantID: "t-attacker", Enabled: true, MaxRetries: 3,
+		Action: ActionSpec{Type: "http", Config: json.RawMessage(`{"url":"http://attacker"}`)},
+	})
+	execs := newFakeExecs()
+
+	// The forged execution: attacker policy, but the triggering event belongs to
+	// the victim. The queued row even labels the event t-attacker (self-consistent).
+	_ = execs.Enqueue(context.Background(), []Execution{{
+		ID: "x-forged", PolicyID: "p-attacker", Status: ExecPending, NextAttemptAt: time.Unix(0, 0),
+		Event: Event{TenantID: "t-attacker", CfgID: "c-victim", Seq: 1, Operation: "ratification"},
+	}})
+
+	// The authoritative log says the event at c-victim/1 belongs to the victim.
+	owners := newFakePolicyOwners()
+	owners.byChain["c-victim"] = "t-victim"
+
+	var called bool
+	reg := NewRegistry()
+	reg.Register("http", HTTPAction{Doer: doerFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return resp(200), nil
+	})})
+
+	NewExecutor(execs, pols, owners, reg, nil, quiet(), ExecutorConfig{}).RunOnce(context.Background())
+
+	if called {
+		t.Fatal("the executor ran a policy action against another tenant's event")
+	}
+	if execs.status("x-forged") != ExecDeadLetter {
+		t.Fatalf("status = %q, want dead_letter", execs.status("x-forged"))
+	}
+}
+
+// An event absent from the authoritative log is refused, not retried.
+func TestExecutor_RefusesUnknownEvent(t *testing.T) {
+	pols := newFakePolicies(Policy{
+		ID: "p", TenantID: testTenant, Enabled: true, MaxRetries: 3,
+		Action: ActionSpec{Type: "http", Config: json.RawMessage(`{"url":"http://x"}`)},
+	})
+	execs := newFakeExecs()
+	_ = execs.Enqueue(context.Background(), []Execution{{
+		ID: "x-phantom", PolicyID: "p", Status: ExecPending, NextAttemptAt: time.Unix(0, 0),
+		Event: Event{TenantID: testTenant, CfgID: "c-nope", Seq: 99, Operation: "ratification"},
+	}})
+	owners := newFakePolicyOwners()
+	owners.err = domain.ErrEventNotFound
+
+	var called bool
+	reg := NewRegistry()
+	reg.Register("http", HTTPAction{Doer: doerFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return resp(200), nil
+	})})
+
+	NewExecutor(execs, pols, owners, reg, nil, quiet(), ExecutorConfig{}).RunOnce(context.Background())
+
+	if called {
+		t.Fatal("the executor ran a policy for an event absent from the authoritative log")
+	}
+	if execs.status("x-phantom") != ExecDeadLetter {
+		t.Fatalf("status = %q, want dead_letter", execs.status("x-phantom"))
+	}
+}
+
+// A resolver failure fails closed: no action runs when ownership is unresolvable.
+func TestExecutor_ResolverFailureFailsClosed(t *testing.T) {
+	pols := newFakePolicies(Policy{
+		ID: "p", TenantID: testTenant, Enabled: true, MaxRetries: 3,
+		Action: ActionSpec{Type: "http", Config: json.RawMessage(`{"url":"http://x"}`)},
+	})
+	execs := newFakeExecs()
+	_ = execs.Enqueue(context.Background(), []Execution{execPending("x1", "p")})
+	owners := newFakePolicyOwners()
+	owners.err = errContext
+
+	var called bool
+	reg := NewRegistry()
+	reg.Register("http", HTTPAction{Doer: doerFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return resp(200), nil
+	})})
+
+	NewExecutor(execs, pols, owners, reg, nil, quiet(), ExecutorConfig{}).RunOnce(context.Background())
+
+	if called {
+		t.Fatal("the executor ran an action while ownership was unresolvable")
+	}
+}
+
+var errContext = errorsNew("database unavailable")
+
+func errorsNew(s string) error { return &simpleErr{s} }
+
+type simpleErr struct{ s string }
+
+func (e *simpleErr) Error() string { return e.s }

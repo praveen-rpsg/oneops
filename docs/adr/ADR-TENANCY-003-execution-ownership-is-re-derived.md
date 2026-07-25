@@ -68,11 +68,26 @@ only appending a *new* event is, and a new event has its own correct owner. The
 boundary rests on the append-only guarantee, which is independently enforced and
 independently tested.
 
-**This generalises to every privileged consumer.** The policy executor performs
-outbound actions from queued executions and must re-derive ownership the same
-way before it is trusted; it has not yet been converted, so the execution
-boundary is verified for webhook delivery and remains open for policy execution.
-The register records that split rather than marking the boundary green wholesale.
+**This generalises to every privileged consumer, and now does.** The webhook
+dispatcher and the policy executor both perform outbound actions from queued
+items, and both now reach ownership only through one shared function,
+`domain.ResolveAndAuthorize`: the worker supplies the authoritative target (a
+subscription or policy fetched by id) and the triggering event's coordinates,
+and the function re-derives the event's owner from the audit log and refuses a
+mismatch. No worker compares ownership itself, and neither reads the queued
+item's owner label.
+
+The policy executor was converted after being exploited live: a synthetic
+execution pairing an attacker's HTTP-action policy with a victim's event
+POSTed the victim's governance event to the attacker's endpoint
+(`status: succeeded`, event captured). After conversion the same injection is
+refused (`dead_letter`, target and work tenants logged as different, zero
+exfiltration), while a policy triggered by its own tenant's event still runs.
+
+**Update (2026-07-25).** The resolver contract, `ErrEventNotFound`, and
+`ResolveAndAuthorize` moved into `domain` so there is one execution-security
+framework rather than one per package. The dispatcher was re-routed through it
+and re-verified — its forged-row refusal still holds live.
 
 **Enforced mechanically.** `TestDispatcher_ForgedSelfConsistentRowIsRefused`
 fails if the forged row is delivered. An architecture test fails if the

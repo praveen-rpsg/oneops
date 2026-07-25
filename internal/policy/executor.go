@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/rpsg/oneops/internal/domain"
 )
 
 // ExecutorConfig parameterises the executor.
@@ -38,6 +40,7 @@ func (c *ExecutorConfig) withDefaults() {
 type Executor struct {
 	execs    ExecutionStore
 	policies Store
+	owners   domain.EventOwnerResolver
 	registry *Registry
 	metrics  Metrics
 	log      *slog.Logger
@@ -45,8 +48,11 @@ type Executor struct {
 	cfg      ExecutorConfig
 }
 
-// NewExecutor builds the executor. execs, policies, and registry are required.
-func NewExecutor(execs ExecutionStore, policies Store, registry *Registry, metrics Metrics, log *slog.Logger, cfg ExecutorConfig) *Executor {
+// NewExecutor builds the executor. execs, policies, owners and registry are
+// required. owners is the authoritative source of event ownership; an executor
+// built without it refuses every execution rather than trusting the queued
+// event (ADR-TENANCY-003).
+func NewExecutor(execs ExecutionStore, policies Store, owners domain.EventOwnerResolver, registry *Registry, metrics Metrics, log *slog.Logger, cfg ExecutorConfig) *Executor {
 	if metrics == nil {
 		metrics = NopMetrics{}
 	}
@@ -55,7 +61,7 @@ func NewExecutor(execs ExecutionStore, policies Store, registry *Registry, metri
 	}
 	cfg.withDefaults()
 	return &Executor{
-		execs: execs, policies: policies, registry: registry, metrics: metrics, log: log,
+		execs: execs, policies: policies, owners: owners, registry: registry, metrics: metrics, log: log,
 		now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
 	}
 }
@@ -104,6 +110,29 @@ func (e *Executor) attempt(ctx context.Context, ex Execution) ExecutionStatus {
 	p, err := e.policies.Get(ctx, ex.PolicyID)
 	if err != nil {
 		_ = e.execs.MarkResult(ctx, ex.ID, ExecDeadLetter, ex.RetryCount, "policy not found: "+err.Error(), start, e.now(), time.Time{})
+		return ExecDeadLetter
+	}
+
+	// The policy is authoritative — fetched by id from the policy table, not from
+	// the queue. The event is not: ex.Event is a snapshot stored in the queued
+	// execution row, and a policy action POSTs that event's contents outbound.
+	// A synthetic row pairing this policy with another tenant's event was
+	// executed against the running service, exfiltrating a victim's governance
+	// event to the attacker's endpoint. Labelling the row self-consistently did
+	// not help detection, because the row's label is not evidence.
+	//
+	// So the event's owner is re-derived from the audit log and compared against
+	// the policy through the shared framework, before the action runs. The
+	// queued event's own fields are used only as coordinates into the
+	// authoritative record, never as the ownership claim itself.
+	if err := domain.ResolveAndAuthorize(ctx, e.owners, p, ex.Event.CfgID, ex.Event.Seq); err != nil {
+		// Fail closed and dead-letter, never retry: a cross-tenant or phantom
+		// execution is never made transiently valid by trying again.
+		e.log.Error("policy executor: refused execution",
+			"execution_id", ex.ID, "policy_id", p.ID, "policy_tenant", p.OwnerTenantID(),
+			"event_chain", ex.Event.CfgID, "event_seq", ex.Event.Seq, "err", err.Error())
+		_ = e.execs.MarkResult(ctx, ex.ID, ExecDeadLetter, ex.RetryCount, "ownership refused: "+err.Error(), start, e.now(), time.Time{})
+		e.metrics.IncFailure()
 		return ExecDeadLetter
 	}
 

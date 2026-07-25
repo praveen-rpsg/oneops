@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"errors"
 	"fmt"
 )
@@ -114,3 +115,39 @@ func AuthorizeExecution(target, work Owned) error {
 	}
 	return nil
 }
+
+// EventOwnerResolver returns the authoritative tenant that owns a committed
+// event, read from the append-only audit log rather than from any queue row.
+// It is the source of truth for execution-time ownership (ADR-TENANCY-003).
+type EventOwnerResolver interface {
+	ResolveEventOwner(ctx context.Context, chainID string, seq int64) (string, error)
+}
+
+// ErrEventNotFound means no committed event matches the chain and sequence.
+// Execution treats it as a refusal, not a transient error: an event absent from
+// an append-only log will never appear.
+var ErrEventNotFound = errors.New("no committed event for chain and sequence")
+
+// ResolveAndAuthorize is the one execution-security check every privileged
+// consumer performs before an outbound action. The worker supplies the
+// authoritative target (a policy or subscription fetched by id, not from the
+// queue) and the coordinates of the triggering event; this re-derives the
+// event's owner from the authoritative source and refuses unless the two match.
+//
+// No worker compares ownership itself. The dispatcher and the policy executor
+// both reach ownership only through here, so a forged queue label cannot
+// influence either — the label is never read. A resolver error, including
+// ErrEventNotFound, propagates and the caller fails closed.
+func ResolveAndAuthorize(ctx context.Context, r EventOwnerResolver, target Owned, chainID string, seq int64) error {
+	owner, err := r.ResolveEventOwner(ctx, chainID, seq)
+	if err != nil {
+		return err
+	}
+	return AuthorizeExecution(target, ownerString(owner))
+}
+
+// ownerString adapts a re-derived owner id to Owned, so AuthorizeExecution
+// compares against the authoritative tenant and never against a queue label.
+type ownerString string
+
+func (o ownerString) OwnerTenantID() string { return string(o) }
