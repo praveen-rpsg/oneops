@@ -222,8 +222,15 @@ func (s *AuditStore) ResolveEventOwner(ctx context.Context, chainID string, seq 
 		SELECT co.tenant_id, ae.tenant_id
 		  FROM audit_event ae
 		  JOIN configuration_object co ON co.cfg_id = ae.chain_id
+		  JOIN tenant t ON t.tenant_id = co.tenant_id
 		 WHERE ae.chain_id = $1 AND ae.seq = $2`,
 		chainID, seq).Scan(&root, &labeled)
+	// The join to tenant is deliberate: the resolved owner must be a live tenant.
+	// A tenant-registry restore can leave a governed object owned by a tenant no
+	// longer in the registry (verified against the running service). Without this
+	// join the resolver would return that ghost owner and the platform would act
+	// for a tenant that does not exist. With it, an owner that is not a live
+	// tenant makes the event unresolvable — fail closed, not guess.
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", domain.ErrEventNotFound
 	}

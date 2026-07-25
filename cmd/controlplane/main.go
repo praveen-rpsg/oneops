@@ -128,20 +128,22 @@ func run(logger *slog.Logger) error {
 	// a transaction cannot span two pools.
 	auditStore := postgres.NewAuditStore(pool)
 
-	// Startup ownership validation (ADR-TENANCY-004). Execution-time security
-	// re-derives event ownership from the audit log; that is trustworthy only if
-	// the log's ownership agrees with the governed objects it records. A
-	// divergence — from a partial restore, an operator error, or split-brain
-	// history — makes authoritative ownership ambiguous, and the platform must
-	// not begin performing outbound actions on an ambiguous log. It refuses to
-	// boot, naming an example chain, so the corruption is repaired by a human
-	// rather than silently trusted.
-	if divergent, example, verr := auditStore.ValidateOwnershipConsistency(rootCtx); verr != nil {
+	// Startup ownership validation (ADR-TENANCY-004, ADR-TENANCY-006). Recovery
+	// is a verification boundary, not a repair mechanism: a restored database may
+	// be internally inconsistent — split-brain history, or data owned by a tenant
+	// a partial registry restore has dropped — and the platform must prove
+	// ownership can be established unambiguously before it accepts traffic. It
+	// refuses to boot on any problem, naming an example so a human repairs it,
+	// rather than start and fail in the dark (the relay otherwise loops forever
+	// on a foreign-key error for the orphaned rows).
+	if problems, verr := postgres.NewOwnershipValidator(pool).Validate(rootCtx); verr != nil {
 		return fmt.Errorf("startup ownership validation failed: %w", verr)
-	} else if divergent > 0 {
-		return fmt.Errorf("refusing to start: audit ownership is ambiguous on %d event(s) "+
-			"(e.g. chain %s) — the audit log disagrees with the governed object about who "+
-			"owns it; repair before starting (see ADR-TENANCY-004)", divergent, example)
+	} else if len(problems) > 0 {
+		for _, p := range problems {
+			logger.Error("startup ownership validation", "problem", p)
+		}
+		return fmt.Errorf("refusing to start: the ownership graph is inconsistent (%d problem(s)); "+
+			"repair before starting (see ADR-TENANCY-006)", len(problems))
 	}
 
 	auditVerifier := audit.NewVerifier(auditStore)
