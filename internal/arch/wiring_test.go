@@ -538,3 +538,64 @@ func TestOperationalBinariesAreRegistered(t *testing.T) {
 		}
 	}
 }
+
+// Background workers run on exactly one instance, gated by leadership.
+//
+// The workers are singletons by design — the relay's cursor is a read-modify-
+// write, ClaimDue is not an atomic claim — but the deployment runs multiple
+// replicas. Two replicas running the workers double-deliver every webhook and
+// double-execute every policy action; verified live before ops.RunAsLeader
+// gated them behind a PostgreSQL advisory lock.
+//
+// This fails the build if a worker's Run is launched directly in a goroutine in
+// the composition root instead of being registered and started under
+// leadership — the exact regression that reintroduces double execution.
+func TestWorkersStartOnlyUnderLeadership(t *testing.T) {
+	src, err := os.ReadFile(mainFile)
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	body := string(src)
+
+	if !strings.Contains(body, "ops.RunAsLeader") {
+		t.Error("main.go does not call ops.RunAsLeader; background workers must start " +
+			"only on the elected leader, or every replica runs them and double-executes")
+	}
+
+	// The old pattern: a worker Run launched directly in a goroutine. After the
+	// refactor every worker is registered via `workers = append(..., X.Run)` and
+	// started inside the RunAsLeader closure as `run(ctx)`. A direct
+	// `go func() { _ = <worker>.Run(ctx) }()` is the regression.
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, mainFile, nil, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		g, ok := n.(*ast.GoStmt)
+		if !ok {
+			return true
+		}
+		ast.Inspect(g, func(m ast.Node) bool {
+			call, ok := m.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Run" {
+				return true
+			}
+			// A method named Run on a named variable, launched in a goroutine
+			// here, is a worker started outside the leader gate. The leader
+			// closure calls the local `run(ctx)` (an Ident, not X.Run), so it is
+			// not matched.
+			if x, ok := sel.X.(*ast.Ident); ok {
+				t.Errorf("main.go launches %s.Run in a goroutine at %s; workers must be "+
+					"registered and started under ops.RunAsLeader, not directly, or every "+
+					"replica runs them", x.Name, fset.Position(g.Pos()))
+			}
+			return true
+		})
+		return true
+	})
+}

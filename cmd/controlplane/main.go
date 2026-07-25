@@ -52,6 +52,14 @@ func run(logger *slog.Logger) error {
 
 	rootCtx := context.Background()
 
+	// Background workers are singletons by design — the relay's cursor is a
+	// read-modify-write and ClaimDue is not an atomic claim — but the deployment
+	// runs multiple replicas. Every worker's Run is collected here and started
+	// only on the instance that wins leadership (advisory lock), so exactly one
+	// process runs them. Two replicas without this double-deliver every webhook
+	// and double-execute every policy action (verified live).
+	var workers []func(context.Context) error
+
 	shutdownTracing, err := observability.SetupTracing(rootCtx, cfg.ServiceName, cfg.OTLPEndpoint)
 	if err != nil {
 		return err
@@ -241,7 +249,7 @@ func run(logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
-		go func() { _ = scheduler.Run(ctx) }()
+		workers = append(workers, scheduler.Run)
 	}
 
 	// Read-only governance/audit query APIs: reuse the audit store's read methods,
@@ -292,8 +300,7 @@ func run(logger *slog.Logger) error {
 	// serves every tenant, and this read is the security source, not tenant
 	// data returned to a caller.
 	dispatcher := events.NewDispatcher(webhookStore, webhookStore, auditStore, &http.Client{Timeout: 15 * time.Second}, eventMetrics, logger, events.DispatcherConfig{})
-	go func() { _ = relay.Run(ctx) }()
-	go func() { _ = dispatcher.Run(ctx) }()
+	workers = append(workers, relay.Run, dispatcher.Run)
 	srv.SetWebhooks(webhookAdminStore, func(ctx context.Context, wh events.Webhook) (events.DeliveryStatus, error) {
 		return dispatcher.Deliver(ctx, events.Delivery{
 			ID:        "test_" + wh.ID,
@@ -310,8 +317,7 @@ func run(logger *slog.Logger) error {
 	retentionWorker := events.NewRetentionWorker(webhookStore, consumeMetrics, logger, events.RetentionConfig{
 		MaxAge: time.Duration(cfg.WebhookRetentionHours) * time.Hour,
 	})
-	go func() { _ = replayWorker.Run(ctx) }()
-	go func() { _ = retentionWorker.Run(ctx) }()
+	workers = append(workers, replayWorker.Run, retentionWorker.Run)
 	srv.SetWebhookConsume(webhookAdminStore, webhookAdminStore)
 
 	// Policy automation (PRS-020): an isolated event consumer. It tails the
@@ -332,8 +338,7 @@ func run(logger *slog.Logger) error {
 	// event, rather than trusting the event snapshot in the queued execution
 	// row (ADR-TENANCY-003).
 	policyExecutor := policy.NewExecutor(policyStore, policyStore, auditStore, policyRegistry, policyMetrics, logger, policy.ExecutorConfig{})
-	go func() { _ = policyConsumer.Run(ctx) }()
-	go func() { _ = policyExecutor.Run(ctx) }()
+	workers = append(workers, policyConsumer.Run, policyExecutor.Run)
 	srv.SetPolicies(policyAdminStore, func(ctx context.Context, p policy.Policy) (policy.ExecutionStatus, error) {
 		ex := policy.Execution{
 			ID: "poltest_" + p.ID, PolicyID: p.ID, Status: policy.ExecPending,
@@ -391,6 +396,18 @@ func run(logger *slog.Logger) error {
 			Failures:    len(rep.Failures),
 			Errors:      len(rep.Errors),
 			Healthy:     rep.Healthy(),
+		}
+	})
+
+	// Start the background workers on exactly one instance. Every replica serves
+	// the HTTP API — those handlers are request-scoped and safe concurrently —
+	// but only the leader runs the singleton workers, so a webhook is delivered
+	// once and a policy action executes once regardless of replica count. A
+	// standby promotes itself if the leader's advisory-lock connection drops.
+	ops.RunAsLeader(ctx, cfg.DatabaseURL, ops.WorkerLeaderKey, logger, func() {
+		for _, run := range workers {
+			run := run
+			go func() { _ = run(ctx) }()
 		}
 	})
 
