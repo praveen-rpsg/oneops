@@ -151,3 +151,11 @@ func ResolveAndAuthorize(ctx context.Context, r EventOwnerResolver, target Owned
 type ownerString string
 
 func (o ownerString) OwnerTenantID() string { return string(o) }
+
+// ErrOwnershipAmbiguous is returned when authoritative ownership cannot be
+// determined without contradiction — the governed object and the audit log
+// disagree about who owns a chain. It signals corruption of the authoritative
+// source (partial restore, operator error, split-brain history), not a normal
+// refusal, and the platform fails closed on it at execution and refuses to boot
+// on it at startup (ADR-TENANCY-004).
+var ErrOwnershipAmbiguous = errors.New("authoritative ownership is ambiguous")

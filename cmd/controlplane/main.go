@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -126,6 +127,23 @@ func run(logger *slog.Logger) error {
 	// state change and its audit append to commit in a single transaction, and
 	// a transaction cannot span two pools.
 	auditStore := postgres.NewAuditStore(pool)
+
+	// Startup ownership validation (ADR-TENANCY-004). Execution-time security
+	// re-derives event ownership from the audit log; that is trustworthy only if
+	// the log's ownership agrees with the governed objects it records. A
+	// divergence — from a partial restore, an operator error, or split-brain
+	// history — makes authoritative ownership ambiguous, and the platform must
+	// not begin performing outbound actions on an ambiguous log. It refuses to
+	// boot, naming an example chain, so the corruption is repaired by a human
+	// rather than silently trusted.
+	if divergent, example, verr := auditStore.ValidateOwnershipConsistency(rootCtx); verr != nil {
+		return fmt.Errorf("startup ownership validation failed: %w", verr)
+	} else if divergent > 0 {
+		return fmt.Errorf("refusing to start: audit ownership is ambiguous on %d event(s) "+
+			"(e.g. chain %s) — the audit log disagrees with the governed object about who "+
+			"owns it; repair before starting (see ADR-TENANCY-004)", divergent, example)
+	}
+
 	auditVerifier := audit.NewVerifier(auditStore)
 	scopedAuditStore := postgres.NewAuditStore(appPool)
 	meteredAuditor := ops.NewMeteredAuditor(postgres.NewAuditAppender(appPool, scopedAuditStore), execMetrics)

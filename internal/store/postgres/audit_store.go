@@ -193,25 +193,72 @@ func (s *AuditStore) ReadEvent(ctx context.Context, chainID string, seq int64) (
 // ResolveEventOwner returns the tenant that owns the committed event at
 // (chainID, seq), read straight from the append-only audit log.
 //
-// This is the authoritative source for execution-time ownership (ADR-TENANCY-003).
-// It reads only tenant_id, and reads it from audit_event rather than from any
-// queue row, because the queue row's owner is a forgeable label while this
-// value is written inside the governance transaction and never rewritten. A
-// missing row is domain.ErrEventNotFound: an event absent from an append-only
-// log will never appear, so the delivery referencing it is refused rather than
-// retried.
+// This is the authoritative source for execution-time ownership (ADR-TENANCY-003,
+// ADR-TENANCY-004). It does not trust audit_event.tenant_id alone.
+//
+// A chain is the history of one governed object: chain_id equals the object's
+// cfg_id. The object's own tenant_id is the root of authority — it is
+// RLS-enforced at write time and cannot be set cross-tenant. audit_event.tenant_id
+// is a denormalized copy written beside it. The two are read together and
+// required to agree.
+//
+// Reading only the copy was exploitable: a partial restore, an operator INSERT,
+// a legacy backfill or split-brain history can leave an audit row labelled with
+// a different tenant than the object it records. Verified against the running
+// service — a row appended to a victim's chain but labelled with an attacker's
+// tenant caused the victim's event to be delivered to the attacker, because the
+// resolver and the corrupted value were the same row. Cross-checking against the
+// object detects the divergence.
+//
+// Failure modes, all closed:
+//   - no committed event, or the chain has no governed object (deleted or
+//     orphaned): domain.ErrEventNotFound;
+//   - the object's owner and the audit label disagree: domain.ErrOwnershipAmbiguous,
+//     which the consumers treat as a refusal and which startup validation
+//     refuses to boot on.
 func (s *AuditStore) ResolveEventOwner(ctx context.Context, chainID string, seq int64) (string, error) {
-	var tenantID string
-	err := s.pool.QueryRow(ctx,
-		`SELECT tenant_id FROM audit_event WHERE chain_id = $1 AND seq = $2`,
-		chainID, seq).Scan(&tenantID)
+	var root, labeled string
+	err := s.pool.QueryRow(ctx, `
+		SELECT co.tenant_id, ae.tenant_id
+		  FROM audit_event ae
+		  JOIN configuration_object co ON co.cfg_id = ae.chain_id
+		 WHERE ae.chain_id = $1 AND ae.seq = $2`,
+		chainID, seq).Scan(&root, &labeled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", domain.ErrEventNotFound
 	}
 	if err != nil {
 		return "", fmt.Errorf("resolve event owner: %w", err)
 	}
-	return tenantID, nil
+	if root != labeled {
+		return "", fmt.Errorf("%w: chain %s seq %d: object owner %q, audit label %q",
+			domain.ErrOwnershipAmbiguous, chainID, seq, root, labeled)
+	}
+	return root, nil
+}
+
+// ValidateOwnershipConsistency reports whether the audit log's ownership agrees
+// with the governed objects it records, across every chain.
+//
+// It is run at startup. A divergence means authoritative ownership is ambiguous
+// somewhere — a partial restore, an operator error, split-brain history — and
+// the platform must not begin performing outbound actions on it. The check is a
+// single indexed anti-join and returns the count and one example so the operator
+// can locate the corruption.
+//
+// Orphaned chains (audit events whose object was deleted) are deliberately not
+// flagged: append-only audit outlives its object by design, and the runtime
+// resolver already refuses such chains as unresolvable.
+func (s *AuditStore) ValidateOwnershipConsistency(ctx context.Context) (divergent int, example string, err error) {
+	err = s.pool.QueryRow(ctx, `
+		SELECT count(*), COALESCE(min(ae.chain_id), '')
+		  FROM audit_event ae
+		  JOIN configuration_object co ON co.cfg_id = ae.chain_id
+		 WHERE ae.tenant_id <> co.tenant_id`).Scan(&divergent, &example)
+	if err != nil {
+		return 0, "", fmt.Errorf("validate ownership consistency: %w", err)
+	}
+	return divergent, example, nil
 }
 
 // VerifyRangeReader streams the events of chainID with seq in [fromSeq, toSeq]
