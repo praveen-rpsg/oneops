@@ -23,6 +23,10 @@ type DispatcherConfig struct {
 	BatchLimit int
 	// RequestTimeout bounds a single POST (default 10s).
 	RequestTimeout time.Duration
+	// ClaimLease is how long a claimed (inflight) delivery is owned before it is
+	// considered abandoned and reclaimable — the bound on re-delivery after a
+	// worker crash (default 2m, comfortably above RequestTimeout).
+	ClaimLease time.Duration
 	// BaseBackoff is the first retry delay, doubled per retry (default 5s).
 	BaseBackoff time.Duration
 	// MaxBackoff caps the backoff (default 1h).
@@ -38,6 +42,9 @@ func (c *DispatcherConfig) withDefaults() {
 	}
 	if c.RequestTimeout <= 0 {
 		c.RequestTimeout = 10 * time.Second
+	}
+	if c.ClaimLease <= 0 {
+		c.ClaimLease = 2 * time.Minute
 	}
 	if c.BaseBackoff <= 0 {
 		c.BaseBackoff = 5 * time.Second
@@ -99,7 +106,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 
 // RunOnce claims and attempts all due deliveries once.
 func (d *Dispatcher) RunOnce(ctx context.Context) {
-	due, err := d.deliv.ClaimDue(ctx, d.now(), d.cfg.BatchLimit)
+	due, err := d.deliv.ClaimDue(ctx, d.now(), d.cfg.ClaimLease, d.cfg.BatchLimit)
 	if err != nil {
 		d.log.Error("event dispatcher: claim due", "err", err)
 		return

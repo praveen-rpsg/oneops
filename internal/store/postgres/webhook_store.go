@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"strings"
+
 	"github.com/rpsg/oneops/internal/domain"
 	"github.com/rpsg/oneops/internal/events"
 )
@@ -156,13 +158,27 @@ func (s *WebhookStore) Enqueue(ctx context.Context, ds []events.Delivery) error 
 }
 
 // ClaimDue returns deliveries eligible for a send attempt (pending/failed and due).
-func (s *WebhookStore) ClaimDue(ctx context.Context, now time.Time, limit int) ([]events.Delivery, error) {
+func (s *WebhookStore) ClaimDue(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]events.Delivery, error) {
+	// Atomic claim: move due pending/failed rows — and stale inflight rows whose
+	// claimer crashed — to 'inflight' with claimed_at set, under FOR UPDATE SKIP
+	// LOCKED so no two workers claim the same row. The status change is what
+	// stops a concurrent worker re-selecting the row: it is no longer due, and
+	// no longer stale, until the lease elapses. A row left inflight by a crashed
+	// worker is reclaimed once claimed_at is older than the lease (ADR-CONCURRENCY-002).
+	staleBefore := now.Add(-lease)
 	rows, err := s.pool.Query(ctx, `
-		SELECT `+deliveryCols+`
-		  FROM webhook_delivery
-		 WHERE status IN ('pending','failed') AND next_attempt_at <= $1
-		 ORDER BY next_attempt_at
-		 LIMIT $2`, now, limit)
+		UPDATE webhook_delivery d
+		   SET status = 'inflight', claimed_at = $1
+		  FROM (
+		    SELECT id FROM webhook_delivery
+		     WHERE (status IN ('pending','failed') AND next_attempt_at <= $1)
+		        OR (status = 'inflight' AND claimed_at < $2)
+		     ORDER BY next_attempt_at
+		     LIMIT $3
+		     FOR UPDATE SKIP LOCKED
+		  ) c
+		 WHERE d.id = c.id
+		RETURNING `+prefixCols(deliveryCols, "d")+``, now, staleBefore, limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim deliveries: %w", err)
 	}
@@ -273,4 +289,15 @@ func scanDelivery(sc rowScanner) (events.Delivery, error) {
 		d.LastAttempt = *lastAttempt
 	}
 	return d, nil
+}
+
+// prefixCols qualifies a comma-separated column list with a table alias, so an
+// UPDATE ... FROM ... RETURNING can name the target table's columns unambiguously
+// when a joined subquery shares a column name (id).
+func prefixCols(cols, alias string) string {
+	parts := strings.Split(cols, ",")
+	for i, p := range parts {
+		parts[i] = alias + "." + strings.TrimSpace(p)
+	}
+	return strings.Join(parts, ", ")
 }

@@ -15,6 +15,7 @@ type ExecutorConfig struct {
 	BatchLimit  int           // executions claimed per pass (default 100)
 	BaseBackoff time.Duration // first retry delay, doubled per retry (default 5s)
 	MaxBackoff  time.Duration // backoff cap (default 1h)
+	ClaimLease  time.Duration // how long a running execution is owned before reclaim (default 2m)
 }
 
 func (c *ExecutorConfig) withDefaults() {
@@ -29,6 +30,9 @@ func (c *ExecutorConfig) withDefaults() {
 	}
 	if c.MaxBackoff <= 0 {
 		c.MaxBackoff = time.Hour
+	}
+	if c.ClaimLease <= 0 {
+		c.ClaimLease = 2 * time.Minute
 	}
 }
 
@@ -85,7 +89,7 @@ func (e *Executor) Run(ctx context.Context) error {
 
 // RunOnce claims and runs all due executions once.
 func (e *Executor) RunOnce(ctx context.Context) {
-	due, err := e.execs.ClaimDue(ctx, e.now(), e.cfg.BatchLimit)
+	due, err := e.execs.ClaimDue(ctx, e.now(), e.cfg.ClaimLease, e.cfg.BatchLimit)
 	if err != nil {
 		e.log.Error("policy executor: claim due", "err", err)
 		return

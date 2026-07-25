@@ -36,7 +36,7 @@ type WebhookStore interface {
 // DeliveryStore persists delivery records and their status transitions.
 type DeliveryStore interface {
 	Enqueue(ctx context.Context, ds []Delivery) error
-	ClaimDue(ctx context.Context, now time.Time, limit int) ([]Delivery, error)
+	ClaimDue(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]Delivery, error)
 	MarkResult(ctx context.Context, id string, status DeliveryStatus, retryCount, statusCode int, lastAttempt, nextAttempt time.Time) error
 	ListByWebhook(ctx context.Context, webhookID string, limit int) ([]Delivery, error)
 }

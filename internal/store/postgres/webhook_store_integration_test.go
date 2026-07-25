@@ -59,7 +59,7 @@ func TestWebhookStore_Integration(t *testing.T) {
 	if err := s.Enqueue(ctx, []events.Delivery{{ID: "d1", WebhookID: "wh_1", Event: ev, Status: events.StatusPending, NextAttemptAt: now}}); err != nil {
 		t.Fatalf("Enqueue idempotent: %v", err)
 	}
-	due, err := s.ClaimDue(ctx, now, 10)
+	due, err := s.ClaimDue(ctx, now, time.Minute, 10)
 	if err != nil || len(due) != 2 {
 		t.Fatalf("ClaimDue: %d %v", len(due), err)
 	}

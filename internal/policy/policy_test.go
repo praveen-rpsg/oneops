@@ -148,7 +148,7 @@ func (f *fakeExecs) Enqueue(_ context.Context, xs []Execution) error {
 	}
 	return nil
 }
-func (f *fakeExecs) ClaimDue(_ context.Context, now time.Time, limit int) ([]Execution, error) {
+func (f *fakeExecs) ClaimDue(_ context.Context, now time.Time, _ time.Duration, limit int) ([]Execution, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []Execution

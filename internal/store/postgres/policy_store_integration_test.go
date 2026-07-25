@@ -57,7 +57,7 @@ func TestPolicyStore_Integration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Enqueue batch: %v", err)
 	}
-	due, err := s.ClaimDue(ctx, now, 10)
+	due, err := s.ClaimDue(ctx, now, time.Minute, 10)
 	if err != nil || len(due) != 2 {
 		t.Fatalf("ClaimDue: %d %v", len(due), err)
 	}

@@ -155,11 +155,25 @@ func (s *PolicyStore) Enqueue(ctx context.Context, xs []policy.Execution) error 
 }
 
 // ClaimDue returns executions eligible to run (pending/failed and due).
-func (s *PolicyStore) ClaimDue(ctx context.Context, now time.Time, limit int) ([]policy.Execution, error) {
+func (s *PolicyStore) ClaimDue(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]policy.Execution, error) {
+	// Atomic claim with lease, matching the delivery queue (ADR-CONCURRENCY-002):
+	// due pending/failed rows and stale running rows are moved to 'running' under
+	// FOR UPDATE SKIP LOCKED, so two workers never run the same execution and a
+	// crashed worker's row is recovered only after the lease.
+	staleBefore := now.Add(-lease)
 	rows, err := s.pool.Query(ctx, `
-		SELECT `+execCols+` FROM policy_execution
-		 WHERE status IN ('pending','failed') AND next_attempt_at <= $1
-		 ORDER BY next_attempt_at LIMIT $2`, now, limit)
+		UPDATE policy_execution e
+		   SET status = 'running', claimed_at = $1
+		  FROM (
+		    SELECT id FROM policy_execution
+		     WHERE (status IN ('pending','failed') AND next_attempt_at <= $1)
+		        OR (status = 'running' AND claimed_at < $2)
+		     ORDER BY next_attempt_at
+		     LIMIT $3
+		     FOR UPDATE SKIP LOCKED
+		  ) c
+		 WHERE e.id = c.id
+		RETURNING `+prefixCols(execCols, "e")+``, now, staleBefore, limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim executions: %w", err)
 	}

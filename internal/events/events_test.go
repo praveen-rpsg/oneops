@@ -133,7 +133,7 @@ func (f *fakeDeliveries) Enqueue(_ context.Context, ds []Delivery) error {
 	}
 	return nil
 }
-func (f *fakeDeliveries) ClaimDue(_ context.Context, now time.Time, limit int) ([]Delivery, error) {
+func (f *fakeDeliveries) ClaimDue(_ context.Context, now time.Time, _ time.Duration, limit int) ([]Delivery, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []Delivery

@@ -35,7 +35,7 @@ type Store interface {
 // ExecutionStore persists policy executions and their status transitions.
 type ExecutionStore interface {
 	Enqueue(ctx context.Context, execs []Execution) error
-	ClaimDue(ctx context.Context, now time.Time, limit int) ([]Execution, error)
+	ClaimDue(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]Execution, error)
 	MarkResult(ctx context.Context, id string, status ExecutionStatus, retry int, errMsg string, started, ended, next time.Time) error
 	ListByPolicy(ctx context.Context, policyID string, limit int) ([]Execution, error)
 }

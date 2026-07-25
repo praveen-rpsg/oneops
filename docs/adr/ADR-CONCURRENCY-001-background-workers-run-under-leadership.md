@@ -60,14 +60,14 @@ Verified: two replicas booting simultaneously both reach healthy.
 
 ## Consequences
 
-**Delivery and execution are now exactly-once in steady state and at-least-once
-only across a failover** — a promoted standby may re-run work the dead leader
-had claimed but not marked complete, which is the correct and bounded trade for
-availability. The authoritative resolver (ADR-TENANCY-003/004) makes a re-run
-safe with respect to ownership; it does not make an outbound action idempotent,
-so consumers of webhooks and policy actions should still treat delivery as
-at-least-once across leader changes. That contract is now honest and narrow
-rather than silent and unbounded.
+**Delivery and execution are at-least-once.** (This corrects an earlier draft of
+this ADR that said "exactly-once in steady state" — subsequently disproved live;
+see ADR-CONCURRENCY-002.) Leadership stops two replicas running the workers at
+once, but even a single worker duplicates if it dies between the outbound action
+and persisting the result. The authoritative resolver (ADR-TENANCY-003/004)
+makes a re-run safe with respect to ownership; it does not make an outbound
+action idempotent. The honest contract, and its narrowing, are defined in
+ADR-CONCURRENCY-002.
 
 **No new infrastructure.** Leadership and migration serialisation both use
 PostgreSQL advisory locks, fitting the single-database architecture. There is no
