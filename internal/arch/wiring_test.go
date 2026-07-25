@@ -501,3 +501,40 @@ func TestProducersHaveNoOutboundCapability(t *testing.T) {
 		})
 	}
 }
+
+// Operational tooling is production code and must satisfy the trust model.
+//
+// The only privileged binary is the control plane, whose privileged writes all
+// go through the shared security framework: the request path on the
+// tenant-scoped pool, the workers on the owning pool but with no outbound action
+// except through the authoritative resolver, and every restore or schema change
+// caught at startup. There is deliberately no separate repair or maintenance CLI
+// that could write to the database outside that framework.
+//
+// This test pins that. A new binary under cmd/ — a bulk importer, a queue
+// repair tool, a backfill — is exactly where an operator capability would bypass
+// tenant stamping and authoritative ownership. Adding one fails the build until
+// it is registered here, which forces the reviewer to state how it obtains
+// ownership: through the same stores and resolver as production, never by
+// encoding a security decision in a script.
+var registeredBinaries = map[string]string{
+	"controlplane": "the platform; all privileged writes go through the shared security framework",
+}
+
+func TestOperationalBinariesAreRegistered(t *testing.T) {
+	entries, err := os.ReadDir("../../cmd")
+	if err != nil {
+		t.Fatalf("read cmd/: %v", err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, ok := registeredBinaries[e.Name()]; !ok {
+			t.Errorf("cmd/%s is an unregistered privileged binary. Operational tooling must "+
+				"obtain ownership through the same stores and authoritative resolver as "+
+				"production, never encode a security decision itself. Register it in "+
+				"registeredBinaries with how it does so, or it must not exist.", e.Name())
+		}
+	}
+}

@@ -211,3 +211,59 @@ func TestSchema_EveryTenantIdTableIsCanonicalAndProtected(t *testing.T) {
 		t.Errorf("schema validator found problems on a clean schema: %v", problems)
 	}
 }
+
+// The append-only guard is what makes audit_event authoritative (ADR-TENANCY-004):
+// if it could be dropped and a row's tenant_id rewritten, the resolver's
+// cross-check against the governed object could be forced to agree with a
+// forgery. An operator repair that drops the guard must be detected — and
+// while it is dropped, audit history is mutable, which this test demonstrates.
+func TestSchema_DroppedAuditGuardIsDetected(t *testing.T) {
+	priv := testPool(t)
+	ctx := context.Background()
+	v := NewSchemaValidator(priv)
+
+	if problems, err := v.Validate(ctx); err != nil {
+		t.Fatalf("validate clean: %v", err)
+	} else if len(problems) != 0 {
+		t.Fatalf("clean schema reported problems: %v", problems)
+	}
+
+	// Seed a row so mutability is observable, then drop the row-level guard.
+	seedAuditRow(ctx, t, priv, "guard-check")
+	if _, err := priv.Exec(ctx,
+		`DROP TRIGGER trg_audit_event_no_row_mutate ON audit_event`); err != nil {
+		t.Fatalf("drop guard: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := priv.Exec(ctx, `
+			CREATE OR REPLACE TRIGGER trg_audit_event_no_row_mutate
+				BEFORE UPDATE OR DELETE ON audit_event
+				FOR EACH ROW EXECUTE FUNCTION audit_event_immutable()`); err != nil {
+			t.Fatalf("restore guard: %v", err)
+		}
+	})
+
+	// With the guard gone, audit ownership is now rewritable — the exploit.
+	if _, err := priv.Exec(ctx,
+		`UPDATE audit_event SET tenant_id = 'attacker' WHERE chain_id = 'guard-check'`); err != nil {
+		t.Fatalf("expected audit to be mutable once the guard is dropped, got: %v", err)
+	}
+
+	// The validator must refuse a schema in this state.
+	problems, err := v.Validate(ctx)
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if !containsAny(problems, "append-only guard against UPDATE/DELETE") {
+		t.Errorf("validator did not detect the dropped audit guard; problems: %v", problems)
+	}
+}
+
+func containsAny(problems []string, want string) bool {
+	for _, p := range problems {
+		if strings.Contains(p, want) {
+			return true
+		}
+	}
+	return false
+}

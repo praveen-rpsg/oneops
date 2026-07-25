@@ -91,5 +91,70 @@ func (v *SchemaValidator) Validate(ctx context.Context) ([]string, error) {
 		}
 	}
 
+	// 4. Audit immutability. ADR-TENANCY-003/004 authority rests on audit_event
+	//    being append-only: if a row's tenant_id could be rewritten after commit,
+	//    the resolver's cross-check against the governed object could be forced
+	//    to agree with a forged value. The guarantee is enforced by triggers, and
+	//    a trigger is droppable by one operator ALTER — so its presence is a
+	//    schema invariant the platform must verify before it trusts the log.
+	auditProblems, err := v.validateAuditImmutability(ctx)
+	if err != nil {
+		return nil, err
+	}
+	problems = append(problems, auditProblems...)
+
+	return problems, nil
+}
+
+// validateAuditImmutability verifies that audit_event and every one of its
+// partitions carries both append-only guards: the row-level guard against
+// UPDATE/DELETE and the statement-level guard against TRUNCATE. Partitions are
+// checked individually because PostgreSQL does not propagate a statement-level
+// TRUNCATE trigger from the parent — the same reason migration 20260728000002
+// attaches the truncate guard partition by partition.
+func (v *SchemaValidator) validateAuditImmutability(ctx context.Context) ([]string, error) {
+	rows, err := v.pool.Query(ctx, `
+		WITH rels AS (
+			SELECT to_regclass(current_schema() || '.audit_event') AS oid
+			UNION ALL
+			SELECT inhrelid FROM pg_inherits
+			 WHERE inhparent = to_regclass(current_schema() || '.audit_event')
+		)
+		SELECT r.oid::regclass::text,
+		       count(*) FILTER (WHERE t.tgname = 'trg_audit_event_no_row_mutate'),
+		       count(*) FILTER (WHERE t.tgname = 'trg_audit_event_no_truncate')
+		  FROM rels r
+		  LEFT JOIN pg_trigger t ON t.tgrelid = r.oid AND NOT t.tgisinternal
+		 WHERE r.oid IS NOT NULL
+		 GROUP BY r.oid`)
+	if err != nil {
+		return nil, fmt.Errorf("audit immutability check: %w", err)
+	}
+	defer rows.Close()
+
+	var problems []string
+	seen := 0
+	for rows.Next() {
+		var rel string
+		var mutate, truncate int
+		if err := rows.Scan(&rel, &mutate, &truncate); err != nil {
+			return nil, fmt.Errorf("scan audit trigger row: %w", err)
+		}
+		seen++
+		if mutate == 0 {
+			problems = append(problems, fmt.Sprintf(
+				"%s has no append-only guard against UPDATE/DELETE — audit ownership could be rewritten", rel))
+		}
+		if truncate == 0 {
+			problems = append(problems, fmt.Sprintf(
+				"%s has no append-only guard against TRUNCATE — audit history could be erased", rel))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate audit triggers: %w", err)
+	}
+	if seen == 0 {
+		problems = append(problems, "audit_event is absent — the audit log the ownership model depends on does not exist")
+	}
 	return problems, nil
 }
