@@ -132,6 +132,14 @@ func (s *Server) SetInvariantGate(invariant func() error) { s.invariant = invari
 
 // Router builds the fully-wired HTTP handler.
 func (s *Server) Router() http.Handler {
+	return otelhttp.NewHandler(s.routes(), "oneops-controlplane")
+}
+
+// routes builds the mux Router serves. It is separate from Router only so the
+// route table stays reachable as a chi.Routes: the OpenAPI contract guard walks
+// it to derive its subject set, and the alternative — restating the routes in a
+// test — is a second list that drifts from this one silently.
+func (s *Server) routes() *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(s.recoverer, s.requestID, s.logging, s.metrics.Middleware)
 
@@ -275,7 +283,7 @@ func (s *Server) Router() http.Handler {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/compliance/{governanceID}/checks", s.getComplianceChecks)
 	})
 
-	return otelhttp.NewHandler(r, "oneops-controlplane")
+	return r
 }
 
 // MetricsServer builds the observability listener, or nil when /metrics is
