@@ -52,23 +52,32 @@ fail-closed startup validator.
 
 ## Class status
 
-**Audit coverage (2026-07-29).** Entries swept under the Class Elimination Law:
-4, 5, 6, 7, 14, 17, 18, 19, 22, 25, 26, 27, 28 — the ownership family is recorded
-in **EVR-001** (`docs/evr/`). Entries **1–3, 8–13, 15, 16, 20, 21, 23, 24 have
-not yet been swept** — they are recorded as verified on the evidence in their ADRs,
+**Audit coverage (2026-07-29).** Entries swept: 2, 4, 5, 6, 7, 14, 15, 17, 18,
+19, 22, 25, 26, 27, 28. Evidence Validation Records live in `docs/evr/` —
+**EVR-001** (ownership family, PARTIALLY VALIDATED), **EVR-002** (authorization
+scope + producer identity, VALIDATED at ECL-5). Entries **1, 3, 8–13, 16, 20,
+21, 23, 24 have not yet been swept** — they are recorded as verified on the evidence in their ADRs,
 which is not the same as verified complete. Three of the six classes examined so
 far were found overstated, so the unswept remainder should be treated as
 *insufficiently verified* rather than closed.
 
+Each row records **Class Status** and **Evidence Confidence** (ECL-1…ECL-5).
+ECL-5 requires structural or schema/registry-derived completeness plus mutation
+verification; ECL-3 means fresh evidence but known-instance enforcement; ECL-2
+means historical evidence not recently reproduced. **An entry with no EVR is at
+most ECL-2 and must not be read as certainty.**
+
 | Class | Entries | Status | Remaining instances |
 |---|---|---|---|
-| Boundary verified only at boot | 22 | **CLOSED** (2026-07-29) | none — one registry now feeds the startup gate and the sentinel, and every validator must be registered (ADR-SECURITY-003) |
-| Unguarded outbound HTTP client | 19 | **CLOSED** (2026-07-29) | none — whole-tree sweep, not named call sites (ADR-SECURITY-003) |
-| Privileged consumer trusting what it was handed | 4, 5, 6, 7 | **CLOSED** (2026-07-29) — see EVR-001 | none — guard derives its subject set from `TenantOwnedTables` (ADR-TENANCY-009) |
-| Historical record derived from mutable state | 25 | **OPEN** | `policy_execution` does not record the action it ran (held under AR-001) |
-| Non-exclusive claim on shared work | 14 | **CLOSED** (2026-07-29) | none — queue set derived from the schema, not named (ADR-CONCURRENCY-007) |
-| Unfenced completion by a worker that lost its claim | 18 | **CLOSED** (2026-07-29) | none — same schema-derived sweep (ADR-CONCURRENCY-007) |
-| Non-monotonic cursor | 17 | **CLOSED** (2026-07-29) | none — cursor set now derived from the schema (ADR-CONCURRENCY-007) |
+| Boundary verified only at boot | 22 | **CLOSED** — **ECL-5** | none — one registry now feeds the startup gate and the sentinel, and every validator must be registered (ADR-SECURITY-003) |
+| Unguarded outbound HTTP client | 19 | **CLOSED** — **ECL-5** | none — whole-tree sweep, not named call sites (ADR-SECURITY-003) |
+| Platform operation under tenant-scope authorization | 2 | **CLOSED** — EVR-002, **ECL-5** | none — subject set derived from the router's route paths |
+| Non-deterministic identity for a queued row | 15 | **CLOSED** — EVR-002, **ECL-5** | none — whole-tree sweep of row producers |
+| Privileged consumer trusting what it was handed | 4, 5, 6, 7 | **CLOSED** — EVR-001, **ECL-5** | none — guard derives its subject set from `TenantOwnedTables` (ADR-TENANCY-009) |
+| Historical record derived from mutable state | 25 | **OPEN** — **ECL-4** | `policy_execution` does not record the action it ran (held under AR-001) |
+| Non-exclusive claim on shared work | 14 | **CLOSED** — **ECL-5** | none — queue set derived from the schema, not named (ADR-CONCURRENCY-007) |
+| Unfenced completion by a worker that lost its claim | 18 | **CLOSED** — **ECL-5** | none — same schema-derived sweep (ADR-CONCURRENCY-007) |
+| Non-monotonic cursor | 17 | **CLOSED** — **ECL-5** | none — cursor set now derived from the schema (ADR-CONCURRENCY-007) |
 
 ### Reopened and re-closed on 2026-07-29
 
@@ -116,6 +125,19 @@ with neither the delivery's owner nor the job's own webhook consulted. Proven
 live: a victim tenant's `dead_letter`/retry_count=3 delivery became
 `pending`/retry_count=0, resurrected with a refilled budget. Closed by
 ADR-TENANCY-009. **Entries 4 and 7 were re-verified and stand.**
+
+### Confirmed on 2026-07-29 (fourth audit — EVR-002)
+
+**Entries 2 and 15 were audited because their enforcement was enumerated**, and
+under the enforcement philosophy sibling instances were assumed until disproven.
+None were found: every `/admin/tenants` route already requires
+`requirePlatformAdmin`, and every `Delivery`/`Execution` producer in the tree
+already derives its identity. Both enforcement mechanisms were nevertheless
+replaced with structural ones (route-derived and tree-derived), and both entries
+were raised from **ECL-3 to ECL-5**.
+
+This is the first audit to **confirm** prior conclusions rather than overturn
+them. Enumerated enforcement predicts risk; it does not guarantee a defect.
 
 **The same failure mode, three times in three audits.** Enumerated enforcement was the
 common cause in both this audit and ADR-SECURITY-003. Guards in this programme
