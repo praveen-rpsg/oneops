@@ -56,14 +56,15 @@ fail-closed startup validator.
 ## Class status
 
 **Audit coverage (2026-07-29).** Entries swept: 2, 4, 5, 6, 7, 14, 15, 17, 18,
-1, 10, 11, 19, 20, 21, 22, 25, 26, 27, 28, 30, 31. Evidence Validation Records live in `docs/evr/` —
+1, 10, 11, 16, 19, 20, 21, 22, 25, 26, 27, 28, 30, 31. Evidence Validation Records live in `docs/evr/` —
 **EVR-001** (ownership family, PARTIALLY VALIDATED), **EVR-002** (authorization
 scope + producer identity, VALIDATED at ECL-5), **EVR-003** (retry accounting +
 outcome durability, PARTIALLY VALIDATED — entry 21 reopened), **EVR-004** (audit
 chain append authority, PARTIALLY VALIDATED — class closed, evidence
 insufficient), **EVR-005** (cross-tenant key confusion, VALIDATED at ECL-5),
 **EVR-006** (operational tooling, PARTIALLY VALIDATED — a defective sibling
-script found). Entries **3, 8, 9, 12, 13, 16, 23, 24 have not yet been swept** — they are recorded as verified on the evidence in their ADRs,
+script found), **EVR-007** (leader step-down, VALIDATED at ECL-5). Entries
+**3, 8, 9, 12, 13, 23, 24 have not yet been swept** — they are recorded as verified on the evidence in their ADRs,
 which is not the same as verified complete. Three of the six classes examined so
 far were found overstated, so the unswept remainder should be treated as
 *insufficiently verified* rather than closed.
@@ -85,6 +86,7 @@ most ECL-2 and must not be read as certainty.**
 | Platform operation under tenant-scope authorization | 2 | **CLOSED** — EVR-002, **ECL-5** | none — subject set derived from the router's route paths |
 | Non-deterministic identity for a queued row | 15 | **CLOSED** — EVR-002, **ECL-5** | none — whole-tree sweep of row producers |
 | Privileged consumer trusting what it was handed | 4, 5, 6, 7 | **CLOSED** — EVR-001, **ECL-5** | none — guard derives its subject set from `TenantOwnedTables` (ADR-TENANCY-009) |
+| Demoted leader keeps running its workers | 16 | **CLOSED** — EVR-007, **ECL-5**, maturity **L1 → L3** | none — every worker Run loop is tree-swept for cancellation |
 | Privileged operational tooling outside the trust model | 10 | **CLOSED** — EVR-006, **ECL-5**, maturity **L1 → L4** | none — `cmd/` and `scripts/` both registry-guarded |
 | Cross-tenant key confusion (a client key as a global key) | 1 | **CLOSED** — EVR-005, **ECL-5**, maturity **L5 discovery / L4 justification** | none — every unique key on every tenant-owned table is discovered from the catalogue and must be tenant-keyed or justified |
 | Audit-chain append authority (the chain-head lock) | 11 | **CLOSED** — EVR-004, **ECL-5** (was ECL-2) | none — one append path; lock is a named method, tree-swept |

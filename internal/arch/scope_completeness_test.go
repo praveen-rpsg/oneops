@@ -338,3 +338,48 @@ func TestCreateDTOs_DoNotExposeEntityIdentity(t *testing.T) {
 	}
 	t.Logf("client-facing DTOs checked for entity identity: %d", checked)
 }
+
+// Completeness sweep for leader step-down (entry 16).
+//
+// ADR-CONCURRENCY-003 made a demoted leader stop its workers: leadership runs
+// under a context cancelled the instant the advisory lock is lost. That
+// mechanism has two halves — the leader must cancel, and every worker must
+// honour the cancellation. The first half is one line in ops.campaign and is
+// covered by an integration test. The second half was never swept: a worker
+// whose loop ignores ctx.Done() keeps running after demotion, and cancelling
+// achieves nothing for it.
+//
+// The subject set is derived from the tree: any type with a
+// `Run(ctx context.Context) error` loop is a worker, and its loop must observe
+// cancellation.
+func TestEveryWorkerRunLoop_ObservesCancellation(t *testing.T) {
+	files := goFilesUnder(t, "..")
+	checked := 0
+	for _, f := range files {
+		src := stripComments(f.src)
+		i := strings.Index(src, ") Run(ctx context.Context) error {")
+		for i >= 0 {
+			body := src[i:]
+			// The function body ends at the first line-start closing brace.
+			if end := strings.Index(body, "\n}"); end > 0 {
+				body = body[:end]
+			}
+			checked++
+			if !strings.Contains(body, "ctx.Done()") {
+				t.Errorf("%s has a Run loop that never observes ctx.Done() — a demoted leader "+
+					"cancels the leadership context, but this worker would keep running, which "+
+					"is the two-leader overlap ADR-CONCURRENCY-003 closed", f.path)
+			}
+			next := strings.Index(src[i+1:], ") Run(ctx context.Context) error {")
+			if next < 0 {
+				break
+			}
+			i = i + 1 + next
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no worker Run loops found; the sweep would be vacuous — if the worker signature " +
+			"changed, this guard must move with it")
+	}
+	t.Logf("worker Run loops swept for cancellation: %d", checked)
+}
