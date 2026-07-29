@@ -26,12 +26,16 @@ func TestSchemaValidator_IsRunContinuouslyNotOnlyAtStartup(t *testing.T) {
 			"boot and never re-verified, which is how a disabled RLS policy became a silent, " +
 			"total cross-tenant leak (ADR-SECURITY-002)")
 	}
-	if !strings.Contains(stripComments(src), "schemaSentinel.Run(ctx)") {
+	if !strings.Contains(stripComments(src), "invariantSentinel.Run(ctx)") {
 		t.Error("the schema sentinel is constructed but never started; a sentinel that does not " +
 			"run verifies nothing (ADR-SECURITY-002)")
 	}
 	// The sentinel must re-run the *same* validator startup uses. Two different
 	// checks would let boot and runtime disagree about what "valid" means.
+	// The sentinel and the startup gate must evaluate one registry, so they cannot
+	// enforce different sets. TestPlatformInvariants_AreEnforcedAtBothPoints and
+	// TestEveryValidator_IsRegisteredAsAnInvariant carry the stronger form of this
+	// (ADR-SECURITY-003); this keeps the ADR-SECURITY-002 property pinned here.
 	if !strings.Contains(stripComments(src), "postgres.NewSchemaValidator(pool).Validate(c)") {
 		t.Error("the sentinel does not re-run the startup SchemaValidator — boot and runtime must " +
 			"enforce one definition of the invariant (ADR-SECURITY-002)")
@@ -56,7 +60,7 @@ func TestInvariantBreach_FailsClosedOnEveryTenantDataPath(t *testing.T) {
 	}
 
 	// 2. Readiness: a refusing instance must leave the load balancer.
-	if !strings.Contains(stripComments(main), "schemaSentinel.Err()") {
+	if !strings.Contains(stripComments(main), "invariantSentinel.Err()") {
 		t.Error("readiness does not consult the sentinel — an instance refusing every request " +
 			"would still advertise itself as ready (ADR-SECURITY-002)")
 	}

@@ -564,7 +564,11 @@ func TestOperationalBinariesAreRegistered(t *testing.T) {
 // duplicable side effects. A worker that delivers, executes, or writes tenant
 // rows never qualifies.
 var perReplicaSupervisors = map[string]bool{
-	"schemaSentinel": true,
+	// The platform-invariant sentinel. It decides whether *this* instance may
+	// serve tenant data (ADR-SECURITY-002/003), so every replica needs its own;
+	// running it only on the leader would leave every follower serving through a
+	// boundary it never re-verified.
+	"invariantSentinel": true,
 }
 
 func TestWorkersStartOnlyUnderLeadership(t *testing.T) {

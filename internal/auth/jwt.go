@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/rpsg/oneops/internal/safehttp"
 )
 
 // Claims is the parsed, verified identity extracted from a token.
@@ -32,12 +34,19 @@ type Verifier struct {
 
 // NewVerifier builds a Verifier. hmacKey enables HS256; jwksURL enables RS256.
 func NewVerifier(issuer, audience, hmacKey, jwksURL string) *Verifier {
+	return NewVerifierWithClient(issuer, audience, hmacKey, jwksURL, nil)
+}
+
+// NewVerifierWithClient is NewVerifier with an explicit HTTP client for the JWKS
+// fetch. A nil client means the SSRF-guarded default; tests supply their own to
+// reach a local server (ADR-SECURITY-003).
+func NewVerifierWithClient(issuer, audience, hmacKey, jwksURL string, doer *http.Client) *Verifier {
 	v := &Verifier{issuer: issuer, audience: audience}
 	if hmacKey != "" {
 		v.hmacKey = []byte(hmacKey)
 	}
 	if jwksURL != "" {
-		v.jwks = newJWKSCache(jwksURL)
+		v.jwks = newJWKSCache(jwksURL, doer)
 	}
 	return v
 }
@@ -111,15 +120,25 @@ func parseRoles(v any) []string {
 // jwksCache fetches and caches RSA public keys from a JWKS endpoint.
 type jwksCache struct {
 	url string
-	mu  sync.RWMutex
+	// doer fetches the JWKS document. It is the SSRF-guarded client
+	// (ADR-SECURITY-001/003), never http.DefaultClient: this fetch dials a
+	// configured URL from inside the platform, so an unguarded client here is the
+	// same confused-deputy shape the outbound delivery clients already close, and
+	// it also had no timeout — a hung JWKS endpoint stalled every RS256
+	// verification behind it.
+	doer *http.Client
+	mu   sync.RWMutex
 	// keys maps kid -> public key.
 	keys      map[string]*rsa.PublicKey
 	fetchedAt time.Time
 	ttl       time.Duration
 }
 
-func newJWKSCache(url string) *jwksCache {
-	return &jwksCache{url: url, keys: map[string]*rsa.PublicKey{}, ttl: 15 * time.Minute}
+func newJWKSCache(url string, doer *http.Client) *jwksCache {
+	if doer == nil {
+		doer = safehttp.Client(10*time.Second, false)
+	}
+	return &jwksCache{url: url, doer: doer, keys: map[string]*rsa.PublicKey{}, ttl: 15 * time.Minute}
 }
 
 func (c *jwksCache) key(kid string) (*rsa.PublicKey, error) {
@@ -149,7 +168,11 @@ type jwk struct {
 }
 
 func (c *jwksCache) refresh() error {
-	resp, err := http.Get(c.url) //nolint:noctx // short-lived JWKS fetch
+	req, err := http.NewRequest(http.MethodGet, c.url, nil) //nolint:noctx // bounded by the client timeout
+	if err != nil {
+		return fmt.Errorf("build jwks request: %w", err)
+	}
+	resp, err := c.doer.Do(req)
 	if err != nil {
 		return fmt.Errorf("fetch jwks: %w", err)
 	}

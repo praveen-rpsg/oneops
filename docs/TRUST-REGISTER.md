@@ -9,6 +9,12 @@ entry cites the ADR that carries the full evidence.
 The rule this register enforces: eliminate the *class*, not the instance. A fix
 that closes one path but leaves the category open is not an entry here.
 
+**Class status is stated explicitly.** Every entry is a *verified class*, and any
+entry whose class still has a surviving instance is marked **OPEN** with that
+instance named. Two entries were found overstated on 2026-07-29 and are corrected
+below — see *Class status* after the table. An entry that claims more than was
+swept is a worse defect than the one it records, because it is trusted.
+
 Legend for **Enforced by**: `arch` = build-failing architecture test; `int` =
 integration test against a real PostgreSQL; `unit` = unit test; `startup` =
 fail-closed startup validator.
@@ -40,6 +46,35 @@ fail-closed startup validator.
 | 23 | **Unaudited destruction of a governed object via a second, non-constitutional door** (`DELETE /v1/artifacts/{id}` issued a bare SQL delete enforcing only the protected-role rule: a ratified `current_baseline` object the engine refuses (409) was destroyed (204) with **zero** audit events, the dependents check skipped and its dependency edges silently cascaded away) | **Destruction has one door: the route executes the engine's §8 deletion, and the destructive method is removed from the repository *and* from the persistence contract — not hardened** | ✓ | arch, int, unit | **ADR-GOV-002** |
 | 24 | **§9.1 constitutional inputs writable and erasable through the descriptive-metadata channel** (`responsibilities`/`citations`/`coverage` refused by PATCH but accepted at CREATE/BULK — a successor seeded that way turned a Replacement the engine refused (409) into one it granted (200) on a ratified `current_baseline` artifact; and a PATCH of an unrelated key returned 200 while **erasing** `responsibilities`) | **Enforced at the storage chokepoint both writers pass through, plus the inception boundary; a wholesale metadata clear spares them; one definition of the key set** | ✓ | arch, int | **ADR-GOV-003** |
 | 25 | **A delivery record's destination was retroactively rewritable** — *one instance of a wider class; see the scope note below* (`webhook_delivery` stored only `webhook_id`; the destination was derived by joining to the mutable `webhook.url`, so one admin `PATCH` — 200, no audit event — rewrote where every past delivery through that subscription had gone) | **The delivery holds `delivered_to`, captured at attempt time in the same fenced UPDATE as the outcome; an unattempted outcome records nothing and erases nothing; reads never join to the subscription** | ✓ | arch, int | **ADR-GOV-004** |
+| 26 | **A platform invariant enforced at only one of its two enforcement points** (`OwnershipValidator` ran at startup only, so a divergent ownership graph served `/v1` with `readyz=200` and 0 breaches while the same binary refused to boot on it — an instance would serve indefinitely but never restart) + **an outbound client outside the SSRF guard** (JWKS used a bare `http.Get`, unguarded and untimed) | **One `ops.Invariant` registry read by both the startup gate and the sentinel, with every validator required to be registered; and a whole-tree sweep for unguarded outbound HTTP instead of named call sites** | ✓ | arch, unit | **ADR-SECURITY-003** |
+
+## Class status
+
+| Class | Entries | Status | Remaining instances |
+|---|---|---|---|
+| Boundary verified only at boot | 22 | **CLOSED** (2026-07-29) | none — one registry now feeds the startup gate and the sentinel, and every validator must be registered (ADR-SECURITY-003) |
+| Unguarded outbound HTTP client | 19 | **CLOSED** (2026-07-29) | none — whole-tree sweep, not named call sites (ADR-SECURITY-003) |
+| Historical record derived from mutable state | 25 | **OPEN** | `policy_execution` does not record the action it ran (held under AR-001) |
+
+### Reopened and re-closed on 2026-07-29
+
+**Entry 22 (boundary verified only at boot) was reopened.** ADR-SECURITY-002
+stated the principle — *"fail-closed at boot and fail-open at runtime is not a
+policy, it is an accident of where the check happened to be called"* — and then
+applied it to one of the two startup validators. `OwnershipValidator` stayed
+boot-only. Proven live: a database with a divergent ownership graph served `/v1`
+with `readyz=200` and zero breaches, while the same binary **refused to start**
+on it. Closed by ADR-SECURITY-003: one registry, both enforcement points, and an
+architecture test that fails if any validator is unregistered.
+
+**Entry 19 (unguarded outbound client) was reopened.** ADR-SECURITY-001 guarded
+"both outbound clients"; the JWKS fetch used a bare `http.Get` with no guard and
+no timeout. Closed by ADR-SECURITY-003: the guard is now enforced by a whole-tree
+sweep rather than by naming the clients someone remembered.
+
+**Lesson recorded:** both survived because the enforcement named specific call
+sites. An architecture test that enumerates known instances cannot close a class;
+it can only pin the instances already known.
 
 ## Scope correction — entry 25 closed an instance, not a class
 
@@ -487,6 +522,29 @@ evidence, residual risks, status. New investigations add their boundary here.
   `arch.TestDispatcher_RecordsTheURLItPosted`,
   `arch.TestDeliveryReads_DoNotDeriveDestinationFromTheWebhook` and
   `postgres.TestDeliveryDestination_*`.
+
+### Platform invariants and egress — enforced by construction (ADR-SECURITY-003)
+
+- **Verified class.** (a) A boundary enforced at one point but not the other.
+  (b) An outbound HTTP request outside the SSRF guard.
+- **Remaining instances.** None known. Both are now enforced structurally rather
+  than by enumeration: an invariant cannot be registered at one enforcement point
+  only, and the egress sweep covers every non-test file in the tree.
+- **Scope of elimination.** Every validator the platform defines is in the
+  invariant registry, and both the startup gate and the sentinel evaluate that
+  one registry in order with first-failure short-circuit. Every outbound request
+  outside `internal/safehttp` must use the guarded client.
+- **Known exceptions.** `internal/safehttp` itself constructs the client — it is
+  the guard. Tests may inject their own client (`NewVerifierWithClient`), which
+  is why the guarded default is separately pinned by
+  `auth.TestJWKSFetchIsSSRFGuarded`.
+- **Residual risk.** Detection, not prevention: an operator with database access
+  can still break the ownership graph, and reads inside one sentinel interval are
+  not prevented. The registry guarantees that what is in it is enforced at both
+  points; it does not claim to enumerate every property worth checking. The JWKS
+  guard refuses non-public addresses only — it does not authenticate the
+  endpoint. Ownership breaches now take instances out of service, a wider
+  availability trade than ADR-SECURITY-002 made, taken deliberately.
 
 ## How to add an entry
 

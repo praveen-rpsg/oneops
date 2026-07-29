@@ -4,7 +4,9 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -72,4 +74,67 @@ func isBareHTTPClient(e ast.Expr) bool {
 	}
 	pkg, ok := sel.X.(*ast.Ident)
 	return ok && pkg.Name == "http" && sel.Sel.Name == "Client"
+}
+
+// The SSRF class is only eliminated if *no* outbound request escapes the guard.
+//
+// ADR-SECURITY-001 guarded "both outbound clients" — accurate then, but the JWKS
+// fetch used a bare `http.Get`, so the class had a third instance the register
+// claimed was closed. This sweeps the whole tree rather than naming call sites,
+// so a new unguarded client anywhere fails the build (ADR-SECURITY-003).
+//
+// internal/safehttp is the one place allowed to build a client: it is the guard.
+func TestNoUnguardedOutboundHTTP(t *testing.T) {
+	banned := []string{"http.Get(", "http.Post(", "http.PostForm(", "http.Head(", "http.DefaultClient"}
+
+	err := filepath.WalkDir("..", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			// The guard itself, and generated/vendored trees.
+			if d.Name() == "safehttp" || d.Name() == "node_modules" || d.Name() == "testdata" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		raw, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		src := stripLineComments(string(raw))
+		for _, b := range banned {
+			if strings.Contains(src, b) {
+				t.Errorf("%s uses %s — every outbound request must go through safehttp, or the "+
+					"platform can be made to dial loopback, link-local metadata and private "+
+					"ranges on someone else's behalf (ADR-SECURITY-001/003)", path, b)
+			}
+		}
+		// A hand-rolled client is equally unguarded.
+		if strings.Contains(src, "&http.Client{") {
+			t.Errorf("%s constructs its own http.Client — build it with safehttp.Client so its "+
+				"dialer refuses non-public addresses (ADR-SECURITY-001/003)", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+}
+
+// stripLineComments removes // comments so a mention of a banned construct in
+// prose does not fail the build, and so commenting one out does not hide it.
+func stripLineComments(src string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(src, "\n") {
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }

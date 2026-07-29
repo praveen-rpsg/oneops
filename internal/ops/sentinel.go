@@ -235,3 +235,52 @@ func watchWhileHealthy(ctx context.Context, guard InvariantGuard, done <-chan er
 		}
 	}
 }
+
+// Invariant is one platform property that must hold both at startup and for the
+// life of the process.
+//
+// It exists so those two enforcement points cannot diverge. ADR-SECURITY-002
+// established that a boundary verified only at boot is not enforced but assumed,
+// and put the schema check under a sentinel — but the ownership check was left
+// behind, so the platform refused to *start* on a broken ownership graph while
+// happily *serving* on one (proven live: readyz=200 and /v1=200 at runtime; the
+// same database refused to boot). Fail-closed at boot and fail-open at runtime
+// is not a policy; it is an accident of where the check happened to be called.
+//
+// Registering an invariant here gives it both enforcement points at once, which
+// is what makes the omission structurally impossible rather than merely fixed
+// (ADR-SECURITY-003).
+type Invariant struct {
+	// Name identifies the invariant in logs and in the breach report.
+	Name string
+	// Check returns the problems found, empty when the invariant holds.
+	Check func(context.Context) ([]string, error)
+}
+
+// CheckAll evaluates invariants in order and stops at the first that reports
+// problems or cannot run.
+//
+// Order is load-bearing and short-circuiting is deliberate: later invariants may
+// depend on earlier ones holding. The ownership check queries columns the schema
+// check proves exist, so running it against a schema already known to be broken
+// produces a database error rather than a finding, and would bury the real
+// problem under a spurious one.
+//
+// Problems are prefixed with the invariant's name so a breach report says which
+// boundary failed.
+func CheckAll(ctx context.Context, invariants []Invariant) ([]string, error) {
+	for _, inv := range invariants {
+		problems, err := inv.Check(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", inv.Name, err)
+		}
+		if len(problems) > 0 {
+			out := make([]string, len(problems))
+			for i, p := range problems {
+				out[i] = inv.Name + ": " + p
+			}
+			return out, nil
+		}
+	}
+	return nil, nil
+}

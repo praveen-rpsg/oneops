@@ -110,13 +110,27 @@ func run(logger *slog.Logger) error {
 	metrics := observability.NewMetrics()
 	execMetrics := ops.NewExecutiveMetrics(metrics.Registry())
 
-	// The schema sentinel re-verifies, for the life of the process, the invariant
-	// that startup validation proves once (ADR-SECURITY-002). It is constructed
-	// here so readiness can consult it; it is started after startup validation
-	// passes, and the server's gate is wired to it below.
-	schemaSentinel := ops.NewSentinel(
-		"ownership-model schema invariants",
-		func(c context.Context) ([]string, error) { return postgres.NewSchemaValidator(pool).Validate(c) },
+	// The one set of platform invariants. Startup refuses to boot on any of them
+	// and the sentinel re-verifies all of them for the life of the process, from
+	// this single definition — so an invariant cannot be enforced at one point and
+	// not the other (ADR-SECURITY-003).
+	//
+	// Order matters and is preserved by ops.CheckAll: the ownership check queries
+	// columns the schema check proves exist, so a broken schema must short-circuit
+	// before it produces a database error instead of a finding.
+	platformInvariants := []ops.Invariant{
+		{
+			Name:  "ownership-model schema invariants",
+			Check: func(c context.Context) ([]string, error) { return postgres.NewSchemaValidator(pool).Validate(c) },
+		},
+		{
+			Name:  "ownership graph consistency",
+			Check: func(c context.Context) ([]string, error) { return postgres.NewOwnershipValidator(pool).Validate(c) },
+		},
+	}
+	invariantSentinel := ops.NewSentinel(
+		"platform invariants",
+		func(c context.Context) ([]string, error) { return ops.CheckAll(c, platformInvariants) },
 		time.Duration(cfg.SchemaSentinelIntervalSeconds)*time.Second,
 		logger, execMetrics,
 	)
@@ -127,10 +141,10 @@ func run(logger *slog.Logger) error {
 		if err := pool.Ping(c); err != nil {
 			return err
 		}
-		return schemaSentinel.Err()
+		return invariantSentinel.Err()
 	}
 	srv := httpapi.NewServer(cfg, logger, repo, idem, verifier, metrics, ready)
-	srv.SetInvariantGate(schemaSentinel.Err)
+	srv.SetInvariantGate(invariantSentinel.Err)
 	srv.SetGraph(postgres.NewGraphRepo(appPool)) // M2.3 dependency-graph endpoints
 
 	// Governance API: the engine owns the single atomic constitutional mutation
@@ -157,40 +171,26 @@ func run(logger *slog.Logger) error {
 	// a transaction cannot span two pools.
 	auditStore := postgres.NewAuditStore(pool)
 
-	// Startup schema validation (ADR-TENANCY-007). Ownership resolution and
-	// isolation are only as strong as the schema underneath them: row-level
-	// security must be enabled and forced, the tenant_id columns must be
-	// mandatory, and every migration the binary was built for must be applied. A
-	// migration or an operator can weaken any of these, and nothing else at
-	// runtime would notice — a disabled RLS policy is a silent, total
-	// cross-tenant leak. This runs before the ownership-graph check because that
-	// check queries columns this one proves exist.
-	if problems, verr := postgres.NewSchemaValidator(pool).Validate(rootCtx); verr != nil {
-		return fmt.Errorf("startup schema validation failed: %w", verr)
+	// Startup invariant gate (ADR-TENANCY-006/007, ADR-SECURITY-003).
+	//
+	// Ownership resolution and isolation are only as strong as the schema
+	// underneath them, and a restored database may be internally inconsistent —
+	// split-brain history, or data owned by a tenant a partial registry restore
+	// dropped. The platform proves both before it accepts traffic and refuses to
+	// boot otherwise, naming an example so a human can repair it.
+	//
+	// This evaluates exactly the set the sentinel re-verifies. Previously the two
+	// were written out separately here and only the schema check was sentinelled,
+	// so the identical broken-ownership database refused to *start* while a
+	// process already running served on it happily (proven live).
+	if problems, verr := ops.CheckAll(rootCtx, platformInvariants); verr != nil {
+		return fmt.Errorf("startup invariant validation failed: %w", verr)
 	} else if len(problems) > 0 {
 		for _, p := range problems {
-			logger.Error("startup schema validation", "problem", p)
+			logger.Error("startup invariant validation", "problem", p)
 		}
-		return fmt.Errorf("refusing to start: the schema no longer enforces the ownership model "+
-			"(%d problem(s)); repair before starting (see ADR-TENANCY-007)", len(problems))
-	}
-
-	// Startup ownership validation (ADR-TENANCY-004, ADR-TENANCY-006). Recovery
-	// is a verification boundary, not a repair mechanism: a restored database may
-	// be internally inconsistent — split-brain history, or data owned by a tenant
-	// a partial registry restore has dropped — and the platform must prove
-	// ownership can be established unambiguously before it accepts traffic. It
-	// refuses to boot on any problem, naming an example so a human repairs it,
-	// rather than start and fail in the dark (the relay otherwise loops forever
-	// on a foreign-key error for the orphaned rows).
-	if problems, verr := postgres.NewOwnershipValidator(pool).Validate(rootCtx); verr != nil {
-		return fmt.Errorf("startup ownership validation failed: %w", verr)
-	} else if len(problems) > 0 {
-		for _, p := range problems {
-			logger.Error("startup ownership validation", "problem", p)
-		}
-		return fmt.Errorf("refusing to start: the ownership graph is inconsistent (%d problem(s)); "+
-			"repair before starting (see ADR-TENANCY-006)", len(problems))
+		return fmt.Errorf("refusing to start: a platform invariant does not hold "+
+			"(%d problem(s)); repair before starting (see ADR-SECURITY-003)", len(problems))
 	}
 
 	auditVerifier := audit.NewVerifier(auditStore)
@@ -439,7 +439,7 @@ func run(logger *slog.Logger) error {
 	// Re-verify the ownership-model schema invariants for the life of the
 	// process, not just at boot (ADR-SECURITY-002). Started only after startup
 	// validation passed, so its first verdict confirms a known-good boundary.
-	go schemaSentinel.Run(ctx)
+	go invariantSentinel.Run(ctx)
 
 	// Start the background workers on exactly one instance. Every replica serves
 	// the HTTP API — those handlers are request-scoped and safe concurrently —
@@ -458,7 +458,7 @@ func run(logger *slog.Logger) error {
 	ops.RunAsLeader(ctx, cfg.DatabaseURL, ops.WorkerLeaderKey, logger, func(lctx context.Context) {
 		for _, run := range workers {
 			run := run
-			go func() { _ = ops.RunWhileHealthy(lctx, schemaSentinel, logger, run) }()
+			go func() { _ = ops.RunWhileHealthy(lctx, invariantSentinel, logger, run) }()
 		}
 	})
 

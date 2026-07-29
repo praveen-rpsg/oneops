@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,7 +45,11 @@ func TestVerifyRS256ViaJWKS(t *testing.T) {
 	srv := jwksServer(t, kid, &key.PublicKey)
 	defer srv.Close()
 
-	v := NewVerifier(testIss, testAud, "", srv.URL)
+	// The JWKS fetch runs through the SSRF-guarded client by default, which
+	// correctly refuses this loopback test server (ADR-SECURITY-003). Inject a
+	// plain client so the test can reach it; TestJWKSFetchIsSSRFGuarded below
+	// pins the default.
+	v := NewVerifierWithClient(testIss, testAud, "", srv.URL, srv.Client())
 
 	sign := func(k string) string {
 		tok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
@@ -79,7 +84,7 @@ func TestVerifyRS256ViaJWKS(t *testing.T) {
 }
 
 func TestJWKSFetchError(t *testing.T) {
-	v := NewVerifier(testIss, testAud, "", "http://127.0.0.1:0/jwks")
+	v := NewVerifierWithClient(testIss, testAud, "", "http://127.0.0.1:0/jwks", &http.Client{})
 	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
 		"sub": "x", "iss": testIss, "aud": testAud, "exp": time.Now().Add(time.Hour).Unix(),
 	})
@@ -97,4 +102,26 @@ func mustRSA(t *testing.T) *rsa.PrivateKey {
 		t.Fatal(err)
 	}
 	return k
+}
+
+// The JWKS endpoint is fetched by the platform from a configured URL, so an
+// unguarded client here is the same confused-deputy shape the outbound delivery
+// clients already close. The default must refuse a non-public address
+// (ADR-SECURITY-003).
+func TestJWKSFetchIsSSRFGuarded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"keys":[]}`))
+	}))
+	defer srv.Close()
+
+	// No client injected: the guarded default applies.
+	v := NewVerifier(testIss, testAud, "", srv.URL)
+	_, err := v.jwks.key("any-kid")
+	if err == nil {
+		t.Fatal("the default JWKS fetch reached a loopback address — the SSRF guard is not applied")
+	}
+	if !strings.Contains(err.Error(), "SSRF guard") {
+		t.Errorf("JWKS fetch failed for the wrong reason: %v", err)
+	}
 }
