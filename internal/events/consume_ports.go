@@ -31,6 +31,11 @@ type ReplayJob struct {
 	Error          string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+	// ClaimedAt is the fencing token: the moment this job was claimed by the
+	// worker now holding it, carried from ClaimPendingJobs into UpdateJob, which
+	// writes only if the job is still claimed under the same token
+	// (ADR-CONCURRENCY-007). Zero on jobs never claimed.
+	ClaimedAt time.Time
 }
 
 // ReplayJobStore persists replay jobs (its own table; never the audit schema).

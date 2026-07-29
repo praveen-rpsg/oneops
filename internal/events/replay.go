@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -88,12 +89,11 @@ func (w *ReplayWorker) RunOnce(ctx context.Context) {
 
 func (w *ReplayWorker) execute(ctx context.Context, job ReplayJob) {
 	start := w.now()
-	job.Status = JobRunning
-	job.UpdatedAt = start
-	if err := w.jobs.UpdateJob(ctx, job); err != nil {
-		w.log.Error("replay: mark running", "job_id", job.ID, "err", err)
-		return
-	}
+	// The claim already moved the job to running and stamped its token
+	// (ADR-CONCURRENCY-007); a separate "mark running" write here is what left
+	// the window in which a second worker could select the same pending job.
+	// job.ClaimedAt is carried into the outcome write below, which is fenced on
+	// it, so a worker that has lost the job cannot overwrite the owner's verdict.
 
 	n, err := w.run(ctx, job)
 	job.EventsReplayed = n
@@ -105,7 +105,12 @@ func (w *ReplayWorker) execute(ctx context.Context, job ReplayJob) {
 	} else {
 		job.Status = JobCompleted
 	}
-	_ = w.jobs.UpdateJob(ctx, job)
+	if err := w.jobs.UpdateJob(ctx, job); errors.Is(err, ErrStaleClaim) {
+		// This worker no longer owns the job; the current owner records the
+		// authoritative outcome (ADR-CONCURRENCY-005/007).
+		w.log.Info("replay: job result fenced — claimed by another worker", "job_id", job.ID)
+		return
+	}
 
 	w.metrics.IncReplayJob()
 	w.metrics.AddReplayEvents(n)

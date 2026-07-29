@@ -47,14 +47,25 @@ fail-closed startup validator.
 | 24 | **§9.1 constitutional inputs writable and erasable through the descriptive-metadata channel** (`responsibilities`/`citations`/`coverage` refused by PATCH but accepted at CREATE/BULK — a successor seeded that way turned a Replacement the engine refused (409) into one it granted (200) on a ratified `current_baseline` artifact; and a PATCH of an unrelated key returned 200 while **erasing** `responsibilities`) | **Enforced at the storage chokepoint both writers pass through, plus the inception boundary; a wholesale metadata clear spares them; one definition of the key set** | ✓ | arch, int | **ADR-GOV-003** |
 | 25 | **A delivery record's destination was retroactively rewritable** — *one instance of a wider class; see the scope note below* (`webhook_delivery` stored only `webhook_id`; the destination was derived by joining to the mutable `webhook.url`, so one admin `PATCH` — 200, no audit event — rewrote where every past delivery through that subscription had gone) | **The delivery holds `delivered_to`, captured at attempt time in the same fenced UPDATE as the outcome; an unattempted outcome records nothing and erases nothing; reads never join to the subscription** | ✓ | arch, int | **ADR-GOV-004** |
 | 26 | **A platform invariant enforced at only one of its two enforcement points** (`OwnershipValidator` ran at startup only, so a divergent ownership graph served `/v1` with `readyz=200` and 0 breaches while the same binary refused to boot on it — an instance would serve indefinitely but never restart) + **an outbound client outside the SSRF guard** (JWKS used a bare `http.Get`, unguarded and untimed) | **One `ops.Invariant` registry read by both the startup gate and the sentinel, with every validator required to be registered; and a whole-tree sweep for unguarded outbound HTTP instead of named call sites** | ✓ | arch, unit | **ADR-SECURITY-003** |
+| 27 | **A work queue with no atomic claim and no fencing token** (`webhook_replay_job` had neither: 8 of 8 pending jobs claimed by two workers at once, and a stale worker overwrote the owner's `completed/42` outcome with `failed/0`) | **The claim is a compare-and-set under `FOR UPDATE … SKIP LOCKED` that stamps the token; the outcome write is fenced on it; and the guards derive the queue and cursor sets from the schema instead of naming them** | ✓ | arch, int | **ADR-CONCURRENCY-007** |
 
 ## Class status
+
+**Audit coverage (2026-07-29).** Entries swept under the Class Elimination Law:
+14, 17, 18, 19, 22, 25, 26, 27. Entries **1–13, 15, 16, 20, 21, 23, 24 have not
+yet been swept** — they are recorded as verified on the evidence in their ADRs,
+which is not the same as verified complete. Three of the six classes examined so
+far were found overstated, so the unswept remainder should be treated as
+*insufficiently verified* rather than closed.
 
 | Class | Entries | Status | Remaining instances |
 |---|---|---|---|
 | Boundary verified only at boot | 22 | **CLOSED** (2026-07-29) | none — one registry now feeds the startup gate and the sentinel, and every validator must be registered (ADR-SECURITY-003) |
 | Unguarded outbound HTTP client | 19 | **CLOSED** (2026-07-29) | none — whole-tree sweep, not named call sites (ADR-SECURITY-003) |
 | Historical record derived from mutable state | 25 | **OPEN** | `policy_execution` does not record the action it ran (held under AR-001) |
+| Non-exclusive claim on shared work | 14 | **CLOSED** (2026-07-29) | none — queue set derived from the schema, not named (ADR-CONCURRENCY-007) |
+| Unfenced completion by a worker that lost its claim | 18 | **CLOSED** (2026-07-29) | none — same schema-derived sweep (ADR-CONCURRENCY-007) |
+| Non-monotonic cursor | 17 | **CLOSED** (2026-07-29) | none — cursor set now derived from the schema (ADR-CONCURRENCY-007) |
 
 ### Reopened and re-closed on 2026-07-29
 
@@ -75,6 +86,25 @@ sweep rather than by naming the clients someone remembered.
 **Lesson recorded:** both survived because the enforcement named specific call
 sites. An architecture test that enumerates known instances cannot close a class;
 it can only pin the instances already known.
+
+### Reopened and re-closed on 2026-07-29 (second audit)
+
+**Entries 14 and 18 were reopened.** The atomic claim and claim fencing were
+verified on `webhook_delivery` and `policy_execution`; `webhook_replay_job` is a
+third claimed resource and had neither — no `claimed_at` at all, a plain
+`SELECT … WHERE status='pending'`, and an unconditional outcome write. Proven
+live: **8 of 8 pending jobs were handed to both workers simultaneously**, and a
+worker that no longer owned a job overwrote the owner's `completed/42` with
+`failed/0`. Closed by ADR-CONCURRENCY-007.
+
+**Entry 17 re-verified and its guard replaced.** No third cursor exists, so the
+class was in fact closed — but its enforcement named the two known cursors. The
+guard now derives the cursor set from the schema, so the *claim* of completeness
+is now backed by a completeness check rather than by two examples.
+
+**The same failure mode, twice in two audits.** Enumerated enforcement was the
+common cause in both this audit and ADR-SECURITY-003. Guards in this programme
+must derive their subject set from the schema or the tree, not from a list.
 
 ## Scope correction — entry 25 closed an instance, not a class
 
@@ -545,6 +575,30 @@ evidence, residual risks, status. New investigations add their boundary here.
   guard refuses non-public addresses only — it does not authenticate the
   endpoint. Ownership breaches now take instances out of service, a wider
   availability trade than ADR-SECURITY-002 made, taken deliberately.
+
+### Work-queue exclusivity and fencing — swept over the schema (ADR-CONCURRENCY-007)
+
+- **Verified class.** (a) Two workers holding the same unit of work. (b) A worker
+  recording an outcome for work it no longer holds.
+- **Remaining instances.** None known. The queue set is derived from the
+  migrations (any table whose `status` defaults to `'pending'`), so a fourth
+  queue cannot be added without a claim and a fence.
+- **Scope of elimination.** All three queues — `webhook_delivery`,
+  `policy_execution`, `webhook_replay_job` — claim under
+  `FOR UPDATE … SKIP LOCKED`, stamp `claimed_at`, and fence the outcome write on
+  it. The cursor sweep (entry 17) is derived the same way.
+- **Known exceptions.** A zero token writes unfenced by design — the
+  administrative paths that touch a row never claimed (the delivery test
+  endpoint, an operator requeue). The schema sweep recognises a queue by a
+  `'pending'`-defaulted `status`; a queue expressing its pending state
+  differently would not be detected.
+- **Residual risk.** **A replay job whose worker dies is never recovered**:
+  `ClaimPendingJobs` selects only `pending`, so a job left `running` is neither
+  retried nor terminated. This is a liveness gap, not a correctness one — a stuck
+  replay job produces no repeated outbound effect — and it is left open
+  deliberately, because giving it lease recovery requires giving it retry
+  accounting (ADR-CONCURRENCY-006) as well. Documented by
+  `postgres.TestReplayJob_StuckRunningIsNotReclaimed`.
 
 ## How to add an entry
 

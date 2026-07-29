@@ -128,7 +128,7 @@ func (s *WebhookStore) CountByStatus(ctx context.Context, status events.Delivery
 	return n, nil
 }
 
-const replayJobCols = `id, webhook_id, from_ts, to_ts, delivery_ids, status, events_replayed, error, created_at, updated_at`
+const replayJobCols = `id, webhook_id, from_ts, to_ts, delivery_ids, status, events_replayed, error, created_at, updated_at, claimed_at`
 
 // CreateJob inserts a replay job.
 func (s *WebhookStore) CreateJob(ctx context.Context, j events.ReplayJob) error {
@@ -162,9 +162,29 @@ func (s *WebhookStore) ListJobs(ctx context.Context, limit int) ([]events.Replay
 	return s.queryJobs(ctx, `SELECT `+replayJobCols+` FROM webhook_replay_job ORDER BY created_at DESC LIMIT $1`, limit)
 }
 
-// ClaimPendingJobs returns pending replay jobs to execute.
+// ClaimPendingJobs atomically claims pending replay jobs (ADR-CONCURRENCY-007).
+//
+// It was a plain `SELECT ... WHERE status='pending'` and the worker then issued a
+// separate UPDATE to mark the job running — so two workers in the bounded
+// leadership-overlap window both selected the same jobs and both ran them.
+// Proven live: two concurrent callers each received all 8 pending jobs.
+//
+// This is the same compare-and-set the delivery and policy queues use
+// (ADR-CONCURRENCY-002): the status transition happens *in* the claim, under
+// FOR UPDATE SKIP LOCKED, so no two workers hold the same job.
 func (s *WebhookStore) ClaimPendingJobs(ctx context.Context, limit int) ([]events.ReplayJob, error) {
-	return s.queryJobs(ctx, `SELECT `+replayJobCols+` FROM webhook_replay_job WHERE status='pending' ORDER BY created_at LIMIT $1`, limit)
+	return s.queryJobs(ctx, `
+		UPDATE webhook_replay_job j
+		   SET status = 'running', claimed_at = now(), updated_at = now()
+		  FROM (
+		    SELECT id FROM webhook_replay_job
+		     WHERE status = 'pending'
+		     ORDER BY created_at
+		     LIMIT $1
+		     FOR UPDATE SKIP LOCKED
+		  ) c
+		 WHERE j.id = c.id
+		RETURNING `+prefixCols(replayJobCols, "j"), limit)
 }
 
 func (s *WebhookStore) queryJobs(ctx context.Context, sql string, limit int) ([]events.ReplayJob, error) {
@@ -184,15 +204,30 @@ func (s *WebhookStore) queryJobs(ctx context.Context, sql string, limit int) ([]
 	return out, rows.Err()
 }
 
-// UpdateJob persists a replay job's status/progress.
+// UpdateJob persists a replay job's status/progress, fenced on the claim token
+// (ADR-CONCURRENCY-007).
+//
+// It was `WHERE id=$1` with no token, so a worker that no longer owned the job
+// overwrote whatever the current owner had recorded — proven live, a completed
+// job with 42 events replayed became `failed` with 0. This is the same fence
+// MarkResult uses (ADR-CONCURRENCY-005): the write lands only while the job is
+// still claimed under the token this worker was handed. A zero token (a job
+// never claimed, e.g. an administrative write) writes unfenced.
 func (s *WebhookStore) UpdateJob(ctx context.Context, j events.ReplayJob) error {
-	_, err := s.pool.Exec(ctx, `
+	var tokenPtr *time.Time
+	if !j.ClaimedAt.IsZero() {
+		tokenPtr = &j.ClaimedAt
+	}
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE webhook_replay_job
 		   SET status=$2, events_replayed=$3, error=$4, updated_at=now()
-		 WHERE id=$1`,
-		j.ID, string(j.Status), j.EventsReplayed, j.Error)
+		 WHERE id=$1 AND ($5::timestamptz IS NULL OR claimed_at = $5)`,
+		j.ID, string(j.Status), j.EventsReplayed, j.Error, tokenPtr)
 	if err != nil {
 		return fmt.Errorf("update replay job: %w", err)
+	}
+	if tag.RowsAffected() == 0 && tokenPtr != nil {
+		return events.ErrStaleClaim
 	}
 	return nil
 }
@@ -201,11 +236,15 @@ func scanReplayJob(sc rowScanner) (events.ReplayJob, error) {
 	var j events.ReplayJob
 	var status string
 	var from, to *time.Time
+	var claimedAt *time.Time
 	if err := sc.Scan(&j.ID, &j.WebhookID, &from, &to, &j.DeliveryIDs, &status,
-		&j.EventsReplayed, &j.Error, &j.CreatedAt, &j.UpdatedAt); err != nil {
+		&j.EventsReplayed, &j.Error, &j.CreatedAt, &j.UpdatedAt, &claimedAt); err != nil {
 		return events.ReplayJob{}, err
 	}
 	j.Status = events.ReplayJobStatus(status)
+	if claimedAt != nil {
+		j.ClaimedAt = *claimedAt
+	}
 	if from != nil {
 		j.From = *from
 	}
