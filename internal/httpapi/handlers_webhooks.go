@@ -91,6 +91,11 @@ type deliveryDTO struct {
 	LastStatusCode int       `json:"last_status_code"`
 	LastAttempt    time.Time `json:"last_attempt,omitempty"`
 	NextAttemptAt  time.Time `json:"next_attempt_at,omitempty"`
+	// DeliveredTo is where the most recent attempt actually went, recorded at
+	// attempt time. It is deliberately not the subscription's current URL: that
+	// is mutable, and reading it here made the history of where governed data
+	// was sent retroactively rewritable (ADR-GOV-004). Absent until attempted.
+	DeliveredTo string `json:"delivered_to,omitempty"`
 }
 
 func (s *Server) listWebhooks(w http.ResponseWriter, r *http.Request) {
@@ -249,6 +254,7 @@ func (s *Server) listWebhookDeliveries(w http.ResponseWriter, r *http.Request) {
 			ID: d.ID, WebhookID: d.WebhookID, Operation: d.Event.Operation, CfgID: d.Event.CfgID,
 			Seq: d.Event.Seq, Status: string(d.Status), RetryCount: d.RetryCount,
 			LastStatusCode: d.LastStatusCode, LastAttempt: d.LastAttempt, NextAttemptAt: d.NextAttemptAt,
+			DeliveredTo: d.DeliveredTo,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": out})

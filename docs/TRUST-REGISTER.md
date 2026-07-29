@@ -39,6 +39,7 @@ fail-closed startup validator.
 | 22 | **A security invariant weakened after startup goes unnoticed** (schema invariants proven once at boot; RLS disabled post-startup produced a live cross-tenant read while the process reported ready, served traffic, and logged nothing) | **Continuous re-verification (`ops.Sentinel`) re-running the same startup validator; a breach fails closed — `/v1` refused, readiness red, workers stopped — and clears on repair** | ✓ | arch, int, unit | **ADR-SECURITY-002** |
 | 23 | **Unaudited destruction of a governed object via a second, non-constitutional door** (`DELETE /v1/artifacts/{id}` issued a bare SQL delete enforcing only the protected-role rule: a ratified `current_baseline` object the engine refuses (409) was destroyed (204) with **zero** audit events, the dependents check skipped and its dependency edges silently cascaded away) | **Destruction has one door: the route executes the engine's §8 deletion, and the destructive method is removed from the repository *and* from the persistence contract — not hardened** | ✓ | arch, int, unit | **ADR-GOV-002** |
 | 24 | **§9.1 constitutional inputs writable and erasable through the descriptive-metadata channel** (`responsibilities`/`citations`/`coverage` refused by PATCH but accepted at CREATE/BULK — a successor seeded that way turned a Replacement the engine refused (409) into one it granted (200) on a ratified `current_baseline` artifact; and a PATCH of an unrelated key returned 200 while **erasing** `responsibilities`) | **Enforced at the storage chokepoint both writers pass through, plus the inception boundary; a wholesale metadata clear spares them; one definition of the key set** | ✓ | arch, int | **ADR-GOV-003** |
+| 25 | **A delivery record's destination was retroactively rewritable** (`webhook_delivery` stored only `webhook_id`; the destination was derived by joining to the mutable `webhook.url`, so one admin `PATCH` — 200, no audit event — rewrote where every past delivery through that subscription had gone, and an actor who repointed, collected and repointed back left the history attesting to the approved destination) | **The delivery holds `delivered_to`, captured at attempt time in the same fenced UPDATE as the outcome; an unattempted outcome records nothing and erases nothing; reads never join to the subscription** | ✓ | arch, int | **ADR-GOV-004** |
 
 ## Guarantees stated, not overstated
 
@@ -79,6 +80,14 @@ The register records what was *eliminated*. Two properties are deliberately
   **CMR-A05**, BLOCKED. There is also now no constitutional operation for
   establishing those inputs at all; that gap is part of the same referral. This
   register entry claims the closed channel, nothing more.
+- **The delivery record accounts for the destination, not for the administrative
+  act.** `delivered_to` makes where an attempt went a fact that repointing a
+  subscription cannot alter (ADR-GOV-004). It records only the *most recent*
+  attempt, and it does **not** record the administrative change itself:
+  creating, patching or deleting a webhook, policy or tenant still writes no
+  audit event — measured live, three admin creations produced a delta of 0 rows
+  in `audit_event`. Privileged-action accountability is an open gap, stated here
+  rather than implied by this entry.
 - **The leadership step-down window is bounded, not zero.** Up to the health-watch
   interval, a demoted leader may still run its workers; that overlap is made
   *safe* by idempotent production and the atomic claim, not eliminated
@@ -401,6 +410,48 @@ evidence, residual risks, status. New investigations add their boundary here.
   `arch.TestInception_RefusesConstitutionalMetadata`,
   `arch.TestConstitutionalMetadataKeys_HaveOneDefinition` and
   `postgres.TestConstitutionalMetadata_*`.
+
+### Delivery destination — a recorded fact, not a pointer (ADR-GOV-004)
+
+- **Property.** For every attempted delivery the platform holds the URL that
+  attempt was sent to, captured when it was made; changing the subscription
+  cannot alter it.
+- **Threat model.** (a) An administrator repoints a subscription and every past
+  delivery reads as having gone to the new URL. (b) An actor repoints, collects
+  governed events at a destination of their choosing, and repoints back — leaving
+  the history attesting to the approved destination throughout. (c) An outcome
+  reached without an attempt invents a destination. (d) A later dead-letter
+  erases the record of where a real attempt went. (e) A read path re-derives the
+  destination from the subscription.
+- **Root authority.** The delivery row itself. The destination is written in the
+  same fenced `UPDATE` as the outcome (ADR-CONCURRENCY-005), so it is exactly as
+  trustworthy as the outcome and an evicted worker can no more rewrite one than
+  the other.
+- **Failure assumptions.** A subscription's URL may change at any time, by an
+  actor holding ordinary platform-admin rights; the signing secret is unchanged
+  by a URL patch, so a repointed destination receives validly signed events.
+- **Recovery assumptions.** None — the record is the recovery artefact. Rows
+  written before this change hold NULL, which honestly says "unknown".
+- **Operational assumptions.** Delivery history is retention-bounded
+  (`ONEOPS_WEBHOOK_RETENTION_HOURS`, default 720h); the recorded fact expires
+  with the row. Direct SQL bypasses this as it bypasses every application
+  control.
+- **Startup validation.** None specific.
+- **Runtime validation.** `COALESCE($8, delivered_to)` — an empty destination
+  neither writes nor erases. Reads take the destination from the delivery row.
+- **Evidence.** Live exploit: a delivery POSTed to `/approved` reported
+  `/attacker-controlled` after one PATCH returned 200, zero audit events. Live
+  fix: the recorded destination stays `/approved` while the subscription now
+  reads `/attacker-controlled` — the record and the configuration correctly
+  disagree.
+- **Residual risks.** Only the most recent attempt's destination is retained (no
+  per-attempt history). The administrative change itself is still unaudited — a
+  stated open gap, not covered by this entry. Retention-bounded.
+- **Status.** ✓ Closed. Enforced by `arch.TestDelivery_RecordsItsOwnDestination`,
+  `arch.TestDeliveryDestination_IsWrittenWithTheOutcome`,
+  `arch.TestDispatcher_RecordsTheURLItPosted`,
+  `arch.TestDeliveryReads_DoNotDeriveDestinationFromTheWebhook` and
+  `postgres.TestDeliveryDestination_*`.
 
 ## How to add an entry
 

@@ -123,6 +123,17 @@ type Delivery struct {
 	// state (ADR-CONCURRENCY-005). Zero on rows never claimed (the admin test
 	// path), which are written unfenced.
 	ClaimedAt time.Time
+	// DeliveredTo is the destination URL of the most recent attempt, captured
+	// when that attempt was made. It is empty until the delivery is first
+	// attempted.
+	//
+	// It exists because the delivery row previously recorded only WebhookID, so
+	// "where did this event actually go?" could only be answered by joining to
+	// the webhook's current URL — a mutable field. An administrator repointing a
+	// subscription retroactively rewrote the destination of every delivery ever
+	// made through it (proven live). A record of a past event must hold the
+	// facts as they were (ADR-GOV-004).
+	DeliveredTo string
 }
 
 // OwnerTenantID implements domain.Owned. A delivery belongs to the tenant that

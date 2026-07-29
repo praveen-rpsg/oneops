@@ -46,18 +46,21 @@ func toReplayJobDTO(j events.ReplayJob) replayJobDTO {
 }
 
 type deliveryDetailDTO struct {
-	ID             string            `json:"id"`
-	WebhookID      string            `json:"webhook_id"`
-	Operation      string            `json:"operation"`
-	CfgID          string            `json:"cfg_id"`
-	Seq            int64             `json:"seq"`
-	Status         string            `json:"status"`
-	Attempts       int               `json:"attempts"`
-	LastStatusCode int               `json:"last_status_code"`
-	LastAttempt    time.Time         `json:"last_attempt,omitempty"`
-	NextAttemptAt  time.Time         `json:"next_attempt_at,omitempty"`
-	Headers        map[string]string `json:"headers"`
-	Payload        json.RawMessage   `json:"payload"`
+	ID             string    `json:"id"`
+	WebhookID      string    `json:"webhook_id"`
+	Operation      string    `json:"operation"`
+	CfgID          string    `json:"cfg_id"`
+	Seq            int64     `json:"seq"`
+	Status         string    `json:"status"`
+	Attempts       int       `json:"attempts"`
+	LastStatusCode int       `json:"last_status_code"`
+	LastAttempt    time.Time `json:"last_attempt,omitempty"`
+	NextAttemptAt  time.Time `json:"next_attempt_at,omitempty"`
+	// Where the most recent attempt actually went, captured at attempt time
+	// rather than derived from the subscription's current URL (ADR-GOV-004).
+	DeliveredTo string            `json:"delivered_to,omitempty"`
+	Headers     map[string]string `json:"headers"`
+	Payload     json.RawMessage   `json:"payload"`
 }
 
 func (s *Server) consumeReady(w http.ResponseWriter, r *http.Request) bool {
@@ -131,7 +134,8 @@ func (s *Server) getDelivery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, deliveryDetailDTO{
 		ID: d.ID, WebhookID: d.WebhookID, Operation: d.Event.Operation, CfgID: d.Event.CfgID,
 		Seq: d.Event.Seq, Status: string(d.Status), Attempts: d.RetryCount, LastStatusCode: d.LastStatusCode,
-		LastAttempt: d.LastAttempt, NextAttemptAt: d.NextAttemptAt, Headers: headers, Payload: payload,
+		LastAttempt: d.LastAttempt, NextAttemptAt: d.NextAttemptAt, DeliveredTo: d.DeliveredTo,
+		Headers: headers, Payload: payload,
 	})
 }
 
@@ -174,6 +178,7 @@ func (s *Server) listDeadLetters(w http.ResponseWriter, r *http.Request) {
 			ID: d.ID, WebhookID: d.WebhookID, Operation: d.Event.Operation, CfgID: d.Event.CfgID,
 			Seq: d.Event.Seq, Status: string(d.Status), RetryCount: d.RetryCount,
 			LastStatusCode: d.LastStatusCode, LastAttempt: d.LastAttempt, NextAttemptAt: d.NextAttemptAt,
+			DeliveredTo: d.DeliveredTo,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": out})

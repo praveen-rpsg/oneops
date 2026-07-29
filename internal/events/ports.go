@@ -37,7 +37,11 @@ type WebhookStore interface {
 type DeliveryStore interface {
 	Enqueue(ctx context.Context, ds []Delivery) error
 	ClaimDue(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]Delivery, error)
-	MarkResult(ctx context.Context, id string, claimToken time.Time, status DeliveryStatus, retryCount, statusCode int, lastAttempt, nextAttempt time.Time) error
+	// MarkResult records the outcome of an attempt. destination is the URL that
+	// attempt was sent to, captured in the same fenced write as the outcome so it
+	// is exactly as trustworthy (ADR-GOV-004); empty leaves the recorded
+	// destination unchanged, for outcomes reached without an attempt.
+	MarkResult(ctx context.Context, id string, claimToken time.Time, status DeliveryStatus, retryCount, statusCode int, lastAttempt, nextAttempt time.Time, destination string) error
 	// ReleaseClaim returns an unused claim and the attempt it consumed, for a
 	// worker stopped between claiming and attempting (ADR-CONCURRENCY-006).
 	ReleaseClaim(ctx context.Context, id string, claimToken time.Time) error
