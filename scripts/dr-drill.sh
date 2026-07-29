@@ -39,6 +39,23 @@ ADMIN_URL="${ADMIN_URL%%\?*}$QUERY_PARAMS"
 TARGET_URL="${ONEOPS_DB_URL%/*}/$DRILL_DB"
 TARGET_URL="${TARGET_URL%%\?*}$QUERY_PARAMS"
 
+# The drill drops and recreates its target. DR_DRILL_DB is operator-supplied and
+# flowed straight into `DROP DATABASE IF EXISTS $DRILL_DB` with nothing comparing
+# it to the live database — so `DR_DRILL_DB=oneops` against a live
+# `.../oneops` DSN dropped production. An easy mistake to make and impossible to
+# undo (ADR-TENANCY-010).
+#
+# Refuse rather than warn: a drill that destroys the thing it exists to prove
+# recoverable is worse than no drill.
+LIVE_DB="${ONEOPS_DB_URL##*/}"
+LIVE_DB="${LIVE_DB%%\?*}"
+if [ "$DRILL_DB" = "$LIVE_DB" ]; then
+  echo "error: DR_DRILL_DB ($DRILL_DB) is the live database named in ONEOPS_DB_URL." >&2
+  echo "       The drill drops and recreates its target; this would destroy production." >&2
+  echo "       Set DR_DRILL_DB to a throwaway name (default: oneops_drdrill)." >&2
+  exit 1
+fi
+
 echo "== 1/5 capture source state =="
 # The row counts that must survive. Ordering makes the later diff meaningful.
 psql "$ONEOPS_DB_URL" -tAF, -c "

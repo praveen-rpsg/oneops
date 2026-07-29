@@ -51,17 +51,19 @@ fail-closed startup validator.
 | 28 | **A privileged mutation confined by nothing but caller-supplied ids** (the replay-by-id path called `Requeue` with ids from the request body on the privileged pool — `WHERE id = ANY($1)` with no owner and not even the job's own webhook — resetting another tenant's terminated delivery to `pending`/retry_count=0 and resurrecting it) | **The requeue takes its webhook as a required parameter and filters on it; the guard derives its subject set from the `TenantOwnedTables` registry and fails any privileged mutation keyed only on a caller-supplied id set** | ✓ | arch, int | **ADR-TENANCY-009** |
 | 29 | **A worker recording an outcome through its own cancellable context** (the replay worker wrote `UpdateJob(ctx, …)` and let a `context.Canceled` fall through to its success metrics — proven live, a replay under a cancelled context left the job `running`/`events_replayed=0` with the outcome lost and, absent lease recovery on that queue, unrecoverable) | **The outcome is written on `outcomeContext(ctx)` and a failed write is reported, not counted; the guard is derived from the tree — any file running a context loop is a worker file — replacing four enumerated subject lists** | ✓ | arch, unit | **ADR-CONCURRENCY-008** |
 | 30 | **A load-bearing invariant expressed as a boolean argument** (the chain-head `FOR UPDATE` — on which the gapless committed prefix and audit-derived ownership both rest — was `ReadChainHead(…, forUpdate bool)`, guarded by an integration test with no architecture tier; proven live that without it two transactions both claim the same seq and the second governance event is lost) | **The locking read is a distinct method (`ReadChainHeadForUpdate`), so the unsafe form cannot be produced by forgetting an argument; a tree-derived sweep forbids the non-locking read in production and requires every append path to take the lock** | ✓ | arch, int | **ADR-AUDIT-006** |
+| 31 | **A disaster-recovery drill that can destroy production** (`dr-drill.sh` took its target from the operator-supplied `DR_DRILL_DB` and ran `DROP DATABASE IF EXISTS $DRILL_DB` with **zero** expressions comparing it to the live database, so `DR_DRILL_DB=oneops` dropped production; scripts were outside the operational-tooling guard, which walked only `cmd/`) | **The drill refuses when its target is the database named in `ONEOPS_DB_URL`; `scripts/` gains the same registry guard as `cmd/`, and any script issuing `DROP DATABASE` must carry the refusal** | ✓ | arch | **ADR-TENANCY-010** |
 
 ## Class status
 
 **Audit coverage (2026-07-29).** Entries swept: 2, 4, 5, 6, 7, 14, 15, 17, 18,
-1, 11, 19, 20, 21, 22, 25, 26, 27, 28, 30. Evidence Validation Records live in `docs/evr/` —
+1, 10, 11, 19, 20, 21, 22, 25, 26, 27, 28, 30, 31. Evidence Validation Records live in `docs/evr/` —
 **EVR-001** (ownership family, PARTIALLY VALIDATED), **EVR-002** (authorization
 scope + producer identity, VALIDATED at ECL-5), **EVR-003** (retry accounting +
 outcome durability, PARTIALLY VALIDATED — entry 21 reopened), **EVR-004** (audit
 chain append authority, PARTIALLY VALIDATED — class closed, evidence
-insufficient), **EVR-005** (cross-tenant key confusion, VALIDATED at ECL-5).
-Entries **3, 8, 9, 10, 12, 13, 16, 23, 24 have not yet been swept** — they are recorded as verified on the evidence in their ADRs,
+insufficient), **EVR-005** (cross-tenant key confusion, VALIDATED at ECL-5),
+**EVR-006** (operational tooling, PARTIALLY VALIDATED — a defective sibling
+script found). Entries **3, 8, 9, 12, 13, 16, 23, 24 have not yet been swept** — they are recorded as verified on the evidence in their ADRs,
 which is not the same as verified complete. Three of the six classes examined so
 far were found overstated, so the unswept remainder should be treated as
 *insufficiently verified* rather than closed.
@@ -83,6 +85,7 @@ most ECL-2 and must not be read as certainty.**
 | Platform operation under tenant-scope authorization | 2 | **CLOSED** — EVR-002, **ECL-5** | none — subject set derived from the router's route paths |
 | Non-deterministic identity for a queued row | 15 | **CLOSED** — EVR-002, **ECL-5** | none — whole-tree sweep of row producers |
 | Privileged consumer trusting what it was handed | 4, 5, 6, 7 | **CLOSED** — EVR-001, **ECL-5** | none — guard derives its subject set from `TenantOwnedTables` (ADR-TENANCY-009) |
+| Privileged operational tooling outside the trust model | 10 | **CLOSED** — EVR-006, **ECL-5**, maturity **L1 → L4** | none — `cmd/` and `scripts/` both registry-guarded |
 | Cross-tenant key confusion (a client key as a global key) | 1 | **CLOSED** — EVR-005, **ECL-5**, maturity **L5 discovery / L4 justification** | none — every unique key on every tenant-owned table is discovered from the catalogue and must be tenant-keyed or justified |
 | Audit-chain append authority (the chain-head lock) | 11 | **CLOSED** — EVR-004, **ECL-5** (was ECL-2) | none — one append path; lock is a named method, tree-swept |
 | Outcome lost when the worker is stopped | 21 | **CLOSED** — EVR-003, **ECL-5** (reopened and re-closed) | none — tree-derived worker sweep (ADR-CONCURRENCY-008) |

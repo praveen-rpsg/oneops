@@ -521,6 +521,86 @@ var registeredBinaries = map[string]string{
 	"controlplane": "the platform; all privileged writes go through the shared security framework",
 }
 
+// registeredScripts is the same control for operational *scripts*.
+//
+// ADR-TENANCY-008 reasoned about scripts explicitly — "never by encoding a
+// security decision in a script" — and inventoried db-backup, db-restore and
+// dr-drill in its context table. Its enforcement, however, walked only cmd/.
+// A privileged script was therefore outside the guard, and one of them was
+// defective: dr-drill.sh took its target database from an operator-supplied
+// variable and dropped it, with nothing comparing that name to the live
+// database, so DR_DRILL_DB=oneops destroyed production (ADR-TENANCY-010).
+//
+// Each entry states what makes the script safe. A new script fails the build
+// until someone writes that down.
+var registeredScripts = map[string]string{
+	"db-backup.sh":  "pg_dump only; read-only against the live database",
+	"db-restore.sh": "pg_restore into a caller-supplied target; any inconsistency it produces is caught by the platform invariants (ADR-SECURITY-003)",
+	"dr-drill.sh":   "drops and recreates a throwaway target only; refuses when the target is the live database named in ONEOPS_DB_URL (ADR-TENANCY-010)",
+}
+
+func TestOperationalScriptsAreRegistered(t *testing.T) {
+	entries, err := os.ReadDir("../../scripts")
+	if err != nil {
+		t.Fatalf("read scripts/: %v", err)
+	}
+	seen := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sh") {
+			continue
+		}
+		seen++
+		if reason, ok := registeredScripts[e.Name()]; !ok || strings.TrimSpace(reason) == "" {
+			t.Errorf("scripts/%s is an unregistered privileged script. Operational tooling is "+
+				"production code (ADR-TENANCY-008): register it with what makes it safe, or it "+
+				"must not exist.", e.Name())
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no scripts found; the guard would be vacuous")
+	}
+	for name := range registeredScripts {
+		if _, err := os.Stat("../../scripts/" + name); err != nil {
+			t.Errorf("registered script %s no longer exists — remove it, or the registry stops "+
+				"describing the tree", name)
+		}
+	}
+}
+
+// A script that drops a database must refuse to drop the live one. This is the
+// specific failure ADR-TENANCY-010 closes, pinned so it cannot regress.
+func TestDatabaseDroppingScripts_RefuseTheLiveDatabase(t *testing.T) {
+	entries, err := os.ReadDir("../../scripts")
+	if err != nil {
+		t.Fatalf("read scripts/: %v", err)
+	}
+	checked := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sh") {
+			continue
+		}
+		raw, rerr := os.ReadFile("../../scripts/" + e.Name())
+		if rerr != nil {
+			t.Fatalf("read %s: %v", e.Name(), rerr)
+		}
+		src := string(raw)
+		if !strings.Contains(src, "DROP DATABASE") {
+			continue
+		}
+		checked++
+		if !strings.Contains(src, "LIVE_DB") {
+			t.Errorf("scripts/%s issues DROP DATABASE without comparing its target to the live "+
+				"database named in ONEOPS_DB_URL — an operator variable set to the production "+
+				"name destroys it (ADR-TENANCY-010)", e.Name())
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no database-dropping script found; the guard would be vacuous — if the drill " +
+			"stopped dropping its target, this guard must move with it")
+	}
+	t.Logf("database-dropping scripts checked: %d", checked)
+}
+
 func TestOperationalBinariesAreRegistered(t *testing.T) {
 	entries, err := os.ReadDir("../../cmd")
 	if err != nil {
