@@ -37,5 +37,8 @@ type ExecutionStore interface {
 	Enqueue(ctx context.Context, execs []Execution) error
 	ClaimDue(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]Execution, error)
 	MarkResult(ctx context.Context, id string, claimToken time.Time, status ExecutionStatus, retry int, errMsg string, started, ended, next time.Time) error
+	// ReleaseClaim returns an unused claim and the attempt it consumed, for a
+	// worker stopped between claiming and running (ADR-CONCURRENCY-006).
+	ReleaseClaim(ctx context.Context, id string, claimToken time.Time) error
 	ListByPolicy(ctx context.Context, policyID string, limit int) ([]Execution, error)
 }

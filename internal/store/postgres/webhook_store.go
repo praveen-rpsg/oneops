@@ -158,6 +158,20 @@ func (s *WebhookStore) Enqueue(ctx context.Context, ds []events.Delivery) error 
 }
 
 // ClaimDue returns deliveries eligible for a send attempt (pending/failed and due).
+//
+// The claim is where the retry budget is enforced, because the claim is the only
+// event a failing worker cannot skip (ADR-CONCURRENCY-006). retry_count is
+// "attempts started", incremented here as the row is handed out — so an attempt
+// whose worker never reports back (crash, OOM, a demotion that cancels the
+// outcome write) still consumes budget. A row whose next attempt would exceed
+// its webhook's max_retries is not handed out at all: it is moved to
+// 'dead_letter' in the same statement. A missing webhook is budget 0 — the
+// delivery can never succeed, so it terminates rather than looping.
+//
+// Before this, the budget was consulted only by a worker that survived its own
+// attempt, and the reclaim path — the path that exists precisely for workers
+// that did not survive — left retry_count untouched. A crash-looping row was
+// therefore re-delivered forever with no terminating state (proven live).
 func (s *WebhookStore) ClaimDue(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]events.Delivery, error) {
 	// Atomic claim: move due pending/failed rows — and stale inflight rows whose
 	// claimer crashed — to 'inflight' with claimed_at set, under FOR UPDATE SKIP
@@ -167,18 +181,32 @@ func (s *WebhookStore) ClaimDue(ctx context.Context, now time.Time, lease time.D
 	// worker is reclaimed once claimed_at is older than the lease (ADR-CONCURRENCY-002).
 	staleBefore := now.Add(-lease)
 	rows, err := s.pool.Query(ctx, `
-		UPDATE webhook_delivery d
-		   SET status = 'inflight', claimed_at = $1
-		  FROM (
-		    SELECT id FROM webhook_delivery
-		     WHERE (status IN ('pending','failed') AND next_attempt_at <= $1)
-		        OR (status = 'inflight' AND claimed_at < $2)
-		     ORDER BY next_attempt_at
+		WITH candidate AS (
+		    SELECT d.id,
+		           d.retry_count + 1 AS attempt_no,
+		           COALESCE(w.max_retries, 0) AS budget
+		      FROM webhook_delivery d
+		      LEFT JOIN webhook w ON w.id = d.webhook_id
+		     WHERE (d.status IN ('pending','failed') AND d.next_attempt_at <= $1)
+		        OR (d.status = 'inflight' AND d.claimed_at < $2)
+		     ORDER BY d.next_attempt_at
 		     LIMIT $3
-		     FOR UPDATE SKIP LOCKED
-		  ) c
-		 WHERE d.id = c.id
-		RETURNING `+prefixCols(deliveryCols, "d")+``, now, staleBefore, limit)
+		     FOR UPDATE OF d SKIP LOCKED
+		),
+		exhausted AS (
+		    UPDATE webhook_delivery d
+		       SET status = 'dead_letter', claimed_at = NULL
+		      FROM candidate c
+		     WHERE d.id = c.id AND c.attempt_no > c.budget
+		),
+		claimed AS (
+		    UPDATE webhook_delivery d
+		       SET status = 'inflight', claimed_at = $1, retry_count = c.attempt_no
+		      FROM candidate c
+		     WHERE d.id = c.id AND c.attempt_no <= c.budget
+		    RETURNING `+prefixCols(deliveryCols, "d")+`
+		)
+		SELECT `+deliveryCols+` FROM claimed`, now, staleBefore, limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim deliveries: %w", err)
 	}
@@ -192,6 +220,31 @@ func (s *WebhookStore) ClaimDue(ctx context.Context, now time.Time, lease time.D
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// ReleaseClaim returns an unused claim to the queue: the row goes back to
+// 'pending' and the attempt it consumed at claim time is given back.
+//
+// It is the honest counterpart to ClaimDue's budget accounting. A worker that is
+// stopped between claiming a batch and attempting it (demotion, shutdown) has
+// not spent those attempts, and must not burn budget it never used — otherwise a
+// few restarts would dead-letter healthy deliveries that were never sent. The
+// write is fenced on the claim token exactly like MarkResult
+// (ADR-CONCURRENCY-005): a worker whose row was already reclaimed releases
+// nothing.
+func (s *WebhookStore) ReleaseClaim(ctx context.Context, id string, claimToken time.Time) error {
+	if claimToken.IsZero() {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE webhook_delivery
+		   SET status = 'pending', claimed_at = NULL,
+		       retry_count = GREATEST(retry_count - 1, 0)
+		 WHERE id = $1 AND claimed_at = $2 AND status = 'inflight'`, id, claimToken)
+	if err != nil {
+		return fmt.Errorf("release delivery claim: %w", err)
+	}
+	return nil
 }
 
 // MarkResult records the outcome of a delivery attempt.

@@ -97,11 +97,35 @@ func (e *Executor) RunOnce(ctx context.Context) {
 	}
 	for i := range due {
 		if ctx.Err() != nil {
+			// Stopped mid-batch: the rest were claimed but never run, and the claim
+			// already charged each an attempt. Give those back on a detached context
+			// (ADR-CONCURRENCY-006).
+			rctx, cancel := outcomeContext(ctx)
+			for _, rest := range due[i:] {
+				if err := e.execs.ReleaseClaim(rctx, rest.ID, rest.ClaimedAt); err != nil {
+					e.log.Warn("policy executor: release unused claim", "execution_id", rest.ID, "err", err)
+				}
+			}
+			cancel()
 			return
 		}
 		e.attempt(ctx, due[i])
 	}
 }
+
+// outcomeContext returns the context used to record an outcome the action has
+// already produced. Detached from the worker's cancellation for the same reason
+// as the dispatcher's: a demotion or shutdown mid-run must not lose the record
+// of an action that already ran, because an unrecorded attempt is reclaimed and
+// re-run (ADR-CONCURRENCY-006). Values are kept, cancellation is dropped, and it
+// carries its own deadline.
+func outcomeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), outcomeWriteTimeout)
+}
+
+// outcomeWriteTimeout bounds how long recording an already-produced outcome may
+// hold up a demotion or shutdown.
+const outcomeWriteTimeout = 5 * time.Second
 
 // Attempt runs one execution synchronously (used by the admin test endpoint).
 func (e *Executor) Attempt(ctx context.Context, ex Execution) ExecutionStatus {
@@ -112,9 +136,14 @@ func (e *Executor) attempt(ctx context.Context, ex Execution) ExecutionStatus {
 	e.metrics.IncExecution()
 	start := e.now()
 
+	// Outcomes are recorded on a context detached from the worker's, so a
+	// demotion or shutdown mid-run cannot lose them (ADR-CONCURRENCY-006).
+	octx, cancelOutcome := outcomeContext(ctx)
+	defer cancelOutcome()
+
 	p, err := e.policies.Get(ctx, ex.PolicyID)
 	if err != nil {
-		_ = e.execs.MarkResult(ctx, ex.ID, ex.ClaimedAt, ExecDeadLetter, ex.RetryCount, "policy not found: "+err.Error(), start, e.now(), time.Time{})
+		_ = e.execs.MarkResult(octx, ex.ID, ex.ClaimedAt, ExecDeadLetter, ex.RetryCount, "policy not found: "+err.Error(), start, e.now(), time.Time{})
 		return ExecDeadLetter
 	}
 
@@ -136,7 +165,7 @@ func (e *Executor) attempt(ctx context.Context, ex Execution) ExecutionStatus {
 		e.log.Error("policy executor: refused execution",
 			"execution_id", ex.ID, "policy_id", p.ID, "policy_tenant", p.OwnerTenantID(),
 			"event_chain", ex.Event.CfgID, "event_seq", ex.Event.Seq, "err", err.Error())
-		_ = e.execs.MarkResult(ctx, ex.ID, ex.ClaimedAt, ExecDeadLetter, ex.RetryCount, "ownership refused: "+err.Error(), start, e.now(), time.Time{})
+		_ = e.execs.MarkResult(octx, ex.ID, ex.ClaimedAt, ExecDeadLetter, ex.RetryCount, "ownership refused: "+err.Error(), start, e.now(), time.Time{})
 		e.metrics.IncFailure()
 		return ExecDeadLetter
 	}
@@ -145,25 +174,33 @@ func (e *Executor) attempt(ctx context.Context, ex Execution) ExecutionStatus {
 	e.metrics.ObserveDuration(e.now().Sub(start))
 
 	if runErr == nil {
-		if err := e.execs.MarkResult(ctx, ex.ID, ex.ClaimedAt, ExecSucceeded, ex.RetryCount, "", start, e.now(), time.Time{}); errors.Is(err, ErrStaleClaim) {
-			// Lease expired and the row was reclaimed mid-run; the reclaiming worker
-			// owns the outcome. The action already ran (at-least-once); we do not
-			// record it, so we never overwrite the reclaimer's state (ADR-CONCURRENCY-005).
-			e.log.Info("policy executor: result fenced — row reclaimed by another worker", "execution_id", ex.ID)
+		if err := e.execs.MarkResult(octx, ex.ID, ex.ClaimedAt, ExecSucceeded, ex.RetryCount, "", start, e.now(), time.Time{}); err != nil {
+			if errors.Is(err, ErrStaleClaim) {
+				// Lease expired and the row was reclaimed mid-run; the reclaiming worker
+				// owns the outcome. The action already ran (at-least-once); we do not
+				// record it, so we never overwrite the reclaimer's state (ADR-CONCURRENCY-005).
+				e.log.Info("policy executor: result fenced — row reclaimed by another worker", "execution_id", ex.ID)
+				return ExecSucceeded
+			}
+			// The action ran but its outcome could not be recorded; the row will be
+			// reclaimed and re-run (ADR-CONCURRENCY-006).
+			e.log.Error("policy executor: action ran but outcome not recorded", "execution_id", ex.ID, "err", err)
 		}
 		return ExecSucceeded
 	}
 
+	// ex.RetryCount is the attempt number the claim assigned to this attempt
+	// (ADR-CONCURRENCY-006); the budget is compared against it directly.
 	e.metrics.IncFailure()
-	retry := ex.RetryCount + 1
+	retry := ex.RetryCount
 	if retry >= p.MaxRetries {
-		_ = e.execs.MarkResult(ctx, ex.ID, ex.ClaimedAt, ExecDeadLetter, retry, runErr.Error(), start, e.now(), time.Time{})
-		e.log.Warn("policy executor: dead-letter", "execution_id", ex.ID, "policy_id", p.ID, "err", runErr)
+		_ = e.execs.MarkResult(octx, ex.ID, ex.ClaimedAt, ExecDeadLetter, retry, runErr.Error(), start, e.now(), time.Time{})
+		e.log.Warn("policy executor: dead-letter", "execution_id", ex.ID, "policy_id", p.ID, "attempts", retry, "err", runErr)
 		return ExecDeadLetter
 	}
 	e.metrics.IncRetry()
 	next := e.now().Add(e.backoff(retry))
-	if err := e.execs.MarkResult(ctx, ex.ID, ex.ClaimedAt, ExecFailed, retry, runErr.Error(), start, e.now(), next); errors.Is(err, ErrStaleClaim) {
+	if err := e.execs.MarkResult(octx, ex.ID, ex.ClaimedAt, ExecFailed, retry, runErr.Error(), start, e.now(), next); errors.Is(err, ErrStaleClaim) {
 		e.log.Info("policy executor: failed result fenced — row reclaimed by another worker", "execution_id", ex.ID)
 	}
 	return ExecFailed

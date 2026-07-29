@@ -53,8 +53,14 @@ func (s *WebhookStore) Requeue(ctx context.Context, ids []string) (int, error) {
 
 // RequeueDeadLetters resets dead-letter deliveries to pending. An empty webhookID
 // requeues dead-letters across all webhooks.
+//
+// retry_count is reset to zero, which is what makes this the operator's escape
+// hatch under claim-time attempt accounting (ADR-CONCURRENCY-006): the claim
+// refuses to hand out a row with no budget left, so a requeue that did not
+// refill the budget would be a no-op. The stale claim token is cleared with it —
+// the row is not held by anyone.
 func (s *WebhookStore) RequeueDeadLetters(ctx context.Context, webhookID string) (int, error) {
-	sql := `UPDATE webhook_delivery SET status='pending', retry_count=0, next_attempt_at=now() WHERE status='dead_letter'`
+	sql := `UPDATE webhook_delivery SET status='pending', retry_count=0, claimed_at=NULL, next_attempt_at=now() WHERE status='dead_letter'`
 	args := []any{}
 	if webhookID != "" {
 		sql += ` AND webhook_id=$1`

@@ -8,9 +8,44 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rpsg/oneops/internal/domain"
 	"github.com/rpsg/oneops/internal/events"
 )
+
+// seedWebhook creates the subscription a delivery's retry budget is read from.
+// The claim enforces that budget (ADR-CONCURRENCY-006), so a delivery whose
+// webhook does not exist has no budget and terminates immediately — correct, but
+// not what the claim/lease/fencing tests are about, so they seed a real one with
+// a generous budget.
+func seedWebhook(ctx context.Context, t *testing.T, pool interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, id string, maxRetries int,
+) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO webhook (id, tenant_id, url, secret, enabled, max_retries)
+		VALUES ($1, $2, 'https://example.invalid/hook', 'shh', true, $3)
+		ON CONFLICT (id) DO UPDATE SET max_retries = EXCLUDED.max_retries`,
+		id, domain.SystemTenantID, maxRetries); err != nil {
+		t.Fatalf("seed webhook %s: %v", id, err)
+	}
+}
+
+// seedPolicy is the executor-queue counterpart of seedWebhook.
+func seedPolicy(ctx context.Context, t *testing.T, pool interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, id string, maxRetries int,
+) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO policy (id, tenant_id, name, enabled, action_type, action_config, max_retries)
+		VALUES ($1, $2, 'seeded', true, 'webhook', '{}'::jsonb, $3)
+		ON CONFLICT (id) DO UPDATE SET max_retries = EXCLUDED.max_retries`,
+		id, domain.SystemTenantID, maxRetries); err != nil {
+		t.Fatalf("seed policy %s: %v", id, err)
+	}
+}
 
 func enqueueDelivery(ctx context.Context, t *testing.T, s *WebhookStore, id, chain string) {
 	t.Helper()
@@ -34,6 +69,7 @@ func TestAtomicClaim_ConcurrentClaimsAreDisjoint(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	s := NewWebhookStore(pool)
+	seedWebhook(ctx, t, pool, "wh", 100)
 
 	const n = 20
 	for i := 0; i < n; i++ {
@@ -78,6 +114,7 @@ func TestAtomicClaim_InflightNotReclaimedWithinLease(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	s := NewWebhookStore(pool)
+	seedWebhook(ctx, t, pool, "wh", 100)
 	enqueueDelivery(ctx, t, s, "d-lease", "chain-lease")
 
 	first, err := s.ClaimDue(ctx, time.Now(), time.Minute, 10)
@@ -107,6 +144,7 @@ func TestAtomicClaim_StaleInflightIsReclaimed(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	s := NewWebhookStore(pool)
+	seedWebhook(ctx, t, pool, "wh", 100)
 	enqueueDelivery(ctx, t, s, "d-stale", "chain-stale")
 
 	if _, err := s.ClaimDue(ctx, time.Now(), time.Minute, 10); err != nil {

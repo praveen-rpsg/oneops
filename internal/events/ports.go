@@ -38,6 +38,9 @@ type DeliveryStore interface {
 	Enqueue(ctx context.Context, ds []Delivery) error
 	ClaimDue(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]Delivery, error)
 	MarkResult(ctx context.Context, id string, claimToken time.Time, status DeliveryStatus, retryCount, statusCode int, lastAttempt, nextAttempt time.Time) error
+	// ReleaseClaim returns an unused claim and the attempt it consumed, for a
+	// worker stopped between claiming and attempting (ADR-CONCURRENCY-006).
+	ReleaseClaim(ctx context.Context, id string, claimToken time.Time) error
 	ListByWebhook(ctx context.Context, webhookID string, limit int) ([]Delivery, error)
 }
 

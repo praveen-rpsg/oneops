@@ -28,6 +28,7 @@ func TestLeaseFencing_WebhookEvictedWorkerIsFenced(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	s := NewWebhookStore(pool)
+	seedWebhook(ctx, t, pool, "wh", 100)
 	const lease = time.Minute
 	chain := fmt.Sprintf("fence-wh-%d", time.Now().UnixNano())
 	id := "dlv_" + chain
@@ -97,6 +98,7 @@ func TestLeaseFencing_PolicyEvictedWorkerIsFenced(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	s := NewPolicyStore(pool)
+	seedPolicy(ctx, t, pool, "pol", 100)
 	const lease = time.Minute
 	chain := fmt.Sprintf("fence-pol-%d", time.Now().UnixNano())
 	id := "exec_" + chain

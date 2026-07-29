@@ -19,7 +19,10 @@ type DeliveryStatus string
 
 // Delivery states.
 const (
-	StatusPending    DeliveryStatus = "pending"
+	StatusPending DeliveryStatus = "pending"
+	// StatusInflight is the claimed state: a worker holds this row under a lease
+	// (ADR-CONCURRENCY-002) and has charged it an attempt (ADR-CONCURRENCY-006).
+	StatusInflight   DeliveryStatus = "inflight"
 	StatusDelivered  DeliveryStatus = "delivered"
 	StatusFailed     DeliveryStatus = "failed"
 	StatusDeadLetter DeliveryStatus = "dead_letter"

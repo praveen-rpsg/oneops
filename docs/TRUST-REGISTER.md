@@ -34,6 +34,8 @@ fail-closed startup validator.
 | 17 | **Non-monotonic cursor** (blind overwrite; a stale/overlapping writer rewinds the watermark) | **Monotonic write (`GREATEST`); the watermark can only rise** | ✓ | arch, int | **ADR-CONCURRENCY-004** |
 | 18 | **Unfenced completion of an evicted worker** (lease expires, row reclaimed; the stale worker's `MarkResult` resurrects a delivered row / corrupts the reclaimer's state) | **`MarkResult` fenced on the claim token (`claimed_at`); a stale write is rejected with `ErrStaleClaim`** | ✓ | arch, int | **ADR-CONCURRENCY-005** |
 | 19 | **SSRF via tenant-supplied delivery URLs** (webhook / policy-action URLs dialed through a default client; loopback + `169.254.169.254` metadata + private ranges reachable; `last_status_code` an internal scanner oracle) | **`safehttp` dialer refuses non-public IPs at dial time (DNS-rebinding-safe); applied to both outbound clients; secure by default** | ✓ | arch, unit | **ADR-SECURITY-001** |
+| 20 | **Unbounded retry of a row whose worker never reports back** (the reclaim path left `retry_count` untouched, so a crash-looping row was re-delivered/re-executed forever; the queue had no terminating state for it) | **The claim charges the attempt and enforces the budget: `ClaimDue` advances `retry_count` and dead-letters a row whose next attempt would exceed `max_retries`, atomically** | ✓ | arch, int | **ADR-CONCURRENCY-006** |
+| 21 | **Outcome lost when the worker is stopped** (outcome written through the leadership context; a demotion mid-flight POSTed to the subscriber, recorded nothing, incremented the success metric anyway, and left the row claimed for unbounded re-send) | **Outcomes written on a context detached from the worker's cancellation (`WithoutCancel` + own deadline); a failed outcome write is reported, not swallowed** | ✓ | arch, int | **ADR-CONCURRENCY-006** |
 
 ## Guarantees stated, not overstated
 
@@ -48,6 +50,11 @@ The register records what was *eliminated*. Two properties are deliberately
   delivery now carries the *same* stable `X-OneOps-Delivery` (ADR-CONCURRENCY-003
   made that key stable across re-production, which is what turns at-least-once into
   effectively-once for a compliant receiver).
+- **Retries are bounded by attempts, not by wall-clock time.** A row is handed to
+  a worker at most `max_retries` times in total, counting attempts whose outcome
+  was never recorded (ADR-CONCURRENCY-006). Each of those attempts may still hold
+  the row for a full claim lease before reclaim, so termination is guaranteed in
+  attempts, not within any particular duration.
 - **The leadership step-down window is bounded, not zero.** Up to the health-watch
   interval, a demoted leader may still run its workers; that overlap is made
   *safe* by idempotent production and the atomic claim, not eliminated
@@ -172,6 +179,64 @@ evidence, residual risks, status. New investigations add their boundary here.
 - **Status.** ✓ Closed. Enforced by `arch.TestOutboundClients_AreSSRFGuarded`,
   `safehttp.TestIsPublicIP_BlocksNonPublic`, `safehttp.TestClient_RefusesLoopbackDial`,
   `safehttp.TestValidateWebhookURL`.
+
+### Retry liveness — every row terminates (ADR-CONCURRENCY-006)
+
+- **Property.** Every delivery and policy execution reaches a terminal state. A
+  row is handed to a worker at most `max_retries` times in total — counting
+  attempts whose outcome was never recorded — and then becomes `dead_letter`. An
+  outcome the platform produced in the outside world is recorded even when the
+  worker producing it is being stopped.
+- **Threat model.** (a) Crash-looping worker — the attempt kills the worker (OOM,
+  node loss, SIGKILL), the lease reclaims the row, and the budget never depletes.
+  (b) Demotion mid-flight — ADR-CONCURRENCY-003 cancels the leadership context,
+  the outcome write rides that context and fails, and the recorded state diverges
+  from what the subscriber actually received. (c) Orphaned row — the subscriber is
+  deleted and the row circulates with no possible success. (d) Budget burned
+  without work — a claim charged but never attempted (shutdown) dead-letters a
+  healthy row. (e) Evicted worker refunding a row it no longer owns.
+- **Root authority.** The claim itself. It is the only event in a row's lifecycle
+  that a failing worker cannot skip, so it is where the attempt is charged and
+  where the budget is enforced. The budget values live on `webhook.max_retries` /
+  `policy.max_retries` and are read by the claim through a join, so the claim and
+  the worker enforce one number.
+- **Failure assumptions.** A worker may vanish at any point after claiming and
+  never write anything. A worker may be cancelled between claiming a batch and
+  attempting it. The database may be briefly unavailable for an outcome write
+  (bounded by the 5s outcome deadline; the row then falls back to the reclaim
+  path, which now counts).
+- **Recovery assumptions.** `RequeueDeadLetters` refills the budget
+  (`retry_count = 0`) and clears the claim token, so operator recovery is real and
+  not a no-op against the claim's budget check. Restore consistency is unchanged
+  (ADR-TENANCY-006).
+- **Operational assumptions.** Only the workers claim and release. The admin test
+  path writes unfenced with a zero token by design and does not participate in
+  budget accounting.
+- **Startup validation.** None specific.
+- **Runtime validation.** The claim's `attempt_no > budget` predicate terminates
+  the row; `COALESCE(max_retries, 0)` terminates orphans; `ReleaseClaim` is fenced
+  on `claimed_at`; a failed outcome write is logged and returned rather than
+  counted as success.
+- **Evidence.** Live exploit: `max_retries=3`, six crash cycles →
+  `claims_handed_out=6`, `status=inflight`, `retry_count=0` (both queues). Live
+  exploit: demotion mid-flight → subscriber received the POST, row `inflight`,
+  `retry_count=0`, success metric incremented. Live fix, same tests: six cycles →
+  `claims_handed_out=3`, `dead_letter`, `retry_count=3`; demotion → outcome
+  recorded `failed`/`retry_count=1`; orphan → 0 claims, `dead_letter`; five
+  claim/release cycles → `retry_count=0`, `pending`; stale release changes
+  nothing; requeued dead-letter claimable again.
+- **Residual risks.** The at-least-once ceiling is unchanged — duplicates still
+  occur on a crash between action and outcome, now bounded and dedup-able on the
+  stable id. Termination is bounded in attempts, not wall-clock. The claim lease
+  and the 5s outcome deadline are still not operator-tunable. `retry_count`'s
+  observable meaning changed to "attempts started" (+1 while in flight).
+- **Status.** ✓ Closed. Enforced by
+  `arch.TestClaimDue_ChargesTheAttemptAndBoundsIt`,
+  `arch.TestWorkerOutcomeWrites_AreNotCancelledByDemotion`,
+  `arch.TestOutcomeContext_IsDetachedAndBounded`,
+  `arch.TestWorkers_ReleaseUnusedClaimsOnStop`,
+  `postgres.TestRetryLiveness_*` (5 tests), and
+  `postgres.TestOutcomeDurability_ResultSurvivesWorkerCancellation`.
 
 ## How to add an entry
 

@@ -148,12 +148,19 @@ func (f *fakeExecs) Enqueue(_ context.Context, xs []Execution) error {
 	}
 	return nil
 }
+
+// ClaimDue models the real store's contract: the claim charges the attempt
+// (retry_count is "attempts started") so a worker that never reports back still
+// consumes budget (ADR-CONCURRENCY-006).
 func (f *fakeExecs) ClaimDue(_ context.Context, now time.Time, _ time.Duration, limit int) ([]Execution, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []Execution
 	for _, x := range f.m {
 		if (x.Status == ExecPending || x.Status == ExecFailed) && !x.NextAttemptAt.After(now) {
+			x.RetryCount++
+			x.Status = ExecRunning
+			f.m[x.ID] = x
 			out = append(out, x)
 			if len(out) == limit {
 				break
@@ -161,6 +168,17 @@ func (f *fakeExecs) ClaimDue(_ context.Context, now time.Time, _ time.Duration, 
 		}
 	}
 	return out, nil
+}
+func (f *fakeExecs) ReleaseClaim(_ context.Context, id string, _ time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	x := f.m[id]
+	if x.RetryCount > 0 {
+		x.RetryCount--
+	}
+	x.Status = ExecPending
+	f.m[id] = x
+	return nil
 }
 func (f *fakeExecs) MarkResult(_ context.Context, id string, _ time.Time, status ExecutionStatus, retry int, errMsg string, started, ended, next time.Time) error {
 	f.mu.Lock()

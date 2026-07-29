@@ -155,6 +155,14 @@ func (s *PolicyStore) Enqueue(ctx context.Context, xs []policy.Execution) error 
 }
 
 // ClaimDue returns executions eligible to run (pending/failed and due).
+//
+// As on the delivery queue, the claim enforces the retry budget
+// (ADR-CONCURRENCY-006): retry_count is "attempts started" and is incremented as
+// the row is handed out, so an execution whose worker never reports back still
+// consumes budget, and one whose next attempt would exceed the policy's
+// max_retries is dead-lettered in the same statement instead of being run again.
+// A missing policy is budget 0. Without this, a crash-looping action was re-run
+// forever with no terminating state (proven live).
 func (s *PolicyStore) ClaimDue(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]policy.Execution, error) {
 	// Atomic claim with lease, matching the delivery queue (ADR-CONCURRENCY-002):
 	// due pending/failed rows and stale running rows are moved to 'running' under
@@ -162,23 +170,55 @@ func (s *PolicyStore) ClaimDue(ctx context.Context, now time.Time, lease time.Du
 	// crashed worker's row is recovered only after the lease.
 	staleBefore := now.Add(-lease)
 	rows, err := s.pool.Query(ctx, `
-		UPDATE policy_execution e
-		   SET status = 'running', claimed_at = $1
-		  FROM (
-		    SELECT id FROM policy_execution
-		     WHERE (status IN ('pending','failed') AND next_attempt_at <= $1)
-		        OR (status = 'running' AND claimed_at < $2)
-		     ORDER BY next_attempt_at
+		WITH candidate AS (
+		    SELECT e.id,
+		           e.retry_count + 1 AS attempt_no,
+		           COALESCE(p.max_retries, 0) AS budget
+		      FROM policy_execution e
+		      LEFT JOIN policy p ON p.id = e.policy_id
+		     WHERE (e.status IN ('pending','failed') AND e.next_attempt_at <= $1)
+		        OR (e.status = 'running' AND e.claimed_at < $2)
+		     ORDER BY e.next_attempt_at
 		     LIMIT $3
-		     FOR UPDATE SKIP LOCKED
-		  ) c
-		 WHERE e.id = c.id
-		RETURNING `+prefixCols(execCols, "e")+``, now, staleBefore, limit)
+		     FOR UPDATE OF e SKIP LOCKED
+		),
+		exhausted AS (
+		    UPDATE policy_execution e
+		       SET status = 'dead_letter', claimed_at = NULL
+		      FROM candidate c
+		     WHERE e.id = c.id AND c.attempt_no > c.budget
+		),
+		claimed AS (
+		    UPDATE policy_execution e
+		       SET status = 'running', claimed_at = $1, retry_count = c.attempt_no
+		      FROM candidate c
+		     WHERE e.id = c.id AND c.attempt_no <= c.budget
+		    RETURNING `+prefixCols(execCols, "e")+`
+		)
+		SELECT `+execCols+` FROM claimed`, now, staleBefore, limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim executions: %w", err)
 	}
 	defer rows.Close()
 	return scanExecutions(rows)
+}
+
+// ReleaseClaim returns an unused claim to the queue, giving back the attempt it
+// consumed. See WebhookStore.ReleaseClaim — a worker stopped between claiming
+// and running must not burn budget it never spent. Fenced on the claim token.
+func (s *PolicyStore) ReleaseClaim(ctx context.Context, id string, claimToken time.Time) error {
+	if claimToken.IsZero() {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE policy_execution
+		   SET status = 'pending', claimed_at = NULL,
+		       retry_count = GREATEST(retry_count - 1, 0)
+		 WHERE id = $1 AND claimed_at = $2 AND status = 'running'`, id, claimToken)
+	if err != nil {
+		return fmt.Errorf("release execution claim: %w", err)
+	}
+	return nil
 }
 
 // MarkResult records an execution attempt outcome, fenced by the claim token
