@@ -24,6 +24,8 @@ type ExecutiveMetrics struct {
 	depUp       *prometheus.GaugeVec // label: dependency
 	startupFail prometheus.Counter
 	shutdownTO  prometheus.Counter
+	invBreached prometheus.Gauge
+	invCheckErr prometheus.Counter
 }
 
 // NewExecutiveMetrics builds and registers the executive collectors.
@@ -58,8 +60,17 @@ func NewExecutiveMetrics(reg prometheus.Registerer) *ExecutiveMetrics {
 			Name: "oneops_shutdown_timeouts_total",
 			Help: "Total graceful-shutdown timeouts.",
 		}),
+		invBreached: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "oneops_invariant_breached",
+			Help: "1 if a continuously-verified platform invariant is breached and the instance is refusing to serve tenant data (ADR-SECURITY-002), else 0.",
+		}),
+		invCheckErr: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "oneops_invariant_check_failures_total",
+			Help: "Total times the invariant re-verification could not run (the previous verdict was carried).",
+		}),
 	}
-	reg.MustRegister(m.govOps, m.auditAppend, m.startupDur, m.shutdownDur, m.depUp, m.startupFail, m.shutdownTO)
+	reg.MustRegister(m.govOps, m.auditAppend, m.startupDur, m.shutdownDur, m.depUp, m.startupFail, m.shutdownTO,
+		m.invBreached, m.invCheckErr)
 	return m
 }
 
@@ -127,3 +138,19 @@ func (a *MeteredAuditor) AppendTx(ctx context.Context, tx pgx.Tx, in audit.Appen
 	a.m.ObserveAuditAppend(string(in.Operation), time.Since(start), err == nil)
 	return ev, err
 }
+
+// SetInvariantBreached records whether a continuously-verified invariant is
+// currently breached (ADR-SECURITY-002). This is the signal to alert on: while
+// it is 1 the instance is refusing tenant traffic and its workers are stopped.
+func (m *ExecutiveMetrics) SetInvariantBreached(breached bool) {
+	if breached {
+		m.invBreached.Set(1)
+		return
+	}
+	m.invBreached.Set(0)
+}
+
+// IncInvariantCheckFailure counts a re-verification that could not run, which
+// leaves the previous verdict standing rather than failing the platform closed
+// on a transient database blip.
+func (m *ExecutiveMetrics) IncInvariantCheckFailure() { m.invCheckErr.Inc() }

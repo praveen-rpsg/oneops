@@ -55,8 +55,11 @@ type Config struct {
 
 	// Audit-integrity verification scheduler (operational).
 	VerifyIntervalSeconds int // 0 => scheduler disabled
-	VerifyTimeoutSeconds  int // per-chain verification timeout
-	VerifyRetryAttempts   int // retries on transport error (never on a break)
+	// SchemaSentinelIntervalSeconds is how often the ownership-model schema
+	// invariants are re-verified for the life of the process (ADR-SECURITY-002).
+	SchemaSentinelIntervalSeconds int
+	VerifyTimeoutSeconds          int // per-chain verification timeout
+	VerifyRetryAttempts           int // retries on transport error (never on a break)
 
 	// Runtime profiling (operational). Disabled by default; mounts net/http/pprof.
 	PProfEnabled bool
@@ -139,9 +142,10 @@ func Load() (*Config, error) {
 		ServiceName:     getEnv("ONEOPS_SERVICE_NAME", "oneops-controlplane"),
 		OTLPEndpoint:    getEnv("ONEOPS_OTLP_ENDPOINT", ""),
 
-		VerifyIntervalSeconds: getEnvInt("ONEOPS_AUDIT_VERIFY_INTERVAL_SECONDS", 300),
-		VerifyTimeoutSeconds:  getEnvInt("ONEOPS_AUDIT_VERIFY_TIMEOUT_SECONDS", 30),
-		VerifyRetryAttempts:   getEnvInt("ONEOPS_AUDIT_VERIFY_RETRY_ATTEMPTS", 2),
+		VerifyIntervalSeconds:         getEnvInt("ONEOPS_AUDIT_VERIFY_INTERVAL_SECONDS", 300),
+		SchemaSentinelIntervalSeconds: getEnvInt("ONEOPS_SCHEMA_SENTINEL_INTERVAL_SECONDS", 30),
+		VerifyTimeoutSeconds:          getEnvInt("ONEOPS_AUDIT_VERIFY_TIMEOUT_SECONDS", 30),
+		VerifyRetryAttempts:           getEnvInt("ONEOPS_AUDIT_VERIFY_RETRY_ATTEMPTS", 2),
 
 		PProfEnabled: getEnvBool("ONEOPS_PPROF_ENABLED", false),
 

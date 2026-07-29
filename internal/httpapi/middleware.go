@@ -40,6 +40,39 @@ func genRequestID() string {
 	return hex.EncodeToString(b[:])
 }
 
+// invariantGate refuses the tenant-data surface while a continuously-verified
+// invariant is breached (ADR-SECURITY-002).
+//
+// Startup already refuses to boot when the schema no longer enforces the
+// ownership model. The same problem discovered one minute *after* boot was
+// previously ignored entirely: the process kept serving, reported ready, and
+// logged nothing while a tenant could read another tenant's rows. Fail-closed at
+// boot and fail-open at runtime is not a policy, it is an accident of where the
+// check happened to be called. This makes the runtime behaviour match the
+// startup behaviour: refuse to serve.
+//
+// The process deliberately stays alive and its diagnostic surface stays open —
+// refusing to serve is fail-closed; exiting would crash-loop the fleet and
+// destroy the evidence an operator needs to repair the boundary.
+func (s *Server) invariantGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.invariant == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if err := s.invariant(); err != nil {
+			s.log.Error("refusing request: platform invariant breached",
+				"path", r.URL.Path, "err", err.Error(), "request_id", RequestIDFrom(r.Context()))
+			w.Header().Set("Retry-After", "30")
+			writeProblem(w, r, http.StatusServiceUnavailable, "service unavailable",
+				"the platform has detected that a security invariant it depends on is no longer "+
+					"enforced and is refusing to serve tenant data until it is repaired")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) requestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Request-ID")

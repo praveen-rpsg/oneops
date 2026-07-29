@@ -550,6 +550,23 @@ func TestOperationalBinariesAreRegistered(t *testing.T) {
 // This fails the build if a worker's Run is launched directly in a goroutine in
 // the composition root instead of being registered and started under
 // leadership — the exact regression that reintroduces double execution.
+// perReplicaSupervisors are the long-running goroutines main.go may start
+// outside the leader gate, because they are not singleton *work* — they are each
+// replica's own supervision of itself, and every replica needs its own.
+//
+// The schema sentinel decides whether *this* instance may serve tenant data
+// (ADR-SECURITY-002). Running it only on the leader would leave every follower
+// serving through a boundary it never re-verified, which is the exact defect the
+// sentinel exists to close. It performs no tenant work and produces no outbound
+// effect: it reads catalogue metadata and sets a local flag.
+//
+// Additions here must meet both bars — per-replica by necessity, and free of
+// duplicable side effects. A worker that delivers, executes, or writes tenant
+// rows never qualifies.
+var perReplicaSupervisors = map[string]bool{
+	"schemaSentinel": true,
+}
+
 func TestWorkersStartOnlyUnderLeadership(t *testing.T) {
 	src, err := os.ReadFile(mainFile)
 	if err != nil {
@@ -589,7 +606,7 @@ func TestWorkersStartOnlyUnderLeadership(t *testing.T) {
 			// here, is a worker started outside the leader gate. The leader
 			// closure calls the local `run(ctx)` (an Ident, not X.Run), so it is
 			// not matched.
-			if x, ok := sel.X.(*ast.Ident); ok {
+			if x, ok := sel.X.(*ast.Ident); ok && !perReplicaSupervisors[x.Name] {
 				t.Errorf("main.go launches %s.Run in a goroutine at %s; workers must be "+
 					"registered and started under ops.RunAsLeader, not directly, or every "+
 					"replica runs them", x.Name, fset.Position(g.Pos()))

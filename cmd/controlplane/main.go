@@ -110,7 +110,27 @@ func run(logger *slog.Logger) error {
 	metrics := observability.NewMetrics()
 	execMetrics := ops.NewExecutiveMetrics(metrics.Registry())
 
-	srv := httpapi.NewServer(cfg, logger, repo, idem, verifier, metrics, pool.Ping)
+	// The schema sentinel re-verifies, for the life of the process, the invariant
+	// that startup validation proves once (ADR-SECURITY-002). It is constructed
+	// here so readiness can consult it; it is started after startup validation
+	// passes, and the server's gate is wired to it below.
+	schemaSentinel := ops.NewSentinel(
+		"ownership-model schema invariants",
+		func(c context.Context) ([]string, error) { return postgres.NewSchemaValidator(pool).Validate(c) },
+		time.Duration(cfg.SchemaSentinelIntervalSeconds)*time.Second,
+		logger, execMetrics,
+	)
+
+	// Readiness fails on a breach as well as on dependency loss: an instance that
+	// is refusing to serve tenant data must not stay in the load balancer.
+	ready := func(c context.Context) error {
+		if err := pool.Ping(c); err != nil {
+			return err
+		}
+		return schemaSentinel.Err()
+	}
+	srv := httpapi.NewServer(cfg, logger, repo, idem, verifier, metrics, ready)
+	srv.SetInvariantGate(schemaSentinel.Err)
 	srv.SetGraph(postgres.NewGraphRepo(appPool)) // M2.3 dependency-graph endpoints
 
 	// Governance API: the engine owns the single atomic constitutional mutation
@@ -416,10 +436,29 @@ func run(logger *slog.Logger) error {
 	// Workers run under the leadership context, not the process context: when this
 	// instance loses the lock it is demoted and lctx is cancelled, so its workers
 	// stop rather than keep producing and dispatching alongside the new leader.
+	// Re-verify the ownership-model schema invariants for the life of the
+	// process, not just at boot (ADR-SECURITY-002). Started only after startup
+	// validation passed, so its first verdict confirms a known-good boundary.
+	go schemaSentinel.Run(ctx)
+
+	// Start the background workers on exactly one instance. Every replica serves
+	// the HTTP API — those handlers are request-scoped and safe concurrently —
+	// but only the leader runs the singleton workers, so a webhook is delivered
+	// once and a policy action executes once regardless of replica count. A
+	// standby promotes itself if the leader's advisory-lock connection drops.
+	// Workers run under the leadership context, not the process context: when this
+	// instance loses the lock it is demoted and lctx is cancelled, so its workers
+	// stop rather than keep producing and dispatching alongside the new leader.
+	//
+	// The workers are additionally gated on the schema sentinel: they read and
+	// write tenant-owned rows through the same privileged path the API does, so
+	// a breached boundary must stop them too — refusing HTTP while a relay keeps
+	// fanning out across a broken isolation boundary would be a gate with a hole
+	// in it.
 	ops.RunAsLeader(ctx, cfg.DatabaseURL, ops.WorkerLeaderKey, logger, func(lctx context.Context) {
 		for _, run := range workers {
 			run := run
-			go func() { _ = run(lctx) }()
+			go func() { _ = ops.RunWhileHealthy(lctx, schemaSentinel, logger, run) }()
 		}
 	})
 

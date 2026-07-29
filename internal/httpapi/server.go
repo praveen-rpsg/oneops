@@ -32,13 +32,17 @@ type idempotencyStore interface {
 
 // Server wires the registry dependencies into an HTTP handler.
 type Server struct {
-	cfg        *config.Config
-	log        *slog.Logger
-	repo       domain.ConfigObjectRepository
-	idem       idempotencyStore
-	verifier   *auth.Verifier
-	metrics    *observability.Metrics
-	health     *Health
+	cfg      *config.Config
+	log      *slog.Logger
+	repo     domain.ConfigObjectRepository
+	idem     idempotencyStore
+	verifier *auth.Verifier
+	metrics  *observability.Metrics
+	health   *Health
+	// invariant reports why the platform must not serve tenant data, or nil when
+	// it may. Nil (unset) leaves the gate open, which is what unit tests and any
+	// deployment without a sentinel get (ADR-SECURITY-002).
+	invariant  func() error
 	graph      *graph.Service        // M2.3 graph transport; nil until SetGraph
 	graphRepo  domain.GraphTraversal // direct (one-hop) lookups
 	diag       http.Handler          // operational diagnostics; nil until SetDiagnostics
@@ -121,6 +125,11 @@ func NewServer(
 	}
 }
 
+// SetInvariantGate installs the check that decides whether the tenant-data
+// surface may serve. Additive, like the other Set* wiring: a server without it
+// serves unconditionally (ADR-SECURITY-002).
+func (s *Server) SetInvariantGate(invariant func() error) { s.invariant = invariant }
+
 // Router builds the fully-wired HTTP handler.
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
@@ -160,6 +169,13 @@ func (s *Server) Router() http.Handler {
 	s.mountPProf(r)
 
 	r.Route("/v1", func(rt chi.Router) {
+		// The invariant gate precedes authentication: when the boundary that
+		// makes tenant identity mean anything is gone, no request on the
+		// tenant-data surface may proceed — including one that would otherwise
+		// authenticate perfectly (ADR-SECURITY-002). /healthz, /readyz and
+		// /metrics stay outside it so a breached instance can still be
+		// diagnosed.
+		rt.Use(s.invariantGate)
 		rt.Use(s.authenticate)
 		rt.With(s.requirePermission(auth.PermRead)).Get("/artifacts", s.listArtifacts)
 		rt.With(s.requirePermission(auth.PermRead)).Get("/artifacts/{id}", s.getArtifact)
