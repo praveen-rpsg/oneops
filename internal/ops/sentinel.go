@@ -199,7 +199,7 @@ func RunWhileHealthy(ctx context.Context, guard InvariantGuard, log *slog.Logger
 		done := make(chan error, 1)
 		go func() { done <- run(wctx) }()
 
-		breach, finished := watchWhileHealthy(ctx, guard, done)
+		finished, breach := watchWhileHealthy(ctx, guard, done)
 		cancel()
 		if !finished {
 			<-done // the worker observes the cancellation and returns
@@ -217,20 +217,20 @@ func RunWhileHealthy(ctx context.Context, guard InvariantGuard, log *slog.Logger
 }
 
 // watchWhileHealthy blocks until the guard is breached, the worker returns, or
-// ctx ends. It reports the breach (nil if none) and whether the worker already
-// finished — the caller must not wait on `done` a second time if it did.
-func watchWhileHealthy(ctx context.Context, guard InvariantGuard, done <-chan error) (breach error, finished bool) {
+// ctx ends. It reports whether the worker already finished — the caller must not
+// wait on `done` a second time if it did — and the breach (nil if none).
+func watchWhileHealthy(ctx context.Context, guard InvariantGuard, done <-chan error) (finished bool, breach error) {
 	t := time.NewTicker(runWhileHealthyPoll)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, false
+			return false, nil
 		case <-done:
-			return nil, true
+			return true, nil
 		case <-t.C:
 			if err := guard.Err(); err != nil {
-				return err, false
+				return false, err
 			}
 		}
 	}
