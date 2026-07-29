@@ -163,15 +163,31 @@ func TestSchema_EveryTenantIdTableIsCanonicalAndProtected(t *testing.T) {
 		inList[tbl] = true
 	}
 
-	// Tables with a tenant_id column, excluding the tenant registry itself and
-	// partition children (whose parent carries the policy).
+	// A tenant_id column does not always mean the row is tenant-owned. On the
+	// registry tables it identifies *which boundary this row describes*, not who
+	// owns the row — and those tables must stay readable before a boundary has
+	// been resolved, which is exactly when RLS would hide them.
+	//
+	// Each exclusion carries its reason, and both are checked below: an excluded
+	// table that has vanished, or that has since become genuinely tenant-owned,
+	// fails here rather than sitting as a stale literal in a WHERE clause.
+	globalTenantIDTables := map[string]string{
+		"tenant": "the tenant registry itself — a row here IS a boundary; gating it on " +
+			"the boundary is circular (ADR-TENANCY-001 §4)",
+		"organization": "global by ADR-IDENTITY-002 §3.1 — tenant_id is a pointer to the " +
+			"boundary this organisation is realised as, and tenant_id is discovered BY " +
+			"reading this mapping, so gating the mapping on it is circular",
+	}
+
+	// Tables with a tenant_id column, excluding partition children (whose parent
+	// carries the policy). Registry tables are filtered in Go, against the
+	// justified set above, rather than as literals in the query.
 	rows, err := pool.Query(ctx, `
 		SELECT c.relname
 		  FROM pg_class c
 		  JOIN pg_namespace n ON n.oid = c.relnamespace
 		 WHERE n.nspname = current_schema()
 		   AND c.relkind IN ('r','p')
-		   AND c.relname <> 'tenant'
 		   AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid)
 		   AND EXISTS (
 		       SELECT 1 FROM information_schema.columns col
@@ -183,11 +199,16 @@ func TestSchema_EveryTenantIdTableIsCanonicalAndProtected(t *testing.T) {
 	}
 	defer rows.Close()
 
+	seen := map[string]bool{}
 	var live []string
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			t.Fatalf("scan: %v", err)
+		}
+		seen[name] = true
+		if _, global := globalTenantIDTables[name]; global {
+			continue
 		}
 		live = append(live, name)
 		if !inList[name] {
@@ -198,6 +219,20 @@ func TestSchema_EveryTenantIdTableIsCanonicalAndProtected(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate: %v", err)
 	}
+
+	// A justification must still describe reality. Both directions are checked so
+	// the exclusion set cannot quietly grant amnesty to a table that has changed.
+	for name, why := range globalTenantIDTables {
+		if !seen[name] {
+			t.Errorf("%q is excluded as a global tenant_id table (%s) but no such table "+
+				"carries tenant_id in the live schema — the justification is stale", name, why)
+		}
+		if inList[name] {
+			t.Errorf("%q is excluded as global (%s) yet is also in TenantOwnedTables; "+
+				"one of the two is wrong and the exclusion is hiding it", name, why)
+		}
+	}
+
 	if len(live) < len(TenantOwnedTables) {
 		t.Errorf("found %d tenant_id tables live but the canonical list has %d — a listed table is missing from the schema",
 			len(live), len(TenantOwnedTables))
