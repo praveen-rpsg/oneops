@@ -202,3 +202,47 @@ func goFilesUnder(t *testing.T, root string) []goFile {
 	}
 	return out
 }
+
+// Completeness sweep for outcome durability (entry 21).
+//
+// ADR-CONCURRENCY-006 established that an outcome the platform has already
+// produced in the outside world must be written on a context detached from the
+// worker's cancellation. Its guard names two workers — the dispatcher and the
+// policy executor. The replay worker is a third, and it wrote its outcome with
+// the worker context: proven live, a replay executed under a cancelled context
+// left its job in `running` with the outcome lost, and this queue has no lease
+// recovery, so it is stuck there permanently (ADR-CONCURRENCY-008).
+//
+// The subject set is derived from the tree: every package that runs background
+// work, and every outcome-recording call within it.
+func TestEveryWorkerOutcomeWrite_UsesADetachedContext(t *testing.T) {
+	// A method that records the result of work already performed. Matched on a
+	// word boundary so `MarkResultFor` or a helper whose name merely ends in one
+	// of these cannot slip through, and so `x.UpdateJobStatus` is not confused
+	// for `x.UpdateJob`.
+	outcomeWriters := regexp.MustCompile(`\.(MarkResult|UpdateJob)\(\s*ctx\b`)
+
+	files := goFilesUnder(t, "..")
+	workerPkgs := 0
+	for _, f := range files {
+		src := stripComments(f.src)
+		// A worker package is one that runs a loop over a context.
+		if !strings.Contains(src, "func (w *") && !strings.Contains(src, "func (d *") &&
+			!strings.Contains(src, "func (e *") {
+			continue
+		}
+		if !strings.Contains(src, "RunOnce(ctx") && !strings.Contains(src, "Run(ctx context.Context)") {
+			continue
+		}
+		workerPkgs++
+		if loc := outcomeWriters.FindString(src); loc != "" {
+			t.Errorf("%s records an outcome with the worker's cancellable context (%q) — a "+
+				"demotion or shutdown mid-work loses an outcome that already happened in the "+
+				"outside world (ADR-CONCURRENCY-006/008)", f.path, strings.TrimSpace(loc))
+		}
+	}
+	if workerPkgs == 0 {
+		t.Fatal("no worker files found; the sweep would be vacuous")
+	}
+	t.Logf("worker files swept for outcome-write context: %d", workerPkgs)
+}

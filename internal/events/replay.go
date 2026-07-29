@@ -105,10 +105,23 @@ func (w *ReplayWorker) execute(ctx context.Context, job ReplayJob) {
 	} else {
 		job.Status = JobCompleted
 	}
-	if err := w.jobs.UpdateJob(ctx, job); errors.Is(err, ErrStaleClaim) {
-		// This worker no longer owns the job; the current owner records the
-		// authoritative outcome (ADR-CONCURRENCY-005/007).
-		w.log.Info("replay: job result fenced — claimed by another worker", "job_id", job.ID)
+	// The outcome is written on a context detached from the worker's, so a
+	// demotion or shutdown mid-replay cannot lose it (ADR-CONCURRENCY-008). The
+	// replay has already enqueued deliveries — an effect in the outside world —
+	// and this queue has no lease recovery (ADR-CONCURRENCY-007), so a lost
+	// outcome leaves the job stuck in `running` permanently.
+	octx, cancelOutcome := outcomeContext(ctx)
+	defer cancelOutcome()
+	if err := w.jobs.UpdateJob(octx, job); err != nil {
+		if errors.Is(err, ErrStaleClaim) {
+			// This worker no longer owns the job; the current owner records the
+			// authoritative outcome (ADR-CONCURRENCY-005/007).
+			w.log.Info("replay: job result fenced — claimed by another worker", "job_id", job.ID)
+			return
+		}
+		// The replay happened but could not be recorded. Say so, and do not let
+		// the success metrics below claim an outcome the database does not hold.
+		w.log.Error("replay: job ran but outcome not recorded", "job_id", job.ID, "err", err)
 		return
 	}
 

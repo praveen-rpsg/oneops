@@ -49,14 +49,16 @@ fail-closed startup validator.
 | 26 | **A platform invariant enforced at only one of its two enforcement points** (`OwnershipValidator` ran at startup only, so a divergent ownership graph served `/v1` with `readyz=200` and 0 breaches while the same binary refused to boot on it — an instance would serve indefinitely but never restart) + **an outbound client outside the SSRF guard** (JWKS used a bare `http.Get`, unguarded and untimed) | **One `ops.Invariant` registry read by both the startup gate and the sentinel, with every validator required to be registered; and a whole-tree sweep for unguarded outbound HTTP instead of named call sites** | ✓ | arch, unit | **ADR-SECURITY-003** |
 | 27 | **A work queue with no atomic claim and no fencing token** (`webhook_replay_job` had neither: 8 of 8 pending jobs claimed by two workers at once, and a stale worker overwrote the owner's `completed/42` outcome with `failed/0`) | **The claim is a compare-and-set under `FOR UPDATE … SKIP LOCKED` that stamps the token; the outcome write is fenced on it; and the guards derive the queue and cursor sets from the schema instead of naming them** | ✓ | arch, int | **ADR-CONCURRENCY-007** |
 | 28 | **A privileged mutation confined by nothing but caller-supplied ids** (the replay-by-id path called `Requeue` with ids from the request body on the privileged pool — `WHERE id = ANY($1)` with no owner and not even the job's own webhook — resetting another tenant's terminated delivery to `pending`/retry_count=0 and resurrecting it) | **The requeue takes its webhook as a required parameter and filters on it; the guard derives its subject set from the `TenantOwnedTables` registry and fails any privileged mutation keyed only on a caller-supplied id set** | ✓ | arch, int | **ADR-TENANCY-009** |
+| 29 | **A worker recording an outcome through its own cancellable context** (the replay worker wrote `UpdateJob(ctx, …)` and let a `context.Canceled` fall through to its success metrics — proven live, a replay under a cancelled context left the job `running`/`events_replayed=0` with the outcome lost and, absent lease recovery on that queue, unrecoverable) | **The outcome is written on `outcomeContext(ctx)` and a failed write is reported, not counted; the guard is derived from the tree — any file running a context loop is a worker file — replacing four enumerated subject lists** | ✓ | arch, unit | **ADR-CONCURRENCY-008** |
 
 ## Class status
 
 **Audit coverage (2026-07-29).** Entries swept: 2, 4, 5, 6, 7, 14, 15, 17, 18,
-19, 22, 25, 26, 27, 28. Evidence Validation Records live in `docs/evr/` —
+19, 20, 21, 22, 25, 26, 27, 28. Evidence Validation Records live in `docs/evr/` —
 **EVR-001** (ownership family, PARTIALLY VALIDATED), **EVR-002** (authorization
-scope + producer identity, VALIDATED at ECL-5). Entries **1, 3, 8–13, 16, 20,
-21, 23, 24 have not yet been swept** — they are recorded as verified on the evidence in their ADRs,
+scope + producer identity, VALIDATED at ECL-5), **EVR-003** (retry accounting +
+outcome durability, PARTIALLY VALIDATED — entry 21 reopened). Entries **1, 3,
+8–13, 16, 23, 24 have not yet been swept** — they are recorded as verified on the evidence in their ADRs,
 which is not the same as verified complete. Three of the six classes examined so
 far were found overstated, so the unswept remainder should be treated as
 *insufficiently verified* rather than closed.
@@ -74,6 +76,8 @@ most ECL-2 and must not be read as certainty.**
 | Platform operation under tenant-scope authorization | 2 | **CLOSED** — EVR-002, **ECL-5** | none — subject set derived from the router's route paths |
 | Non-deterministic identity for a queued row | 15 | **CLOSED** — EVR-002, **ECL-5** | none — whole-tree sweep of row producers |
 | Privileged consumer trusting what it was handed | 4, 5, 6, 7 | **CLOSED** — EVR-001, **ECL-5** | none — guard derives its subject set from `TenantOwnedTables` (ADR-TENANCY-009) |
+| Outcome lost when the worker is stopped | 21 | **CLOSED** — EVR-003, **ECL-5** (reopened and re-closed) | none — tree-derived worker sweep (ADR-CONCURRENCY-008) |
+| Unbounded retry of unrecorded attempts | 20 | **CLOSED** — EVR-003, **ECL-4** | none; the replay queue has no retry semantics, so the class does not apply there (stated exception) |
 | Historical record derived from mutable state | 25 | **OPEN** — **ECL-4** | `policy_execution` does not record the action it ran (held under AR-001) |
 | Non-exclusive claim on shared work | 14 | **CLOSED** — **ECL-5** | none — queue set derived from the schema, not named (ADR-CONCURRENCY-007) |
 | Unfenced completion by a worker that lost its claim | 18 | **CLOSED** — **ECL-5** | none — same schema-derived sweep (ADR-CONCURRENCY-007) |
@@ -125,6 +129,17 @@ with neither the delivery's owner nor the job's own webhook consulted. Proven
 live: a victim tenant's `dead_letter`/retry_count=3 delivery became
 `pending`/retry_count=0, resurrected with a refilled budget. Closed by
 ADR-TENANCY-009. **Entries 4 and 7 were re-verified and stand.**
+
+### Reopened and re-closed on 2026-07-29 (fifth audit — EVR-003)
+
+**Entry 21 was reopened.** Outcome durability was enforced by a guard naming two
+workers; ADR-CONCURRENCY-007 introduced a third, and the replay worker wrote its
+outcome on the worker's cancellable context *and* let a `context.Canceled` fall
+through to its success metrics. Proven live: a replay under a cancelled context
+left the job `running` with `events_replayed=0` and the outcome lost — and since
+that queue has no lease recovery, permanently stuck. Closed by
+ADR-CONCURRENCY-008 with a tree-derived sweep. **Entry 20 stands**, with the
+stated exception that the replay queue has no retry semantics to bound.
 
 ### Confirmed on 2026-07-29 (fourth audit — EVR-002)
 
