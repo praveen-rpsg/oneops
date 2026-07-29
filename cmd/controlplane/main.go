@@ -127,6 +127,15 @@ func run(logger *slog.Logger) error {
 			Name:  "ownership graph consistency",
 			Check: func(c context.Context) ([]string, error) { return postgres.NewOwnershipValidator(pool).Validate(c) },
 		},
+		{
+			// Recorded as "future hardening" by ADR-CONCURRENCY-004 and never
+			// built: a cursor restored ahead of its log silently skips every
+			// event in between (ADR-TENANCY-011). Registering it here gives it
+			// both the boot gate and the sentinel at once — the point of the
+			// registry (ADR-SECURITY-003).
+			Name:  "relay cursors within the audit log",
+			Check: func(c context.Context) ([]string, error) { return postgres.NewCursorValidator(pool).Validate(c) },
+		},
 	}
 	invariantSentinel := ops.NewSentinel(
 		"platform invariants",

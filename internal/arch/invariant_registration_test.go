@@ -51,13 +51,14 @@ func TestPlatformInvariants_AreEnforcedAtBothPoints(t *testing.T) {
 func TestEveryValidator_IsRegisteredAsAnInvariant(t *testing.T) {
 	main := stripComments(readFile(t, "../../cmd/controlplane/main.go"))
 
+	// The validator set is discovered from the tree, not listed. An earlier
+	// version of this guard named two files and therefore did not notice a third
+	// validator when one was added — the enumerated-enforcement pattern this
+	// programme keeps finding, here in its own enforcement.
 	ctor := regexp.MustCompile(`func (New\w*Validator)\(`)
 	found := 0
-	for _, file := range []string{
-		"../store/postgres/schema_validation.go",
-		"../store/postgres/ownership_validation.go",
-	} {
-		for _, m := range ctor.FindAllStringSubmatch(readFile(t, file), -1) {
+	for _, f := range goFilesUnder(t, "../store/postgres") {
+		for _, m := range ctor.FindAllStringSubmatch(f.src, -1) {
 			name := m[1]
 			found++
 			if !strings.Contains(main, "postgres."+name+"(") {

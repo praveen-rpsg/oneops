@@ -52,19 +52,21 @@ fail-closed startup validator.
 | 29 | **A worker recording an outcome through its own cancellable context** (the replay worker wrote `UpdateJob(ctx, …)` and let a `context.Canceled` fall through to its success metrics — proven live, a replay under a cancelled context left the job `running`/`events_replayed=0` with the outcome lost and, absent lease recovery on that queue, unrecoverable) | **The outcome is written on `outcomeContext(ctx)` and a failed write is reported, not counted; the guard is derived from the tree — any file running a context loop is a worker file — replacing four enumerated subject lists** | ✓ | arch, unit | **ADR-CONCURRENCY-008** |
 | 30 | **A load-bearing invariant expressed as a boolean argument** (the chain-head `FOR UPDATE` — on which the gapless committed prefix and audit-derived ownership both rest — was `ReadChainHead(…, forUpdate bool)`, guarded by an integration test with no architecture tier; proven live that without it two transactions both claim the same seq and the second governance event is lost) | **The locking read is a distinct method (`ReadChainHeadForUpdate`), so the unsafe form cannot be produced by forgetting an argument; a tree-derived sweep forbids the non-locking read in production and requires every append path to take the lock** | ✓ | arch, int | **ADR-AUDIT-006** |
 | 31 | **A disaster-recovery drill that can destroy production** (`dr-drill.sh` took its target from the operator-supplied `DR_DRILL_DB` and ran `DROP DATABASE IF EXISTS $DRILL_DB` with **zero** expressions comparing it to the live database, so `DR_DRILL_DB=oneops` dropped production; scripts were outside the operational-tooling guard, which walked only `cmd/`) | **The drill refuses when its target is the database named in `ONEOPS_DB_URL`; `scripts/` gains the same registry guard as `cmd/`, and any script issuing `DROP DATABASE` must carry the refusal** | ✓ | arch | **ADR-TENANCY-010** |
+| 32 | **A cursor restored ahead of its log** (`webhook_cursor`/`policy_cursor` are watermarks, so a cursor past its chain head silently skips every event in between — recorded by ADR-CONCURRENCY-004 as "noted future hardening" and never built, leaving a **documented** open instance of the restore-inconsistency class) | **`CursorValidator` reports any cursor ahead of its chain head, or with no chain head at all, and is registered in `platformInvariants` so it gains the boot gate and the continuous sentinel together** | ✓ | int, arch | **ADR-TENANCY-011** |
 
 ## Class status
 
 **Audit coverage (2026-07-29).** Entries swept: 2, 4, 5, 6, 7, 14, 15, 17, 18,
-1, 10, 11, 16, 19, 20, 21, 22, 25, 26, 27, 28, 30, 31. Evidence Validation Records live in `docs/evr/` —
+1, 8, 10, 11, 16, 19, 20, 21, 22, 25, 26, 27, 28, 30, 31, 32. Evidence Validation Records live in `docs/evr/` —
 **EVR-001** (ownership family, PARTIALLY VALIDATED), **EVR-002** (authorization
 scope + producer identity, VALIDATED at ECL-5), **EVR-003** (retry accounting +
 outcome durability, PARTIALLY VALIDATED — entry 21 reopened), **EVR-004** (audit
 chain append authority, PARTIALLY VALIDATED — class closed, evidence
 insufficient), **EVR-005** (cross-tenant key confusion, VALIDATED at ECL-5),
 **EVR-006** (operational tooling, PARTIALLY VALIDATED — a defective sibling
-script found), **EVR-007** (leader step-down, VALIDATED at ECL-5). Entries
-**3, 8, 9, 12, 13, 23, 24 have not yet been swept** — they are recorded as verified on the evidence in their ADRs,
+script found), **EVR-007** (leader step-down, VALIDATED at ECL-5), **EVR-008** (restore
+consistency, PARTIALLY VALIDATED — a documented instance was open). Entries
+**3, 9, 12, 13, 23, 24 have not yet been swept** — they are recorded as verified on the evidence in their ADRs,
 which is not the same as verified complete. Three of the six classes examined so
 far were found overstated, so the unswept remainder should be treated as
 *insufficiently verified* rather than closed.
@@ -86,6 +88,7 @@ most ECL-2 and must not be read as certainty.**
 | Platform operation under tenant-scope authorization | 2 | **CLOSED** — EVR-002, **ECL-5** | none — subject set derived from the router's route paths |
 | Non-deterministic identity for a queued row | 15 | **CLOSED** — EVR-002, **ECL-5** | none — whole-tree sweep of row producers |
 | Privileged consumer trusting what it was handed | 4, 5, 6, 7 | **CLOSED** — EVR-001, **ECL-5** | none — guard derives its subject set from `TenantOwnedTables` (ADR-TENANCY-009) |
+| Inconsistent restore silently trusted | 8 | **CLOSED** — EVR-008, **ECL-5**, maturity **L1 → L4** | none — cursor consistency joined the invariant registry |
 | Demoted leader keeps running its workers | 16 | **CLOSED** — EVR-007, **ECL-5**, maturity **L1 → L3** | none — every worker Run loop is tree-swept for cancellation |
 | Privileged operational tooling outside the trust model | 10 | **CLOSED** — EVR-006, **ECL-5**, maturity **L1 → L4** | none — `cmd/` and `scripts/` both registry-guarded |
 | Cross-tenant key confusion (a client key as a global key) | 1 | **CLOSED** — EVR-005, **ECL-5**, maturity **L5 discovery / L4 justification** | none — every unique key on every tenant-owned table is discovered from the catalogue and must be tenant-keyed or justified |
@@ -287,8 +290,8 @@ evidence, residual risks, status. New investigations add their boundary here.
   advance past un-enqueued events.
 - **Recovery assumptions.** `webhook_cursor`/`policy_cursor` and `audit_event`
   are restored from one consistent snapshot (ADR-TENANCY-006). A cursor restored
-  ahead of its log would skip the missing range; a periodic "no cursor exceeds
-  its chain head" check is noted future hardening.
+  ahead of its log would skip the missing range. **Closed 2026-07-29 by
+  ADR-TENANCY-011**: `CursorValidator` is a registered platform invariant.
 - **Operational assumptions.** The only writers of these cursors are the tail
   loops; replay and administration do not move them. No operator tooling advances
   a cursor.
