@@ -2,8 +2,11 @@ package events
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
+
+	"github.com/rpsg/oneops/internal/domain"
 )
 
 // ReplayConfig parameterises the replay worker.
@@ -33,7 +36,6 @@ type ReplayWorker struct {
 	ops      DeliveryOps
 	metrics  ConsumeMetrics
 	log      *slog.Logger
-	newID    IDGen
 	now      func() time.Time
 	cfg      ReplayConfig
 }
@@ -49,7 +51,7 @@ func NewReplayWorker(jobs ReplayJobStore, source EventSource, webhooks WebhookSt
 	cfg.withDefaults()
 	return &ReplayWorker{
 		jobs: jobs, source: source, webhooks: webhooks, deliv: deliv, ops: ops,
-		metrics: metrics, log: log, newID: newDeliveryID, now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
+		metrics: metrics, log: log, now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
 	}
 }
 
@@ -87,12 +89,11 @@ func (w *ReplayWorker) RunOnce(ctx context.Context) {
 
 func (w *ReplayWorker) execute(ctx context.Context, job ReplayJob) {
 	start := w.now()
-	job.Status = JobRunning
-	job.UpdatedAt = start
-	if err := w.jobs.UpdateJob(ctx, job); err != nil {
-		w.log.Error("replay: mark running", "job_id", job.ID, "err", err)
-		return
-	}
+	// The claim already moved the job to running and stamped its token
+	// (ADR-CONCURRENCY-007); a separate "mark running" write here is what left
+	// the window in which a second worker could select the same pending job.
+	// job.ClaimedAt is carried into the outcome write below, which is fenced on
+	// it, so a worker that has lost the job cannot overwrite the owner's verdict.
 
 	n, err := w.run(ctx, job)
 	job.EventsReplayed = n
@@ -104,7 +105,25 @@ func (w *ReplayWorker) execute(ctx context.Context, job ReplayJob) {
 	} else {
 		job.Status = JobCompleted
 	}
-	_ = w.jobs.UpdateJob(ctx, job)
+	// The outcome is written on a context detached from the worker's, so a
+	// demotion or shutdown mid-replay cannot lose it (ADR-CONCURRENCY-008). The
+	// replay has already enqueued deliveries — an effect in the outside world —
+	// and this queue has no lease recovery (ADR-CONCURRENCY-007), so a lost
+	// outcome leaves the job stuck in `running` permanently.
+	octx, cancelOutcome := outcomeContext(ctx)
+	defer cancelOutcome()
+	if err := w.jobs.UpdateJob(octx, job); err != nil {
+		if errors.Is(err, ErrStaleClaim) {
+			// This worker no longer owns the job; the current owner records the
+			// authoritative outcome (ADR-CONCURRENCY-005/007).
+			w.log.Info("replay: job result fenced — claimed by another worker", "job_id", job.ID)
+			return
+		}
+		// The replay happened but could not be recorded. Say so, and do not let
+		// the success metrics below claim an outcome the database does not hold.
+		w.log.Error("replay: job ran but outcome not recorded", "job_id", job.ID, "err", err)
+		return
+	}
 
 	w.metrics.IncReplayJob()
 	w.metrics.AddReplayEvents(n)
@@ -114,7 +133,7 @@ func (w *ReplayWorker) execute(ctx context.Context, job ReplayJob) {
 func (w *ReplayWorker) run(ctx context.Context, job ReplayJob) (int, error) {
 	if len(job.DeliveryIDs) > 0 {
 		// Re-send existing deliveries by id (preserves everything).
-		return w.ops.Requeue(ctx, job.DeliveryIDs)
+		return w.ops.Requeue(ctx, job.WebhookID, job.DeliveryIDs)
 	}
 	return w.replayWindow(ctx, job)
 }
@@ -153,11 +172,16 @@ func (w *ReplayWorker) replayWindow(ctx context.Context, job ReplayJob) (int, er
 					continue
 				}
 				ev := eventFrom(evs[i])
-				if !wh.Matches(ev) {
+				// Replay re-enqueues committed deliveries, so it must apply the
+				// same ownership rule as the original fan-out or it becomes a
+				// second route to the same cross-tenant delivery.
+				if !domain.SameOwner(wh, ev) || !wh.Matches(ev) {
 					continue
 				}
 				batch = append(batch, Delivery{
-					ID: w.newID(), WebhookID: wh.ID, Event: ev,
+					// Deterministic id: replaying the same window is idempotent,
+					// re-enqueuing collides rather than duplicating (ADR-CONCURRENCY-003).
+					ID: DeliveryID(wh.ID, ev.ChainID, ev.Seq), WebhookID: wh.ID, Event: ev,
 					Status: StatusPending, NextAttemptAt: now, CreatedAt: now,
 				})
 			}

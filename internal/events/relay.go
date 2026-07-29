@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/rpsg/oneops/internal/domain"
 )
 
 // IDGen generates unique delivery ids. A default (crypto/rand hex) is provided.
@@ -37,7 +39,6 @@ type Relay struct {
 	deliv    DeliveryStore
 	metrics  Metrics
 	log      *slog.Logger
-	newID    IDGen
 	now      func() time.Time
 	cfg      RelayConfig
 }
@@ -53,7 +54,7 @@ func NewRelay(source EventSource, cursors CursorStore, webhooks WebhookStore, de
 	cfg.withDefaults()
 	return &Relay{
 		source: source, cursors: cursors, webhooks: webhooks, deliv: deliv,
-		metrics: metrics, log: log, newID: newDeliveryID, now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
+		metrics: metrics, log: log, now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
 	}
 }
 
@@ -121,10 +122,18 @@ func (r *Relay) tailChain(ctx context.Context, chainID string, subs []Webhook) {
 	maxSeq := cursor
 	for i := range evs {
 		ev := eventFrom(evs[i])
-		for _, wh := range subs {
-			if wh.Matches(ev) {
+		// domain.FanOut confines the cross-tenant subscription list to the
+		// event's owner before wh.Matches is consulted. The relay reads every
+		// tenant's chains and every tenant's subscriptions on a privileged
+		// connection; this is where that read stops being cross-tenant.
+		for _, wh := range domain.FanOut(ev, subs, func(w Webhook) bool { return w.Matches(ev) }) {
+			{
 				deliveries = append(deliveries, Delivery{
-					ID:            r.newID(),
+					// Deterministic identity makes production idempotent: a
+					// re-processed event (crash before cursor advance, or two
+					// relays during a leadership overlap) collides on the same id
+					// and does not become a duplicate row (ADR-CONCURRENCY-003).
+					ID:            DeliveryID(wh.ID, ev.ChainID, ev.Seq),
 					WebhookID:     wh.ID,
 					Event:         ev,
 					Status:        StatusPending,

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"time"
 )
@@ -39,6 +40,10 @@ type Payload struct {
 
 // EventType returns the canonical event type for an operation.
 func EventType(operation string) string { return "governance." + operation }
+
+// ErrNotAttempted reports that a delivery has no signature to show because no
+// attempt has been made (AR-001).
+var ErrNotAttempted = errors.New("events: delivery has not been attempted, so it has no sent headers")
 
 // BuildPayload constructs the delivery payload bytes and its timestamp.
 func BuildPayload(d Delivery, at time.Time) ([]byte, int64, error) {
@@ -88,8 +93,22 @@ func Verify(secret string, timestamp int64, deliveryID string, payload []byte, s
 // verbatim from the committed event fields (no event is reconstructed outside the
 // audit log); the signature is computed over it with the webhook secret at the
 // given display time.
-func DeliveryView(d Delivery, secret string, at time.Time) ([]byte, map[string]string, error) {
-	payload, ts, err := BuildPayload(d, at)
+func DeliveryView(d Delivery, secret string) ([]byte, map[string]string, error) {
+	// The timestamp comes from the record of the attempt, never from now.
+	//
+	// This used to take an `at` and callers passed time.Now(), so the headers
+	// shown for a past delivery carried a freshly minted timestamp and a
+	// signature over it — headers that were never sent. An operator could not
+	// use them to establish what the receiver should have verified, and after a
+	// secret rotation the signature was unrelated to anything that crossed the
+	// wire (AR-001, instance 3).
+	//
+	// A delivery that has not been attempted has no signature fact to report.
+	// Returning ErrNotAttempted is the honest answer; inventing one is the defect.
+	if d.SignedTS == 0 {
+		return nil, nil, ErrNotAttempted
+	}
+	payload, ts, err := BuildPayload(d, time.Unix(d.SignedTS, 0).UTC())
 	if err != nil {
 		return nil, nil, err
 	}

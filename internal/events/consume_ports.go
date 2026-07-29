@@ -31,6 +31,11 @@ type ReplayJob struct {
 	Error          string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+	// ClaimedAt is the fencing token: the moment this job was claimed by the
+	// worker now holding it, carried from ClaimPendingJobs into UpdateJob, which
+	// writes only if the job is still claimed under the same token
+	// (ADR-CONCURRENCY-007). Zero on jobs never claimed.
+	ClaimedAt time.Time
 }
 
 // ReplayJobStore persists replay jobs (its own table; never the audit schema).
@@ -46,7 +51,10 @@ type ReplayJobStore interface {
 // retention. It is additive to the delivery store — it adds no delivery logic.
 type DeliveryOps interface {
 	GetDelivery(ctx context.Context, id string) (Delivery, bool, error)
-	Requeue(ctx context.Context, ids []string) (int, error)
+	// Requeue resets the named deliveries of one webhook to pending. webhookID
+	// confines the write to the work the caller was given: keyed on ids alone it
+	// reset another tenant's deliveries (ADR-TENANCY-009).
+	Requeue(ctx context.Context, webhookID string, ids []string) (int, error)
 	RequeueDeadLetters(ctx context.Context, webhookID string) (int, error) // webhookID "" = all
 	ListDeadLetters(ctx context.Context, webhookID string, limit int) ([]Delivery, error)
 	DeleteOlderThan(ctx context.Context, cutoff time.Time, statuses []DeliveryStatus) (int, error)

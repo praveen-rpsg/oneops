@@ -80,7 +80,7 @@ func TestAppenderGenesisAndSecondAppend(t *testing.T) {
 	// Chain-head advanced to (2, e2.this).
 	tx, _ := pool.Begin(ctx)
 	defer func() { _ = tx.Rollback(ctx) }()
-	seq, hash, found, err := store.ReadChainHead(ctx, tx, chain, false)
+	seq, hash, found, err := store.ReadChainHead(ctx, tx, chain)
 	if err != nil || !found || seq != 2 || !bytes.Equal(hash, e2.ThisHash) {
 		t.Fatalf("head advancement: seq=%d found=%v err=%v", seq, found, err)
 	}
@@ -136,7 +136,7 @@ func TestAppenderRollbackOnAppendFailure(t *testing.T) {
 	}
 	tx, _ := pool.Begin(ctx)
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, _, found, _ := real.ReadChainHead(ctx, tx, chain, false); found {
+	if _, _, found, _ := real.ReadChainHead(ctx, tx, chain); found {
 		t.Fatal("chain head must not exist after rollback")
 	}
 }
@@ -176,7 +176,7 @@ func TestAppenderDuplicateEventConflict(t *testing.T) {
 	// Head remains at seq 1 (the conflicting append rolled back).
 	tx, _ := pool.Begin(ctx)
 	defer func() { _ = tx.Rollback(ctx) }()
-	seq, _, _, _ := store.ReadChainHead(ctx, tx, chain, false)
+	seq, _, _, _ := store.ReadChainHead(ctx, tx, chain)
 	if seq != 1 {
 		t.Fatalf("head advanced despite conflict: seq=%d", seq)
 	}
@@ -215,7 +215,7 @@ func TestAppenderConcurrentSerialization(t *testing.T) {
 	// FOR UPDATE serialization → head at n, contiguous seqs 1..n with no gaps.
 	tx, _ := pool.Begin(ctx)
 	defer func() { _ = tx.Rollback(ctx) }()
-	seq, _, _, _ := store.ReadChainHead(ctx, tx, chain, false)
+	seq, _, _, _ := store.ReadChainHead(ctx, tx, chain)
 	if seq != n {
 		t.Fatalf("head seq=%d, want %d (gap or duplicate seq)", seq, n)
 	}

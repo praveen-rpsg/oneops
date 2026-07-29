@@ -35,13 +35,17 @@ func (s *Server) createArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	obj := req.toDomain()
+	if err := obj.ValidateInception(); err != nil {
+		s.mapError(w, r, err)
+		return
+	}
 	if err := obj.Validate(); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	created, err := s.repo.Create(r.Context(), obj)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 
@@ -61,7 +65,7 @@ func (s *Server) createArtifact(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getArtifact(w http.ResponseWriter, r *http.Request) {
 	obj, err := s.repo.Get(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	tag := etag(obj.RowVersion)
@@ -81,7 +85,7 @@ func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	}
 	page, err := s.repo.List(r.Context(), params)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	items := make([]configObjectResponse, 0, len(page.Items))
@@ -110,24 +114,61 @@ func (s *Server) patchArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	patch, verr := req.toPatch()
 	if verr != nil {
-		mapError(w, r, verr)
+		s.mapError(w, r, verr)
 		return
 	}
-	updated, err := s.repo.Update(r.Context(), chi.URLParam(r, "id"), expected, patch)
+	// §9.3 enforcement on the patch path (CP-1.1 completed the invariants; this
+	// is the caller that was missing). The merge is validated BEFORE it is
+	// persisted. Patch can no longer touch a constitutional dimension, so the
+	// dimensions are carried through unchanged and the invariants hold by
+	// construction; what this catches is a field-level violation such as
+	// clearing retention_policy.
+	id := chi.URLParam(r, "id")
+	current, err := s.repo.Get(r.Context(), id)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
+		return
+	}
+	merged := *current
+	if patch.RatifiedBy != nil {
+		merged.RatifiedBy = *patch.RatifiedBy
+	}
+	if patch.ReviewCycle != nil {
+		merged.ReviewCycle = *patch.ReviewCycle
+	}
+	if patch.RetentionPolicy != nil {
+		merged.RetentionPolicy = *patch.RetentionPolicy
+	}
+	if err := merged.Validate(); err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+
+	updated, err := s.repo.Update(r.Context(), id, expected, patch)
+	if err != nil {
+		s.mapError(w, r, err)
 		return
 	}
 	w.Header().Set("ETag", etag(updated.RowVersion))
 	writeJSON(w, http.StatusOK, fromDomain(updated))
 }
 
+// deleteArtifact destroys a Configuration Object, which is a §8 constitutional
+// operation and is therefore executed by the Governance Engine — the same path
+// as DELETE /v1/governance/{id} (ADR-GOV-002).
+//
+// It previously issued a bare `DELETE FROM configuration_object` through the
+// repository, enforcing only the protected-role rule and nothing else. Proven
+// live: a ratified, current_baseline object that the engine refuses to delete
+// (409) was destroyed through this route (204), with the dependents check
+// skipped, its dependency edges silently cascaded away, and **no audit event
+// written at all**. A governed object could be erased with no record of who did
+// it or when.
+//
+// Destruction now goes through the one door that enforces §8: role protection,
+// working-material-only, the dependents check, and the atomic audit append.
 func (s *Server) deleteArtifact(w http.ResponseWriter, r *http.Request) {
-	if err := s.repo.Delete(r.Context(), chi.URLParam(r, "id")); err != nil {
-		mapError(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	s.execGovernance(w, r, domain.OpDeletion)
 }
 
 func (s *Server) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
@@ -143,6 +184,10 @@ func (s *Server) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 	objs := make([]*domain.ConfigObject, 0, len(req.Items))
 	for i, it := range req.Items {
 		o := it.toDomain()
+		if err := o.ValidateInception(); err != nil {
+			s.mapError(w, r, err)
+			return
+		}
 		if err := o.Validate(); err != nil {
 			writeProblem(w, r, http.StatusUnprocessableEntity, "validation failed",
 				fmt.Sprintf("items[%d]: %s", i, err.Error()))
@@ -152,7 +197,7 @@ func (s *Server) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := s.repo.BulkCreate(r.Context(), objs)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	items := make([]configObjectResponse, 0, len(created))

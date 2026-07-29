@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -46,18 +47,21 @@ func toReplayJobDTO(j events.ReplayJob) replayJobDTO {
 }
 
 type deliveryDetailDTO struct {
-	ID             string            `json:"id"`
-	WebhookID      string            `json:"webhook_id"`
-	Operation      string            `json:"operation"`
-	CfgID          string            `json:"cfg_id"`
-	Seq            int64             `json:"seq"`
-	Status         string            `json:"status"`
-	Attempts       int               `json:"attempts"`
-	LastStatusCode int               `json:"last_status_code"`
-	LastAttempt    time.Time         `json:"last_attempt,omitempty"`
-	NextAttemptAt  time.Time         `json:"next_attempt_at,omitempty"`
-	Headers        map[string]string `json:"headers"`
-	Payload        json.RawMessage   `json:"payload"`
+	ID             string    `json:"id"`
+	WebhookID      string    `json:"webhook_id"`
+	Operation      string    `json:"operation"`
+	CfgID          string    `json:"cfg_id"`
+	Seq            int64     `json:"seq"`
+	Status         string    `json:"status"`
+	Attempts       int       `json:"attempts"`
+	LastStatusCode int       `json:"last_status_code"`
+	LastAttempt    time.Time `json:"last_attempt,omitempty"`
+	NextAttemptAt  time.Time `json:"next_attempt_at,omitempty"`
+	// Where the most recent attempt actually went, captured at attempt time
+	// rather than derived from the subscription's current URL (ADR-GOV-004).
+	DeliveredTo string            `json:"delivered_to,omitempty"`
+	Headers     map[string]string `json:"headers"`
+	Payload     json.RawMessage   `json:"payload"`
 }
 
 func (s *Server) consumeReady(w http.ResponseWriter, r *http.Request) bool {
@@ -76,7 +80,7 @@ func (s *Server) replayWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	id := chi.URLParam(r, "id")
 	if _, err := s.webhooks.Get(r.Context(), id); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	var req replayRequest
@@ -96,7 +100,7 @@ func (s *Server) replayWebhook(w http.ResponseWriter, r *http.Request) {
 		job.To = *req.To
 	}
 	if err := s.replayJobs.CreateJob(r.Context(), job); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	s.log.Info("replay job created", "job_id", job.ID, "webhook_id", id, "request_id", RequestIDFrom(r.Context()))
@@ -111,27 +115,33 @@ func (s *Server) getDelivery(w http.ResponseWriter, r *http.Request) {
 	id, deliveryID := chi.URLParam(r, "id"), chi.URLParam(r, "deliveryID")
 	wh, err := s.webhooks.Get(r.Context(), id)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	d, ok, err := s.deliveryOps.GetDelivery(r.Context(), deliveryID)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	if !ok || d.WebhookID != id {
 		writeProblem(w, r, http.StatusNotFound, "not found", "no such delivery for this webhook")
 		return
 	}
-	payload, headers, err := events.DeliveryView(d, wh.Secret, time.Now().UTC())
-	if err != nil {
+	// Headers are rendered from the timestamp this delivery actually signed, not
+	// from now (AR-001). A delivery that was never attempted has no sent headers
+	// to show, and saying so is the honest answer.
+	payload, headers, err := events.DeliveryView(d, wh.Secret)
+	if errors.Is(err, events.ErrNotAttempted) {
+		payload, headers = nil, map[string]string{}
+	} else if err != nil {
 		writeProblem(w, r, http.StatusInternalServerError, "internal error", "could not render delivery")
 		return
 	}
 	writeJSON(w, http.StatusOK, deliveryDetailDTO{
 		ID: d.ID, WebhookID: d.WebhookID, Operation: d.Event.Operation, CfgID: d.Event.CfgID,
 		Seq: d.Event.Seq, Status: string(d.Status), Attempts: d.RetryCount, LastStatusCode: d.LastStatusCode,
-		LastAttempt: d.LastAttempt, NextAttemptAt: d.NextAttemptAt, Headers: headers, Payload: payload,
+		LastAttempt: d.LastAttempt, NextAttemptAt: d.NextAttemptAt, DeliveredTo: d.DeliveredTo,
+		Headers: headers, Payload: payload,
 	})
 }
 
@@ -143,16 +153,16 @@ func (s *Server) retryDelivery(w http.ResponseWriter, r *http.Request) {
 	id, deliveryID := chi.URLParam(r, "id"), chi.URLParam(r, "deliveryID")
 	d, ok, err := s.deliveryOps.GetDelivery(r.Context(), deliveryID)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	if !ok || d.WebhookID != id {
 		writeProblem(w, r, http.StatusNotFound, "not found", "no such delivery for this webhook")
 		return
 	}
-	n, err := s.deliveryOps.Requeue(r.Context(), []string{deliveryID})
+	n, err := s.deliveryOps.Requeue(r.Context(), id, []string{deliveryID})
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"requeued": n})
@@ -165,7 +175,7 @@ func (s *Server) listDeadLetters(w http.ResponseWriter, r *http.Request) {
 	}
 	ds, err := s.deliveryOps.ListDeadLetters(r.Context(), r.URL.Query().Get("webhook_id"), s.pageLimit(r))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	out := make([]deliveryDTO, 0, len(ds))
@@ -174,6 +184,7 @@ func (s *Server) listDeadLetters(w http.ResponseWriter, r *http.Request) {
 			ID: d.ID, WebhookID: d.WebhookID, Operation: d.Event.Operation, CfgID: d.Event.CfgID,
 			Seq: d.Event.Seq, Status: string(d.Status), RetryCount: d.RetryCount,
 			LastStatusCode: d.LastStatusCode, LastAttempt: d.LastAttempt, NextAttemptAt: d.NextAttemptAt,
+			DeliveredTo: d.DeliveredTo,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": out})
@@ -192,7 +203,7 @@ func (s *Server) retryDeadLetters(w http.ResponseWriter, r *http.Request) {
 	}
 	n, err := s.deliveryOps.RequeueDeadLetters(r.Context(), req.WebhookID)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	s.log.Info("dead-letters requeued", "count", n, "webhook_id", req.WebhookID, "request_id", RequestIDFrom(r.Context()))
@@ -206,7 +217,7 @@ func (s *Server) listReplayJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs, err := s.replayJobs.ListJobs(r.Context(), s.pageLimit(r))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	out := make([]replayJobDTO, 0, len(jobs))
@@ -223,7 +234,7 @@ func (s *Server) getReplayJob(w http.ResponseWriter, r *http.Request) {
 	}
 	j, ok, err := s.replayJobs.GetJob(r.Context(), chi.URLParam(r, "jobID"))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	if !ok {

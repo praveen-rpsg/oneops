@@ -36,8 +36,15 @@ type WebhookStore interface {
 // DeliveryStore persists delivery records and their status transitions.
 type DeliveryStore interface {
 	Enqueue(ctx context.Context, ds []Delivery) error
-	ClaimDue(ctx context.Context, now time.Time, limit int) ([]Delivery, error)
-	MarkResult(ctx context.Context, id string, status DeliveryStatus, retryCount, statusCode int, lastAttempt, nextAttempt time.Time) error
+	ClaimDue(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]Delivery, error)
+	// MarkResult records the outcome of an attempt together with the facts that
+	// attempt produced, in one fenced write so the facts are exactly as
+	// trustworthy as the outcome (ADR-GOV-004, AR-001). A zero AttemptFacts —
+	// an outcome reached without an attempt — records nothing and erases nothing.
+	MarkResult(ctx context.Context, id string, claimToken time.Time, status DeliveryStatus, retryCount, statusCode int, lastAttempt, nextAttempt time.Time, facts AttemptFacts) error
+	// ReleaseClaim returns an unused claim and the attempt it consumed, for a
+	// worker stopped between claiming and attempting (ADR-CONCURRENCY-006).
+	ReleaseClaim(ctx context.Context, id string, claimToken time.Time) error
 	ListByWebhook(ctx context.Context, webhookID string, limit int) ([]Delivery, error)
 }
 
@@ -46,3 +53,12 @@ type DeliveryStore interface {
 type HTTPDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
+
+// EventOwnerResolver and ErrEventNotFound are the shared execution-security
+// framework, defined in domain so the dispatcher and the policy executor use
+// one contract and one error value (ADR-TENANCY-003). Aliased here so this
+// package's call sites and fakes read naturally.
+type EventOwnerResolver = domain.EventOwnerResolver
+
+// ErrEventNotFound is domain.ErrEventNotFound.
+var ErrEventNotFound = domain.ErrEventNotFound

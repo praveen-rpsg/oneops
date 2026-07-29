@@ -17,7 +17,14 @@ const (
 
 // Config holds the resolved runtime configuration.
 type Config struct {
-	HTTPAddr      string
+	HTTPAddr string
+	// MetricsAddr binds the observability listener. /metrics is served there
+	// and not on the public listener, so scrape exposure is decided by
+	// deployment topology rather than by an authentication check Prometheus
+	// would have to be taught to satisfy. Empty keeps /metrics on the public
+	// listener, which is the pre-existing behaviour and is intended only for
+	// local development.
+	MetricsAddr   string
 	Env           string
 	ShutdownGrace int
 
@@ -37,14 +44,22 @@ type Config struct {
 	JWTHMACKey  string // HS256 dev/test secret; empty => RS256/JWKS
 	JWKSURL     string // RS256 public keys (OIDC)
 
+	// OIDC client identity for the browser console. The server never uses it —
+	// it is published at /auth/config so a per-deployment console can configure
+	// itself against the customer's own identity provider without a rebuild.
+	OIDCClientID string
+
 	// Observability.
 	ServiceName  string
 	OTLPEndpoint string // empty => tracing exporter disabled
 
 	// Audit-integrity verification scheduler (operational).
 	VerifyIntervalSeconds int // 0 => scheduler disabled
-	VerifyTimeoutSeconds  int // per-chain verification timeout
-	VerifyRetryAttempts   int // retries on transport error (never on a break)
+	// SchemaSentinelIntervalSeconds is how often the ownership-model schema
+	// invariants are re-verified for the life of the process (ADR-SECURITY-002).
+	SchemaSentinelIntervalSeconds int
+	VerifyTimeoutSeconds          int // per-chain verification timeout
+	VerifyRetryAttempts           int // retries on transport error (never on a break)
 
 	// Runtime profiling (operational). Disabled by default; mounts net/http/pprof.
 	PProfEnabled bool
@@ -52,6 +67,15 @@ type Config struct {
 	// Webhook delivery retention in hours (terminal deliveries older than this are
 	// pruned; pending/failed are never deleted). 0 disables deletion.
 	WebhookRetentionHours int
+
+	// WebhookAllowPrivateTargets disables the SSRF egress guard, permitting
+	// webhook and policy-action delivery to loopback, link-local, and private
+	// addresses. The secure default is false: the platform refuses to POST to
+	// non-public addresses so a tenant cannot make it a confused deputy against
+	// internal services or the cloud metadata endpoint (ADR-SECURITY-001). Set
+	// true only for a deployment whose delivery targets are legitimately on a
+	// private network and whose tenants are trusted to address them.
+	WebhookAllowPrivateTargets bool
 }
 
 // IsProduction reports whether the service runs in a production environment,
@@ -84,6 +108,13 @@ func (c *Config) validateProduction() error {
 	if strings.Contains(c.DatabaseURL, "sslmode=disable") {
 		problems = append(problems, "ONEOPS_DB_URL disables TLS (sslmode=disable)")
 	}
+	if c.MetricsAddr == "" {
+		// /metrics discloses audit-integrity state, per-route request volumes
+		// and dependency health to anyone who can reach the public listener.
+		// None of it is tenant data, but it tells an attacker when audit
+		// verification is failing.
+		problems = append(problems, "ONEOPS_METRICS_ADDR is empty, which serves /metrics on the public listener")
+	}
 	if len(problems) > 0 {
 		return fmt.Errorf("insecure production configuration: %s", strings.Join(problems, "; "))
 	}
@@ -94,6 +125,7 @@ func (c *Config) validateProduction() error {
 func Load() (*Config, error) {
 	c := &Config{
 		HTTPAddr:        getEnv("ONEOPS_HTTP_ADDR", ":8080"),
+		MetricsAddr:     getEnv("ONEOPS_METRICS_ADDR", ":9090"),
 		Env:             getEnv("ONEOPS_ENV", "dev"),
 		ShutdownGrace:   getEnvInt("ONEOPS_SHUTDOWN_GRACE_SECONDS", 10),
 		DatabaseURL:     getEnv("ONEOPS_DB_URL", "postgres://oneops:dev@localhost:5432/oneops?sslmode=disable"),
@@ -106,16 +138,19 @@ func Load() (*Config, error) {
 		JWTAudience:     getEnv("ONEOPS_JWT_AUDIENCE", "oneops"),
 		JWTHMACKey:      getEnv("ONEOPS_JWT_HMAC_KEY", "dev-insecure-secret-change-me"),
 		JWKSURL:         getEnv("ONEOPS_JWKS_URL", ""),
+		OIDCClientID:    getEnv("ONEOPS_OIDC_CLIENT_ID", ""),
 		ServiceName:     getEnv("ONEOPS_SERVICE_NAME", "oneops-controlplane"),
 		OTLPEndpoint:    getEnv("ONEOPS_OTLP_ENDPOINT", ""),
 
-		VerifyIntervalSeconds: getEnvInt("ONEOPS_AUDIT_VERIFY_INTERVAL_SECONDS", 300),
-		VerifyTimeoutSeconds:  getEnvInt("ONEOPS_AUDIT_VERIFY_TIMEOUT_SECONDS", 30),
-		VerifyRetryAttempts:   getEnvInt("ONEOPS_AUDIT_VERIFY_RETRY_ATTEMPTS", 2),
+		VerifyIntervalSeconds:         getEnvInt("ONEOPS_AUDIT_VERIFY_INTERVAL_SECONDS", 300),
+		SchemaSentinelIntervalSeconds: getEnvInt("ONEOPS_SCHEMA_SENTINEL_INTERVAL_SECONDS", 30),
+		VerifyTimeoutSeconds:          getEnvInt("ONEOPS_AUDIT_VERIFY_TIMEOUT_SECONDS", 30),
+		VerifyRetryAttempts:           getEnvInt("ONEOPS_AUDIT_VERIFY_RETRY_ATTEMPTS", 2),
 
 		PProfEnabled: getEnvBool("ONEOPS_PPROF_ENABLED", false),
 
-		WebhookRetentionHours: getEnvInt("ONEOPS_WEBHOOK_RETENTION_HOURS", 720),
+		WebhookRetentionHours:      getEnvInt("ONEOPS_WEBHOOK_RETENTION_HOURS", 720),
+		WebhookAllowPrivateTargets: getEnvBool("ONEOPS_WEBHOOK_ALLOW_PRIVATE_TARGETS", false),
 	}
 	if c.ShutdownGrace < 0 {
 		return nil, fmt.Errorf("ONEOPS_SHUTDOWN_GRACE_SECONDS must be >= 0, got %d", c.ShutdownGrace)

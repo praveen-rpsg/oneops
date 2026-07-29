@@ -110,6 +110,28 @@ func planTransition(op domain.ConfigurationOperation, obj *domain.ConfigObject, 
 			Edge:      &edgeSpec{From: cmd.SuccessorID, To: cmd.CfgID, Kind: domain.EdgeKindExtends},
 		}, nil
 
+	case domain.OpReplacement:
+		// §8 Replacement: the successor supersedes the base. Base Authority →
+		// Historical, Retention → Historical Record, Superseded By = successor.
+		// Lifecycle is not named among the outputs and is therefore unchanged.
+		//
+		// The four-part Replacement Test is §8's precondition, but it cannot be
+		// checked here: planTransition is a pure function and the test requires
+		// I/O over the authority graph. The engine enforces it in Execute, which
+		// owns the context — see ErrReplacementTestFailed.
+		if cmd.SuccessorID == "" {
+			return plan{}, invalid(op, obj, "successor_id is required")
+		}
+		if cmd.SuccessorID == cmd.CfgID {
+			return plan{}, invalid(op, obj, "an object cannot supersede itself")
+		}
+		return plan{
+			Lifecycle: obj.Lifecycle,
+			Retention: domain.RetentionHistoricalRecord,
+			Authority: domain.AuthorityHistorical,
+			Edge:      &edgeSpec{From: cmd.SuccessorID, To: cmd.CfgID, Kind: domain.EdgeKindSupersedes},
+		}, nil
+
 	case domain.OpSuspension:
 		// Resumable work → Suspended; Authority unchanged.
 		if obj.Lifecycle == domain.LifecycleWithdrawn || obj.Lifecycle == domain.LifecycleSuspended {
@@ -144,6 +166,14 @@ func planTransition(op domain.ConfigurationOperation, obj *domain.ConfigObject, 
 		return plan{Lifecycle: obj.Lifecycle, Retention: cmd.TargetRetention, Authority: obj.Authority}, nil
 
 	case domain.OpDeletion:
+		// §8 Deletion is "Never permitted for Constitution/Governance/Validation/
+		// Evidence/Audit". That prohibition is on the ROLE alone and is absolute:
+		// it is checked before Retention, because no retention class makes such an
+		// object deletable. This is Historical Preservation's standing guarantee —
+		// §8 records no audit event for it, so it is a guard, not an operation.
+		if obj.Role.ProtectedFromDeletion() {
+			return plan{}, invalid(op, obj, "role "+string(obj.Role)+" may never be deleted")
+		}
 		// Only Working Material may be removed (dependents checked by the engine).
 		if obj.RetentionClass != domain.RetentionWorkingMaterial {
 			return plan{}, invalid(op, obj, "only working_material may be deleted")

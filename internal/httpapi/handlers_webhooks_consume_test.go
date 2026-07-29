@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -16,10 +17,11 @@ import (
 )
 
 type fakeConsume struct {
-	deliveries map[string]events.Delivery
-	jobs       map[string]events.ReplayJob
-	requeued   []string
-	dlRetried  int
+	deliveries  map[string]events.Delivery
+	jobs        map[string]events.ReplayJob
+	requeued    []string
+	requeuedFor string
+	dlRetried   int
 }
 
 func newFakeConsume() *fakeConsume {
@@ -30,7 +32,11 @@ func (f *fakeConsume) GetDelivery(_ context.Context, id string) (events.Delivery
 	d, ok := f.deliveries[id]
 	return d, ok, nil
 }
-func (f *fakeConsume) Requeue(_ context.Context, ids []string) (int, error) {
+
+// Requeue records the webhook it was scoped to, so a test can assert the
+// containment the store enforces (ADR-TENANCY-009).
+func (f *fakeConsume) Requeue(_ context.Context, webhookID string, ids []string) (int, error) {
+	f.requeuedFor = webhookID
 	f.requeued = append(f.requeued, ids...)
 	return len(ids), nil
 }
@@ -107,9 +113,15 @@ func TestReplayEndpointCreatesJob(t *testing.T) {
 func TestDeliveryInspection(t *testing.T) {
 	h, reg, con := newConsumeAPI(t)
 	_ = reg.Create(context.Background(), events.Webhook{ID: "wh_1", URL: "https://x", Secret: "s3cr3t", Enabled: true})
+	// A delivered delivery carries the facts of its attempt: where it went and
+	// the timestamp it signed (AR-001). Headers are rendered from those, so the
+	// fixture must have them — an unattempted delivery has no sent headers, which
+	// is asserted separately below.
+	const signedTS = int64(1700000000)
 	con.deliveries["d1"] = events.Delivery{
 		ID: "d1", WebhookID: "wh_1", Status: events.StatusDelivered, RetryCount: 2, LastStatusCode: 200,
-		Event: events.Event{Operation: "ratification", ChainID: "c1", CfgID: "c1", Seq: 1, EventID: "evt_1"},
+		Event:       events.Event{Operation: "ratification", ChainID: "c1", CfgID: "c1", Seq: 1, EventID: "evt_1"},
+		DeliveredTo: "https://x", SignedTS: signedTS,
 	}
 	rec := do(h, http.MethodGet, "/v1/admin/webhooks/wh_1/deliveries/d1", nil, nil)
 	if rec.Code != http.StatusOK {
@@ -126,6 +138,33 @@ func TestDeliveryInspection(t *testing.T) {
 	if sig == "" || ts == "" {
 		t.Fatalf("missing signature headers: %v", detail.Headers)
 	}
+	// The rendered timestamp is the one that was signed, not the time of the
+	// request: rendering it afresh would show headers that were never sent
+	// (AR-001).
+	if ts != strconv.FormatInt(signedTS, 10) {
+		t.Errorf("rendered timestamp = %s, want the recorded %d — the headers shown would not be "+
+			"the ones sent", ts, signedTS)
+	}
+	if detail.DeliveredTo != "https://x" {
+		t.Errorf("delivered_to = %q, want the recorded destination", detail.DeliveredTo)
+	}
+
+	// A delivery that was never attempted has no sent headers, and the endpoint
+	// says so rather than minting a signature that never crossed the wire.
+	con.deliveries["d2"] = events.Delivery{
+		ID: "d2", WebhookID: "wh_1", Status: events.StatusPending,
+		Event: events.Event{Operation: "ratification", ChainID: "c1", CfgID: "c1", Seq: 2, EventID: "evt_2"},
+	}
+	r3 := do(h, http.MethodGet, "/v1/admin/webhooks/wh_1/deliveries/d2", nil, nil)
+	if r3.Code != http.StatusOK {
+		t.Fatalf("unattempted delivery: status = %d", r3.Code)
+	}
+	var pending deliveryDetailDTO
+	_ = json.Unmarshal(r3.Body.Bytes(), &pending)
+	if len(pending.Headers) != 0 {
+		t.Errorf("an unattempted delivery reported sent headers %v — they were never sent",
+			pending.Headers)
+	}
 	// Wrong webhook -> 404.
 	if r2 := do(h, http.MethodGet, "/v1/admin/webhooks/other/deliveries/d1", nil, nil); r2.Code != http.StatusNotFound {
 		t.Fatalf("cross-webhook: status = %d, want 404", r2.Code)
@@ -139,6 +178,12 @@ func TestRetryDeliveryAndDeadLetters(t *testing.T) {
 
 	if rec := do(h, http.MethodPost, "/v1/admin/webhooks/wh_1/deliveries/d1/retry", nil, nil); rec.Code != http.StatusOK {
 		t.Fatalf("retry status = %d", rec.Code)
+	}
+	// The requeue must be scoped to the webhook in the route, so it cannot reach
+	// another owner's deliveries (ADR-TENANCY-009).
+	if con.requeuedFor != "wh_1" {
+		t.Errorf("requeue was scoped to %q, want the route's webhook — an unscoped requeue "+
+			"resets deliveries the caller does not own", con.requeuedFor)
 	}
 	if len(con.requeued) != 1 || con.requeued[0] != "d1" {
 		t.Fatalf("requeued = %v", con.requeued)

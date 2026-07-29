@@ -109,13 +109,31 @@ paths:
         '412': { $ref: '#/components/responses/Problem' }
         '428': { $ref: '#/components/responses/Problem' }
     delete:
-      summary: Delete a configuration object
+      summary: Delete a working-material configuration object
+      description: >
+        Destroying a Configuration Object is a §8 constitutional operation and is
+        executed by the Governance Engine, identically to
+        DELETE /v1/governance/{id}: deletion is permitted only for
+        working_material with no dependents, protected roles are never deletable,
+        and the removal is recorded in the object's audit chain.
+
+
+        Breaking change (ADR-GOV-002): this route previously performed an
+        unaudited delete that enforced only the protected-role rule. It now
+        requires an Idempotency-Key, returns 200 with the governance result
+        instead of 204, and returns 409 where it formerly destroyed a governed
+        object.
       operationId: deleteArtifact
+      security: [ { bearerAuth: [] } ]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/IfMatch' }
       responses:
-        '204': { description: Deleted }
+        '200': { $ref: '#/components/responses/GovernanceResult' }
+        '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
   /v1/configurations/{cfgId}/dependencies:
     get:
       summary: Dependencies of a configuration object (forward graph)
@@ -260,6 +278,43 @@ paths:
                 successor_id:
                   type: string
                   description: The configuration object that extends this one.
+      responses:
+        '200': { $ref: '#/components/responses/GovernanceResult' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '412': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1/governance/{id}/replace:
+    post:
+      summary: Supersede this configuration object with a successor
+      description: >
+        Configuration State Model §8 Replacement. Gated by the four-part
+        Replacement Test (§9.1): the successor must own every responsibility of
+        the base, no Active artifact may cite the base, no Active configuration
+        may depend on it, and its removal must leave no operational gap. On
+        success the base moves to Authority=historical and
+        Retention=historical_record, and a supersedes edge is recorded. A failed
+        test returns 409 naming the clause that failed.
+      operationId: replaceGovernance
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/IfMatch' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [successor_id]
+              properties:
+                successor_id:
+                  type: string
+                  description: The configuration object that supersedes this one.
       responses:
         '200': { $ref: '#/components/responses/GovernanceResult' }
         '400': { $ref: '#/components/responses/Problem' }
@@ -696,6 +751,71 @@ paths:
 
   # Policy automation (admin). Policies react to committed governance events; they
   # never participate in governance execution.
+  /v1/admin/tenants:
+    get:
+      summary: List tenants
+      description: >-
+        Returns every registered tenant. Administering tenants is strictly more
+        privileged than administering data inside one, so this requires admin.
+      operationId: listTenants
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Tenants
+          content: { application/json: { schema: { $ref: '#/components/schemas/TenantList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Register a tenant
+      description: >-
+        Creates an isolation boundary. The tenant_id is minted server-side so a
+        caller cannot choose an identifier that collides with the system tenant.
+      operationId: createTenant
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateTenantRequest' } } }
+      responses:
+        '201':
+          description: Created tenant
+          content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/tenants/{id}:
+    patch:
+      summary: Suspend or reactivate a tenant
+      description: >-
+        Suspension is the only mutation the registry exposes. A tenant is never
+        deleted: its audit history is append-only by constitutional guarantee,
+        so removing the tenant would orphan records that cannot be removed. The
+        system tenant cannot be suspended — doing so would lock the platform out
+        of every row written before tenancy existed.
+      operationId: patchTenant
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PatchTenantRequest' } } }
+      responses:
+        '200':
+          description: Updated tenant
+          content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
   /v1/admin/policies:
     get:
       summary: List policies
@@ -976,6 +1096,59 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/GovernanceResponse' }
   schemas:
+    Tenant:
+      type: object
+      required: [tenant_id, slug, name, status, row_version, created_at, updated_at]
+      properties:
+        tenant_id:
+          type: string
+          description: Platform-minted identifier. Never supplied by the caller.
+        slug:
+          type: string
+          description: Lowercase DNS-style label, 2-63 characters.
+          pattern: '^[a-z0-9][a-z0-9-]{1,62}$'
+        name: { type: string }
+        external_id:
+          type: string
+          description: >-
+            Identifier the identity provider asserts for this tenant (Entra tid,
+            Okta org id). Bearer tokens are resolved against this, never against
+            tenant_id, so the IdP can change without rewriting foreign keys.
+            Empty until an identity provider is bound.
+        status:
+          type: string
+          enum: [active, suspended]
+        row_version:
+          type: integer
+          format: int64
+          description: Optimistic-concurrency guard.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TenantList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Tenant' }
+    CreateTenantRequest:
+      type: object
+      required: [slug, name]
+      properties:
+        slug:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9-]{1,62}$'
+        name: { type: string }
+        external_id:
+          type: string
+          description: Optional. Must be unique across tenants when non-empty.
+    PatchTenantRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [active, suspended]
     GovernanceArchiveRequest:
       type: object
       required: [target_retention]
@@ -1403,24 +1576,38 @@ components:
       enum: [current_baseline, current_planning, historical_record, superseded_planning, historical_evidence, audit_record, working_material]
     CreateRequest:
       type: object
+      description: >
+        Creates a Configuration Object in its inception state (INT-3): lifecycle
+        must be draft or in_progress, and retention_class must be
+        working_material. Every other state is reached through a §8 governance
+        operation. Authority is not accepted — it is a computed field (§6) and
+        is assigned by the platform.
       required: [artifact, version, role, lifecycle, retention_class]
       properties:
         artifact: { type: string }
         version: { type: string, example: "1.0.0" }
         role: { $ref: '#/components/schemas/Role' }
-        lifecycle: { $ref: '#/components/schemas/Lifecycle' }
-        retention_class: { $ref: '#/components/schemas/RetentionClass' }
-        authority: { $ref: '#/components/schemas/Authority' }
+        lifecycle:
+          type: string
+          enum: [draft, in_progress]
+          description: Inception lifecycle only (INT-3).
+        retention_class:
+          type: string
+          enum: [working_material]
+          description: Inception retention only (INT-3).
         ratified_by: { type: string }
         review_cycle: { type: string }
         retention_policy: { type: string }
         metadata: { type: object, additionalProperties: { type: string } }
     PatchRequest:
       type: object
+      description: >
+        Non-constitutional fields only. Lifecycle, retention_class and authority
+        cannot be patched: §8 permits no dimension change except through a
+        governance operation, and authority is computed (§6). The metadata keys
+        responsibilities, citations and coverage are §9.1 inputs and are
+        rejected here.
       properties:
-        lifecycle: { $ref: '#/components/schemas/Lifecycle' }
-        retention_class: { $ref: '#/components/schemas/RetentionClass' }
-        authority: { $ref: '#/components/schemas/Authority' }
         ratified_by: { type: string }
         review_cycle: { type: string }
         retention_policy: { type: string }

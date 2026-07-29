@@ -29,7 +29,7 @@ func NewAuditStore(pool *pgxpool.Pool) *AuditStore {
 // auditEventCols is the projection for reads. The derived payload jsonb column is
 // not read back: payload_canonical is the hashed source of truth.
 const auditEventCols = `chain_id, seq, event_id, operation_id, operation, actor,
-	payload_canonical, prev_hash, this_hash, occurred_at`
+	payload_canonical, prev_hash, this_hash, occurred_at, tenant_id`
 
 // AppendAuditEvent inserts one fully-formed audit event within the caller's
 // transaction. The derived payload jsonb column is populated from the already
@@ -39,10 +39,11 @@ func (s *AuditStore) AppendAuditEvent(ctx context.Context, tx pgx.Tx, e *domain.
 	_, err := tx.Exec(ctx, `
 		INSERT INTO audit_event
 			(chain_id, seq, event_id, operation_id, operation, actor,
-			 payload_canonical, payload, prev_hash, this_hash, occurred_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,convert_from($7,'UTF8')::jsonb,$8,$9,$10)`,
+			 payload_canonical, payload, prev_hash, this_hash, occurred_at, tenant_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,convert_from($7,'UTF8')::jsonb,$8,$9,$10,$11)`,
 		e.ChainID, e.Seq, e.EventID, e.OperationID, string(e.Operation), e.Actor,
-		e.PayloadCanonical, e.PrevHash, e.ThisHash, e.OccurredAt)
+		e.PayloadCanonical, e.PrevHash, e.ThisHash, e.OccurredAt,
+		domain.TenantIDFrom(ctx))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return domain.ErrConflict
@@ -58,9 +59,10 @@ func (s *AuditStore) AppendAuditEvent(ctx context.Context, tx pgx.Tx, e *domain.
 // a create race (ADR-AUDIT-004). genesisHash must be 32 bytes.
 func (s *AuditStore) EnsureChainHead(ctx context.Context, tx pgx.Tx, chainID string, genesisHash []byte) error {
 	_, err := tx.Exec(ctx, `
-		INSERT INTO audit_chain_head (chain_id, last_seq, last_hash)
-		VALUES ($1, 0, $2)
-		ON CONFLICT (chain_id) DO NOTHING`, chainID, genesisHash)
+		INSERT INTO audit_chain_head (chain_id, last_seq, last_hash, tenant_id)
+		VALUES ($1, 0, $2, $3)
+		ON CONFLICT (chain_id) DO NOTHING`, chainID, genesisHash,
+		domain.TenantIDFrom(ctx))
 	if err != nil {
 		return fmt.Errorf("ensure chain head: %w", err)
 	}
@@ -70,7 +72,29 @@ func (s *AuditStore) EnsureChainHead(ctx context.Context, tx pgx.Tx, chainID str
 // ReadChainHead returns the current last_seq and last_hash for chainID. When
 // forUpdate is true the row is locked FOR UPDATE (use inside the append
 // transaction). found is false when no head row exists.
-func (s *AuditStore) ReadChainHead(ctx context.Context, tx pgx.Tx, chainID string, forUpdate bool) (lastSeq int64, lastHash []byte, found bool, err error) {
+func (s *AuditStore) ReadChainHead(ctx context.Context, tx pgx.Tx, chainID string) (lastSeq int64, lastHash []byte, found bool, err error) {
+	return s.readChainHead(ctx, tx, chainID, false)
+}
+
+// ReadChainHeadForUpdate reads the head under `FOR UPDATE`, serialising every
+// concurrent appender on this chain.
+//
+// This is a separate method rather than a boolean because the lock is the most
+// load-bearing invariant in the platform: the gapless committed prefix
+// (ADR-CONCURRENCY-004, "no lost events") and audit-derived ownership
+// (ADR-TENANCY-003/004) both rest on it. Proven live: 12 concurrent appends take
+// seqs 1..12 under the lock; without it only 4 of 12 commit and the rest are
+// rejected by the (chain_id, seq) backstop — eight governance operations lost.
+//
+// As a boolean argument the unsafe form was expressible by accident and guarded
+// only by an integration test. As a distinct name it cannot be reached by
+// forgetting an argument; choosing the non-locking read is a visible, reviewable
+// act (ADR-AUDIT-006).
+func (s *AuditStore) ReadChainHeadForUpdate(ctx context.Context, tx pgx.Tx, chainID string) (lastSeq int64, lastHash []byte, found bool, err error) {
+	return s.readChainHead(ctx, tx, chainID, true)
+}
+
+func (s *AuditStore) readChainHead(ctx context.Context, tx pgx.Tx, chainID string, forUpdate bool) (lastSeq int64, lastHash []byte, found bool, err error) {
 	q := `SELECT last_seq, last_hash FROM audit_chain_head WHERE chain_id = $1`
 	if forUpdate {
 		q += ` FOR UPDATE`
@@ -90,12 +114,13 @@ func (s *AuditStore) ReadChainHead(ctx context.Context, tx pgx.Tx, chainID strin
 // AppendAuditEvent that produced the new hash.
 func (s *AuditStore) UpsertChainHead(ctx context.Context, tx pgx.Tx, chainID string, lastSeq int64, lastHash []byte) error {
 	_, err := tx.Exec(ctx, `
-		INSERT INTO audit_chain_head (chain_id, last_seq, last_hash, updated_at)
-		VALUES ($1, $2, $3, now())
+		INSERT INTO audit_chain_head (chain_id, last_seq, last_hash, updated_at, tenant_id)
+		VALUES ($1, $2, $3, now(), $4)
 		ON CONFLICT (chain_id) DO UPDATE
 		   SET last_seq = EXCLUDED.last_seq,
 		       last_hash = EXCLUDED.last_hash,
-		       updated_at = now()`, chainID, lastSeq, lastHash)
+		       updated_at = now()`, chainID, lastSeq, lastHash,
+		domain.TenantIDFrom(ctx))
 	if err != nil {
 		return fmt.Errorf("upsert chain head: %w", err)
 	}
@@ -187,6 +212,84 @@ func (s *AuditStore) ReadEvent(ctx context.Context, chainID string, seq int64) (
 	return e, nil
 }
 
+// ResolveEventOwner returns the tenant that owns the committed event at
+// (chainID, seq), read straight from the append-only audit log.
+//
+// This is the authoritative source for execution-time ownership (ADR-TENANCY-003,
+// ADR-TENANCY-004). It does not trust audit_event.tenant_id alone.
+//
+// A chain is the history of one governed object: chain_id equals the object's
+// cfg_id. The object's own tenant_id is the root of authority — it is
+// RLS-enforced at write time and cannot be set cross-tenant. audit_event.tenant_id
+// is a denormalized copy written beside it. The two are read together and
+// required to agree.
+//
+// Reading only the copy was exploitable: a partial restore, an operator INSERT,
+// a legacy backfill or split-brain history can leave an audit row labelled with
+// a different tenant than the object it records. Verified against the running
+// service — a row appended to a victim's chain but labelled with an attacker's
+// tenant caused the victim's event to be delivered to the attacker, because the
+// resolver and the corrupted value were the same row. Cross-checking against the
+// object detects the divergence.
+//
+// Failure modes, all closed:
+//   - no committed event, or the chain has no governed object (deleted or
+//     orphaned): domain.ErrEventNotFound;
+//   - the object's owner and the audit label disagree: domain.ErrOwnershipAmbiguous,
+//     which the consumers treat as a refusal and which startup validation
+//     refuses to boot on.
+func (s *AuditStore) ResolveEventOwner(ctx context.Context, chainID string, seq int64) (string, error) {
+	var root, labeled string
+	err := s.pool.QueryRow(ctx, `
+		SELECT co.tenant_id, ae.tenant_id
+		  FROM audit_event ae
+		  JOIN configuration_object co ON co.cfg_id = ae.chain_id
+		  JOIN tenant t ON t.tenant_id = co.tenant_id
+		 WHERE ae.chain_id = $1 AND ae.seq = $2`,
+		chainID, seq).Scan(&root, &labeled)
+	// The join to tenant is deliberate: the resolved owner must be a live tenant.
+	// A tenant-registry restore can leave a governed object owned by a tenant no
+	// longer in the registry (verified against the running service). Without this
+	// join the resolver would return that ghost owner and the platform would act
+	// for a tenant that does not exist. With it, an owner that is not a live
+	// tenant makes the event unresolvable — fail closed, not guess.
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", domain.ErrEventNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve event owner: %w", err)
+	}
+	if root != labeled {
+		return "", fmt.Errorf("%w: chain %s seq %d: object owner %q, audit label %q",
+			domain.ErrOwnershipAmbiguous, chainID, seq, root, labeled)
+	}
+	return root, nil
+}
+
+// ValidateOwnershipConsistency reports whether the audit log's ownership agrees
+// with the governed objects it records, across every chain.
+//
+// It is run at startup. A divergence means authoritative ownership is ambiguous
+// somewhere — a partial restore, an operator error, split-brain history — and
+// the platform must not begin performing outbound actions on it. The check is a
+// single indexed anti-join and returns the count and one example so the operator
+// can locate the corruption.
+//
+// Orphaned chains (audit events whose object was deleted) are deliberately not
+// flagged: append-only audit outlives its object by design, and the runtime
+// resolver already refuses such chains as unresolvable.
+func (s *AuditStore) ValidateOwnershipConsistency(ctx context.Context) (divergent int, example string, err error) {
+	err = s.pool.QueryRow(ctx, `
+		SELECT count(*), COALESCE(min(ae.chain_id), '')
+		  FROM audit_event ae
+		  JOIN configuration_object co ON co.cfg_id = ae.chain_id
+		 WHERE ae.tenant_id <> co.tenant_id`).Scan(&divergent, &example)
+	if err != nil {
+		return 0, "", fmt.Errorf("validate ownership consistency: %w", err)
+	}
+	return divergent, example, nil
+}
+
 // VerifyRangeReader streams the events of chainID with seq in [fromSeq, toSeq]
 // in ascending seq order, invoking fn for each. It is the read path the verifier
 // uses to recompute the chain; it performs no verification itself. If fn returns
@@ -224,7 +327,7 @@ func scanAuditEvent(sc rowScanner) (*domain.AuditEvent, error) {
 	var op string
 	if err := sc.Scan(
 		&e.ChainID, &e.Seq, &e.EventID, &e.OperationID, &op, &e.Actor,
-		&e.PayloadCanonical, &e.PrevHash, &e.ThisHash, &e.OccurredAt,
+		&e.PayloadCanonical, &e.PrevHash, &e.ThisHash, &e.OccurredAt, &e.TenantID,
 	); err != nil {
 		return nil, err
 	}

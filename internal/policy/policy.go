@@ -9,14 +9,24 @@ package policy
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/rpsg/oneops/internal/domain"
 )
 
+// ErrStaleClaim is returned by MarkResult when the execution row was reclaimed by
+// another worker before this one recorded its result: the fencing token no longer
+// matches, so nothing was written. Not a failure — the signal that this worker
+// was evicted mid-flight and its result must be discarded (ADR-CONCURRENCY-005).
+var ErrStaleClaim = errors.New("policy: execution result fenced — row reclaimed by another worker")
+
 // Event is a committed governance event projected from an audit event and
 // evaluated by policy conditions. Conditions match ONLY this published event.
 type Event struct {
+	// TenantID owns the event. Read from the audit row, never inferred: the
+	// consumer tails every tenant's chains on a privileged connection.
+	TenantID    string
 	EventID     string
 	OperationID string
 	Operation   string
@@ -33,7 +43,8 @@ type Event struct {
 // into matchable metadata. It reads only committed data; it reconstructs nothing.
 func eventFrom(a domain.AuditEvent) Event {
 	ev := Event{
-		EventID: a.EventID, OperationID: a.OperationID, Operation: string(a.Operation),
+		TenantID: a.TenantID,
+		EventID:  a.EventID, OperationID: a.OperationID, Operation: string(a.Operation),
 		Actor: a.Actor, CfgID: a.ChainID, Seq: a.Seq, OccurredAt: a.OccurredAt,
 		Metadata: map[string]string{},
 	}
@@ -109,7 +120,10 @@ type ActionSpec struct {
 // Policy is an operator-defined automation: when a committed event matches
 // Condition, Action is executed asynchronously.
 type Policy struct {
-	ID         string
+	ID string
+	// TenantID owns the policy. Compared against the event's owner by
+	// domain.FanOut before the condition is evaluated.
+	TenantID   string
 	Name       string
 	Enabled    bool
 	Condition  Condition
@@ -118,6 +132,12 @@ type Policy struct {
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 }
+
+// OwnerTenantID implements domain.Owned.
+func (p Policy) OwnerTenantID() string { return p.TenantID }
+
+// OwnerTenantID implements domain.Owned.
+func (e Event) OwnerTenantID() string { return e.TenantID }
 
 // ExecutionStatus is the lifecycle state of a policy execution.
 type ExecutionStatus string
@@ -144,6 +164,12 @@ type Execution struct {
 	EndedAt       time.Time
 	NextAttemptAt time.Time
 	CreatedAt     time.Time
+	// ClaimedAt is the fencing token (see events.Delivery.ClaimedAt): the moment
+	// this execution row was claimed by the worker now holding it. A worker whose
+	// lease expired and whose row was reclaimed holds a stale token and is fenced
+	// out of MarkResult, so its late completion cannot corrupt the reclaimer's
+	// state (ADR-CONCURRENCY-005). Zero on rows never claimed (the admin test path).
+	ClaimedAt time.Time
 }
 
 func contains(xs []string, x string) bool {

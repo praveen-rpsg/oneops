@@ -40,7 +40,7 @@ func (s *Server) getComplianceSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	sum, err := s.compliance.Summary(r.Context(), chi.URLParam(r, "governanceID"))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, sum)
@@ -53,7 +53,7 @@ func (s *Server) getComplianceChecks(w http.ResponseWriter, r *http.Request) {
 	}
 	checks, err := s.compliance.Checks(r.Context(), chi.URLParam(r, "governanceID"))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": checks})
@@ -68,7 +68,7 @@ func (s *Server) getComplianceEvidence(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "governanceID")
 	ev, err := s.compliance.Evidence(r.Context(), id)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	if r.URL.Query().Get("format") == "zip" {
@@ -99,7 +99,7 @@ func (s *Server) getComplianceReports(w http.ResponseWriter, r *http.Request) {
 	}
 	page, err := s.compliance.Reports(r.Context(), r.URL.Query().Get("cursor"), s.pageLimit(r))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, page)

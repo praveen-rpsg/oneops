@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/rpsg/oneops/internal/events"
+	"github.com/rpsg/oneops/internal/safehttp"
 )
 
 // webhookRegistry is the read/write surface the admin webhook API depends on.
@@ -90,6 +91,11 @@ type deliveryDTO struct {
 	LastStatusCode int       `json:"last_status_code"`
 	LastAttempt    time.Time `json:"last_attempt,omitempty"`
 	NextAttemptAt  time.Time `json:"next_attempt_at,omitempty"`
+	// DeliveredTo is where the most recent attempt actually went, recorded at
+	// attempt time. It is deliberately not the subscription's current URL: that
+	// is mutable, and reading it here made the history of where governed data
+	// was sent retroactively rewritable (ADR-GOV-004). Absent until attempted.
+	DeliveredTo string `json:"delivered_to,omitempty"`
 }
 
 func (s *Server) listWebhooks(w http.ResponseWriter, r *http.Request) {
@@ -98,7 +104,7 @@ func (s *Server) listWebhooks(w http.ResponseWriter, r *http.Request) {
 	}
 	items, err := s.webhooks.List(r.Context())
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	out := make([]webhookDTO, 0, len(items))
@@ -121,6 +127,13 @@ func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "bad request", "url is required")
 		return
 	}
+	// Reject non-http(s) schemes at creation for fast feedback; the authoritative
+	// SSRF egress guard (non-public IPs) is enforced at dial time in safehttp
+	// (ADR-SECURITY-001), because a hostname's resolution can change afterwards.
+	if err := safehttp.ValidateWebhookURL(req.URL); err != nil {
+		writeProblem(w, r, http.StatusBadRequest, "bad request", err.Error())
+		return
+	}
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
@@ -134,12 +147,12 @@ func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) {
 		Operations: req.Operations, Resources: req.Resources, MaxRetries: maxRetries,
 	}
 	if err := s.webhooks.Create(r.Context(), wh); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	created, err := s.webhooks.Get(r.Context(), wh.ID)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	s.log.Info("webhook created", "webhook_id", wh.ID, "request_id", RequestIDFrom(r.Context()))
@@ -153,7 +166,7 @@ func (s *Server) patchWebhook(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	cur, err := s.webhooks.Get(r.Context(), id)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	var req patchWebhookRequest
@@ -182,7 +195,7 @@ func (s *Server) patchWebhook(w http.ResponseWriter, r *http.Request) {
 		rotated = true
 	}
 	if err := s.webhooks.Update(r.Context(), cur); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	s.log.Info("webhook updated", "webhook_id", id, "secret_rotated", rotated, "request_id", RequestIDFrom(r.Context()))
@@ -194,7 +207,7 @@ func (s *Server) deleteWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.webhooks.Delete(r.Context(), chi.URLParam(r, "id")); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -210,7 +223,7 @@ func (s *Server) testWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	wh, err := s.webhooks.Get(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	status, terr := s.webhookTester(r.Context(), wh)
@@ -227,12 +240,12 @@ func (s *Server) listWebhookDeliveries(w http.ResponseWriter, r *http.Request) {
 	}
 	id := chi.URLParam(r, "id")
 	if _, err := s.webhooks.Get(r.Context(), id); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	ds, err := s.webhooks.ListByWebhook(r.Context(), id, s.pageLimit(r))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	out := make([]deliveryDTO, 0, len(ds))
@@ -241,6 +254,7 @@ func (s *Server) listWebhookDeliveries(w http.ResponseWriter, r *http.Request) {
 			ID: d.ID, WebhookID: d.WebhookID, Operation: d.Event.Operation, CfgID: d.Event.CfgID,
 			Seq: d.Event.Seq, Status: string(d.Status), RetryCount: d.RetryCount,
 			LastStatusCode: d.LastStatusCode, LastAttempt: d.LastAttempt, NextAttemptAt: d.NextAttemptAt,
+			DeliveredTo: d.DeliveredTo,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": out})

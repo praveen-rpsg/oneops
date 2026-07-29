@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,12 +16,39 @@ import (
 	"github.com/rpsg/oneops/internal/store/migrate"
 )
 
-func testPool(t *testing.T) *pgxpool.Pool {
-	t.Helper()
+// itestSchema is this package's private schema. Every integration pool in the
+// package must be built from itestDSN so nothing ever writes to `public`.
+const itestSchema = "pgstore_itest"
+
+// itestDSN returns TEST_DATABASE_URL pinned to the package's own schema, and
+// skips the test when it is unset.
+//
+// Previously these tests ran in `public` and truncated only four of the
+// thirteen tables, so audit chains, webhooks and policy rows accumulated
+// permanently in whatever database TEST_DATABASE_URL pointed at. Several audit
+// tests corrupt a chain on purpose to prove the verifier detects it; those
+// poisoned chains survived the run and made the integrity sweeper — and
+// therefore /v1/admin/status — report unhealthy forever after.
+//
+// This is the single place the search_path is applied: pools built any other
+// way silently escape isolation, which is exactly how graphPool kept writing to
+// `public` after testPool was fixed.
+func itestDSN(tb testing.TB) string {
+	tb.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set")
+		tb.Skip("TEST_DATABASE_URL not set")
 	}
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	return dsn + sep + "options=-c%20search_path%3D" + itestSchema
+}
+
+func testPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	dsn := itestDSN(t)
 	ctx := context.Background()
 	pool, err := NewPool(ctx, dsn, 5)
 	if err != nil {
@@ -40,12 +68,63 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	if err := migrate.Up(ctx, pool); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if _, err := pool.Exec(ctx,
-		`TRUNCATE configuration_object, configuration_metadata, artifact_version, idempotency_key CASCADE`); err != nil {
-		t.Fatalf("truncate: %v", err)
-	}
+	truncateAll(ctx, t, pool)
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// truncateAll empties every table the integration suite writes to *except* the
+// audit pair. Listing them explicitly (rather than relying on CASCADE from
+// configuration_object) is what keeps webhook and policy rows from surviving:
+// none of those tables carries a foreign key back to configuration_object, so
+// CASCADE never reached them.
+//
+// audit_event is deliberately absent. Migration 20260723000001 installs an
+// append-only trigger that raises on UPDATE, DELETE and TRUNCATE alike — audit
+// history cannot be deleted (State Model §8). That guarantee is load-bearing
+// and must not be relaxed for tests, so cross-run isolation is achieved by
+// dropping the whole test schema in TestMain instead. audit_chain_head is left
+// with it so head pointers stay consistent with the events they describe.
+func truncateAll(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	const stmt = `TRUNCATE
+		configuration_object, configuration_metadata, artifact_version,
+		idempotency_key, dependency_edge,
+		webhook, webhook_delivery, webhook_cursor, webhook_replay_job,
+		policy, policy_execution, policy_cursor
+		CASCADE`
+	if _, err := pool.Exec(ctx, stmt); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+}
+
+// TestMain gives the package a schema that exists for exactly one run.
+//
+// Audit history is append-only by design, so a run's audit rows — including the
+// chains that verifier tests corrupt on purpose — cannot be deleted once
+// written. Left in a shared schema they accumulated permanently: a development
+// database that had served a handful of runs held 56 chains, 5 of them
+// deliberately broken, which made the integrity sweeper and /v1/admin/status
+// report unhealthy indefinitely and would have masked a genuine chain break.
+//
+// Dropping the schema is DDL, not a row mutation, so it discards ephemeral test
+// fixtures without weakening the immutability guarantee on real audit data.
+func TestMain(m *testing.M) {
+	if dsn := os.Getenv("TEST_DATABASE_URL"); dsn != "" {
+		ctx := context.Background()
+		pool, err := NewPool(ctx, dsn, 2)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "integration setup: pool: %v\n", err)
+			os.Exit(1)
+		}
+		if _, err := pool.Exec(ctx,
+			`DROP SCHEMA IF EXISTS `+itestSchema+` CASCADE; CREATE SCHEMA `+itestSchema); err != nil {
+			fmt.Fprintf(os.Stderr, "integration setup: reset schema: %v\n", err)
+			os.Exit(1)
+		}
+		pool.Close()
+	}
+	os.Exit(m.Run())
 }
 
 func sample(artifact, version string) *domain.ConfigObject {
@@ -89,33 +168,40 @@ func TestRepoUpdateOptimistic(t *testing.T) {
 	ctx := context.Background()
 	created, _ := repo.Create(ctx, sample("B.md", "1.0.0"))
 
-	lc := domain.LifecycleComplete
-	updated, err := repo.Update(ctx, created.CfgID, 1, &domain.Patch{Lifecycle: &lc})
+	// Optimistic locking is exercised with a non-constitutional field: Patch no
+	// longer carries a dimension (ADR-CP5).
+	rc := "event-driven"
+	updated, err := repo.Update(ctx, created.CfgID, 1, &domain.Patch{ReviewCycle: &rc})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if updated.RowVersion != 2 || updated.Lifecycle != domain.LifecycleComplete {
+	if updated.RowVersion != 2 || updated.ReviewCycle != "event-driven" {
 		t.Fatalf("unexpected: %+v", updated)
 	}
-	if _, err := repo.Update(ctx, created.CfgID, 1, &domain.Patch{Lifecycle: &lc}); err != domain.ErrVersionMismatch {
+	// The dimensions are untouched by a registry update.
+	if updated.Lifecycle != created.Lifecycle || updated.RetentionClass != created.RetentionClass ||
+		updated.Authority != created.Authority {
+		t.Fatalf("registry update altered a dimension: %+v", updated)
+	}
+	if _, err := repo.Update(ctx, created.CfgID, 1, &domain.Patch{ReviewCycle: &rc}); err != domain.ErrVersionMismatch {
 		t.Errorf("expected ErrVersionMismatch, got %v", err)
 	}
-	if _, err := repo.Update(ctx, "missing", 1, &domain.Patch{Lifecycle: &lc}); err != domain.ErrNotFound {
+	if _, err := repo.Update(ctx, "missing", 1, &domain.Patch{ReviewCycle: &rc}); err != domain.ErrNotFound {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
 }
 
-func TestRepoDelete(t *testing.T) {
-	repo := NewConfigObjectRepo(testPool(t))
-	ctx := context.Background()
-	created, _ := repo.Create(ctx, sample("C.md", "1.0.0"))
-	if err := repo.Delete(ctx, created.CfgID); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	if err := repo.Delete(ctx, created.CfgID); err != domain.ErrNotFound {
-		t.Errorf("expected ErrNotFound, got %v", err)
-	}
-}
+// Destruction is deliberately absent from this repository's contract: it is a §8
+// constitutional operation owned by the Governance Engine (ADR-GOV-002), covered
+// by httpapi.TestDestruction_* against the real routes and by
+// arch.TestConfigObjectRepository_ExposesNoDestructiveMethod.
+
+// The protected-role prohibition used to be enforced here, by the registry's own
+// DELETE — a second door to a destructive constitutional effect that also
+// skipped the working-material rule, the dependents check and the audit append.
+// Hardening that door was a symptom fix; the door itself is gone
+// (ADR-GOV-002). §8 role protection is now enforced in one place, the
+// Governance Engine, and covered by governance and httpapi.TestDestruction_*.
 
 func TestRepoBulkAndPagination(t *testing.T) {
 	repo := NewConfigObjectRepo(testPool(t))

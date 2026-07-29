@@ -4,7 +4,6 @@ package postgres
 
 import (
 	"context"
-	"os"
 	"sort"
 	"strconv"
 	"testing"
@@ -21,12 +20,8 @@ import (
 // benchmarks (testing.TB). TRUNCATE ... CASCADE also clears dependency_edge.
 func graphPool(tb testing.TB) *pgxpool.Pool {
 	tb.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		tb.Skip("TEST_DATABASE_URL not set")
-	}
 	ctx := context.Background()
-	pool, err := NewPool(ctx, dsn, 8)
+	pool, err := NewPool(ctx, itestDSN(tb), 8)
 	if err != nil {
 		tb.Fatalf("pool: %v", err)
 	}

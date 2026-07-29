@@ -19,7 +19,10 @@ import (
 // transaction's failure paths testable without bypassing the real store.
 type chainStore interface {
 	EnsureChainHead(ctx context.Context, tx pgx.Tx, chainID string, genesisHash []byte) error
-	ReadChainHead(ctx context.Context, tx pgx.Tx, chainID string, forUpdate bool) (lastSeq int64, lastHash []byte, found bool, err error)
+	// ReadChainHeadForUpdate is the locking read. The appender must never use a
+	// non-locking one: without FOR UPDATE, concurrent appends to a chain collide
+	// and most of them are lost (ADR-AUDIT-006).
+	ReadChainHeadForUpdate(ctx context.Context, tx pgx.Tx, chainID string) (lastSeq int64, lastHash []byte, found bool, err error)
 	AppendAuditEvent(ctx context.Context, tx pgx.Tx, e *domain.AuditEvent) error
 	UpsertChainHead(ctx context.Context, tx pgx.Tx, chainID string, lastSeq int64, lastHash []byte) error
 }
@@ -82,7 +85,7 @@ func (a *AuditAppender) AppendTx(ctx context.Context, tx pgx.Tx, in audit.Append
 		return domain.AuditEvent{}, err
 	}
 	// 2. Lock the head and read the current tip.
-	lastSeq, lastHash, found, err := a.store.ReadChainHead(ctx, tx, in.ChainID, true)
+	lastSeq, lastHash, found, err := a.store.ReadChainHeadForUpdate(ctx, tx, in.ChainID)
 	if err != nil {
 		return domain.AuditEvent{}, err
 	}

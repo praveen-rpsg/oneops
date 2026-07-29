@@ -1,6 +1,21 @@
-# Local override — remaps postgres to host port 5433 to avoid a conflict
-# with another project already bound to 5432. Not part of the committed stack.
+# Local override — host-port remaps for this machine only.
+#
+# Other projects on this laptop already hold the stack's default ports:
+#   5432 → host postgres      5433 → desiauction-postgres
+#   6380 → askrpsg_redis      9000/9001 → desiauction-minio
+#
+# OneOps therefore claims its own block. Container ports are unchanged, so
+# anything running inside the compose network still uses the defaults.
 services:
   postgres:
     ports: !override
-      - "5433:5432"
+      - "5435:5432"
+
+  redis:
+    ports: !override
+      - "6381:6379"
+
+  minio:
+    ports: !override
+      - "9002:9000"
+      - "9003:9001"

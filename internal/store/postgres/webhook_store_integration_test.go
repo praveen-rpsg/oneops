@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rpsg/oneops/internal/domain"
 	"github.com/rpsg/oneops/internal/events"
 )
 
@@ -47,7 +48,7 @@ func TestWebhookStore_Integration(t *testing.T) {
 
 	// --- delivery batch + claim + mark ----------------------------------------
 	now := time.Now().UTC()
-	ev := events.Event{ChainID: "c1", Seq: 1, EventID: "evt_1", OperationID: "op_1", Operation: "ratification", Actor: "u", CfgID: "c1", OccurredAt: now}
+	ev := events.Event{TenantID: domain.SystemTenantID, ChainID: "c1", Seq: 1, EventID: "evt_1", OperationID: "op_1", Operation: "ratification", Actor: "u", CfgID: "c1", OccurredAt: now}
 	if err := s.Enqueue(ctx, []events.Delivery{
 		{ID: "d1", WebhookID: "wh_1", Event: ev, Status: events.StatusPending, NextAttemptAt: now.Add(-time.Minute)},
 		{ID: "d2", WebhookID: "wh_1", Event: ev, Status: events.StatusPending, NextAttemptAt: now.Add(-time.Minute)},
@@ -58,11 +59,11 @@ func TestWebhookStore_Integration(t *testing.T) {
 	if err := s.Enqueue(ctx, []events.Delivery{{ID: "d1", WebhookID: "wh_1", Event: ev, Status: events.StatusPending, NextAttemptAt: now}}); err != nil {
 		t.Fatalf("Enqueue idempotent: %v", err)
 	}
-	due, err := s.ClaimDue(ctx, now, 10)
+	due, err := s.ClaimDue(ctx, now, time.Minute, 10)
 	if err != nil || len(due) != 2 {
 		t.Fatalf("ClaimDue: %d %v", len(due), err)
 	}
-	if err := s.MarkResult(ctx, "d1", events.StatusDelivered, 0, 200, now, time.Time{}); err != nil {
+	if err := s.MarkResult(ctx, "d1", time.Time{}, events.StatusDelivered, 0, 200, now, time.Time{}, events.AttemptFacts{Destination: "https://d1.invalid/hook", SignedTS: 1700000000}); err != nil {
 		t.Fatalf("MarkResult: %v", err)
 	}
 	if d, ok, _ := s.GetDelivery(ctx, "d1"); !ok || d.Status != events.StatusDelivered || d.LastStatusCode != 200 {
@@ -73,7 +74,7 @@ func TestWebhookStore_Integration(t *testing.T) {
 	}
 
 	// --- dead-letter recovery -------------------------------------------------
-	if err := s.MarkResult(ctx, "d2", events.StatusDeadLetter, 3, 500, now, time.Time{}); err != nil {
+	if err := s.MarkResult(ctx, "d2", time.Time{}, events.StatusDeadLetter, 3, 500, now, time.Time{}, events.AttemptFacts{Destination: "https://d2.invalid/hook", SignedTS: 1700000000}); err != nil {
 		t.Fatalf("dead-letter: %v", err)
 	}
 	if dl, err := s.ListDeadLetters(ctx, "wh_1", 10); err != nil || len(dl) != 1 {
@@ -85,7 +86,7 @@ func TestWebhookStore_Integration(t *testing.T) {
 	if d, _, _ := s.GetDelivery(ctx, "d2"); d.Status != events.StatusPending {
 		t.Fatalf("requeue did not reset status: %q", d.Status)
 	}
-	if n, err := s.Requeue(ctx, []string{"d1"}); err != nil || n != 1 {
+	if n, err := s.Requeue(ctx, "wh_1", []string{"d1"}); err != nil || n != 1 {
 		t.Fatalf("Requeue: %d %v", n, err)
 	}
 	if c, err := s.CountByStatus(ctx, events.StatusPending); err != nil || c != 2 {
@@ -93,7 +94,7 @@ func TestWebhookStore_Integration(t *testing.T) {
 	}
 
 	// --- retention delete (terminal only) -------------------------------------
-	if err := s.MarkResult(ctx, "d1", events.StatusDelivered, 0, 200, now.Add(-72*time.Hour), time.Time{}); err != nil {
+	if err := s.MarkResult(ctx, "d1", time.Time{}, events.StatusDelivered, 0, 200, now.Add(-72*time.Hour), time.Time{}, events.AttemptFacts{Destination: "https://recorded.invalid/hook", SignedTS: 1700000000}); err != nil {
 		t.Fatalf("mark old: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE webhook_delivery SET created_at=$1 WHERE id='d1'`, now.Add(-72*time.Hour)); err != nil {
@@ -172,7 +173,7 @@ func TestWebhookStore_NilSlicesPersist(t *testing.T) {
 		t.Fatalf("nil slices round-tripped as %+v, want empty", got)
 	}
 	// The semantic contract survives: empty means "match everything".
-	if !got.Matches(events.Event{Operation: "ratification", CfgID: "any"}) {
+	if !got.Matches(events.Event{TenantID: domain.SystemTenantID, Operation: "ratification", CfgID: "any"}) {
 		t.Error("a webhook with no filters must match every event")
 	}
 

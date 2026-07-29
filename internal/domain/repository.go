@@ -36,17 +36,30 @@ type ConfigObjectRepository interface {
 	// Update applies a partial update. expectedRowVersion enforces optimistic
 	// locking; a mismatch returns ErrVersionMismatch.
 	Update(ctx context.Context, cfgID string, expectedRowVersion int64, patch *Patch) (*ConfigObject, error)
-	// Delete removes an object, or returns ErrNotFound.
-	Delete(ctx context.Context, cfgID string) error
+	// There is deliberately no Delete here. Destroying a Configuration Object is
+	// a §8 constitutional operation owned by the Governance Engine, which
+	// enforces role protection, working-material-only, the dependents check and
+	// the atomic audit append, and reaches storage through
+	// GovernanceStore.RemoveObject. A destructive method on the persistence
+	// contract is a second, unguarded door to that effect — it was wired to
+	// DELETE /v1/artifacts/{id} and destroyed a ratified object with no audit
+	// event (ADR-GOV-002). Do not add one back.
+
 	// BulkCreate inserts many objects in a single transaction.
 	BulkCreate(ctx context.Context, objs []*ConfigObject) ([]*ConfigObject, error)
 }
 
 // Patch carries partial-update fields. Nil pointers are left unchanged.
+//
+// It carries NO constitutional dimension. Lifecycle, Retention and Authority
+// were removed by ADR-CP5: the registry owns persistence, governance owns
+// constitutional mutation (§8: "No dimension changes except as an operation
+// specifies"), and Authority is computed rather than asserted (§6).
+//
+// A dimension reaches storage through exactly one path —
+// governance.Store.ApplyDimensions, inside the engine's own transaction and
+// atomically with its audit event.
 type Patch struct {
-	Lifecycle       *Lifecycle
-	RetentionClass  *RetentionClass
-	Authority       *Authority
 	RatifiedBy      *string
 	ReviewCycle     *string
 	RetentionPolicy *string

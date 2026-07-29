@@ -97,7 +97,7 @@ func (s *Server) listPolicies(w http.ResponseWriter, r *http.Request) {
 	}
 	items, err := s.policies.List(r.Context())
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	out := make([]policyDTO, 0, len(items))
@@ -133,12 +133,12 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		Action: policy.ActionSpec{Type: req.Action.Type, Config: req.Action.Config}, MaxRetries: maxRetries,
 	}
 	if err := s.policies.Create(r.Context(), p); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	created, err := s.policies.Get(r.Context(), p.ID)
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	s.log.Info("policy created", "policy_id", p.ID, "request_id", RequestIDFrom(r.Context()))
@@ -151,7 +151,7 @@ func (s *Server) patchPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	cur, err := s.policies.Get(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	var req patchPolicyRequest
@@ -175,7 +175,7 @@ func (s *Server) patchPolicy(w http.ResponseWriter, r *http.Request) {
 		cur.MaxRetries = *req.MaxRetries
 	}
 	if err := s.policies.Update(r.Context(), cur); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toPolicyDTO(cur))
@@ -186,7 +186,7 @@ func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.policies.Delete(r.Context(), chi.URLParam(r, "id")); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -198,12 +198,12 @@ func (s *Server) listPolicyExecutions(w http.ResponseWriter, r *http.Request) {
 	}
 	id := chi.URLParam(r, "id")
 	if _, err := s.policies.Get(r.Context(), id); err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	xs, err := s.policies.ListByPolicy(r.Context(), id, s.pageLimit(r))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	out := make([]policyExecutionDTO, 0, len(xs))
@@ -227,7 +227,7 @@ func (s *Server) testPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	p, err := s.policies.Get(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		mapError(w, r, err)
+		s.mapError(w, r, err)
 		return
 	}
 	status, terr := s.policyTester(r.Context(), p)

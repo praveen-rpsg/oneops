@@ -47,7 +47,7 @@ func TestTimelineStore_Integration(t *testing.T) {
 	wh := NewWebhookStore(pool)
 	if err := wh.Enqueue(ctx, []events.Delivery{{
 		ID: "d1", WebhookID: "wh_1", Status: events.StatusDelivered, NextAttemptAt: time.Now(),
-		Event: events.Event{ChainID: chainID, Seq: ae.Seq, EventID: eventID, OperationID: "op_1", Operation: "ratification", Actor: "u", CfgID: chainID, OccurredAt: ae.OccurredAt},
+		Event: events.Event{TenantID: domain.SystemTenantID, ChainID: chainID, Seq: ae.Seq, EventID: eventID, OperationID: "op_1", Operation: "ratification", Actor: "u", CfgID: chainID, OccurredAt: ae.OccurredAt},
 	}}); err != nil {
 		t.Fatalf("seed delivery: %v", err)
 	}

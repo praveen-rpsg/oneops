@@ -160,6 +160,11 @@ func measureBlocks(t *testing.T, pool *pgxpool.Pool, n int) stats {
 }
 
 func TestGraphPerf10kAcceptance(t *testing.T) {
+	if raceEnabled {
+		t.Skip("performance acceptance is not measured under the race detector: the instrumented " +
+			"build is several times slower, so any latency it reports is a property of the " +
+			"instrumentation rather than of the system")
+	}
 	pool := graphPool(t)
 	s := measureBlocks(t, pool, 10000)
 	if s.p95 > 50*time.Millisecond {
@@ -168,6 +173,10 @@ func TestGraphPerf10kAcceptance(t *testing.T) {
 }
 
 func TestGraphPerf50kStress(t *testing.T) {
+	if raceEnabled {
+		t.Skip("performance stress is not measured under the race detector (see " +
+			"TestGraphPerf10kAcceptance)")
+	}
 	if testing.Short() {
 		t.Skip("skipping 50k stress in -short")
 	}

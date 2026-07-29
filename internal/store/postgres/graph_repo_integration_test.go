@@ -146,15 +146,35 @@ func TestGraphCascadeOnConfigDelete(t *testing.T) {
 	co := NewConfigObjectRepo(pool)
 	g := NewGraphRepo(pool)
 	ctx := context.Background()
-	from, to := twoNodes(t, co)
+
+	// sample() defaults to a governance role, which §8 never permits to be
+	// deleted. This test needs a deletable endpoint to exercise the FK cascade.
+	oa := sample("Cascade-A.md", "1.0.0")
+	oa.Role = domain.RoleReference
+	a, err := co.Create(ctx, oa)
+	if err != nil {
+		t.Fatalf("seed A: %v", err)
+	}
+	b, err := co.Create(ctx, sample("Cascade-B.md", "1.0.0"))
+	if err != nil {
+		t.Fatalf("seed B: %v", err)
+	}
+	from, to := a.CfgID, b.CfgID
 
 	edge, err := g.CreateEdge(ctx, &domain.DependencyEdge{FromCfg: from, ToCfg: to, EdgeKind: domain.EdgeKindDepends})
 	if err != nil {
 		t.Fatalf("create edge: %v", err)
 	}
-	// Deleting an endpoint object removes its edges (ON DELETE CASCADE), so M1
-	// delete semantics are preserved rather than blocked by the FK.
-	if err := co.Delete(ctx, from); err != nil {
+	// Removing an endpoint object removes its edges (ON DELETE CASCADE). This is
+	// a schema property, asserted here directly against the table rather than
+	// through a repository method — destruction is a §8 operation owned by the
+	// Governance Engine and the registry no longer exposes one (ADR-GOV-002).
+	//
+	// The cascade is also exactly why that gate matters: it destroys dependency
+	// edges silently, so a removal that skipped the dependents check would leave
+	// an audited Extension asserting a relationship the graph no longer contains.
+	// That was observed live before the engine became the only door.
+	if _, err := co.pool.Exec(ctx, `DELETE FROM configuration_object WHERE cfg_id = $1`, from); err != nil {
 		t.Fatalf("delete config object: %v", err)
 	}
 	if _, err := g.Edge(ctx, edge.ID); err != domain.ErrNotFound {

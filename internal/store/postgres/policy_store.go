@@ -30,7 +30,9 @@ var (
 	_ policy.CursorStore    = (*PolicyStore)(nil)
 )
 
-const policyCols = `id, name, enabled, condition, action_type, action_config, max_retries, created_at, updated_at`
+// tenant_id is read on every path so the consumer's fan-out can compare
+// ownership: it lists policies across all tenants on a privileged connection.
+const policyCols = `id, name, enabled, condition, action_type, action_config, max_retries, created_at, updated_at, tenant_id`
 
 // Create inserts a policy.
 func (s *PolicyStore) Create(ctx context.Context, p policy.Policy) error {
@@ -40,8 +42,9 @@ func (s *PolicyStore) Create(ctx context.Context, p policy.Policy) error {
 	}
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO policy (`+policyCols+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now())`,
-		p.ID, p.Name, p.Enabled, cond, p.Action.Type, actionConfig(p.Action.Config), p.MaxRetries)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now(),$8)`,
+		p.ID, p.Name, p.Enabled, cond, p.Action.Type, actionConfig(p.Action.Config), p.MaxRetries,
+		domain.TenantIDFrom(ctx))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return domain.ErrConflict
@@ -123,7 +126,7 @@ func (s *PolicyStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-const execCols = `id, policy_id, event_id, event, status, retry_count, error, started_at, ended_at, next_attempt_at, created_at`
+const execCols = `id, policy_id, event_id, event, status, retry_count, error, started_at, ended_at, next_attempt_at, created_at, claimed_at`
 
 // Enqueue inserts pending executions (idempotent by id).
 func (s *PolicyStore) Enqueue(ctx context.Context, xs []policy.Execution) error {
@@ -152,11 +155,47 @@ func (s *PolicyStore) Enqueue(ctx context.Context, xs []policy.Execution) error 
 }
 
 // ClaimDue returns executions eligible to run (pending/failed and due).
-func (s *PolicyStore) ClaimDue(ctx context.Context, now time.Time, limit int) ([]policy.Execution, error) {
+//
+// As on the delivery queue, the claim enforces the retry budget
+// (ADR-CONCURRENCY-006): retry_count is "attempts started" and is incremented as
+// the row is handed out, so an execution whose worker never reports back still
+// consumes budget, and one whose next attempt would exceed the policy's
+// max_retries is dead-lettered in the same statement instead of being run again.
+// A missing policy is budget 0. Without this, a crash-looping action was re-run
+// forever with no terminating state (proven live).
+func (s *PolicyStore) ClaimDue(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]policy.Execution, error) {
+	// Atomic claim with lease, matching the delivery queue (ADR-CONCURRENCY-002):
+	// due pending/failed rows and stale running rows are moved to 'running' under
+	// FOR UPDATE SKIP LOCKED, so two workers never run the same execution and a
+	// crashed worker's row is recovered only after the lease.
+	staleBefore := now.Add(-lease)
 	rows, err := s.pool.Query(ctx, `
-		SELECT `+execCols+` FROM policy_execution
-		 WHERE status IN ('pending','failed') AND next_attempt_at <= $1
-		 ORDER BY next_attempt_at LIMIT $2`, now, limit)
+		WITH candidate AS (
+		    SELECT e.id,
+		           e.retry_count + 1 AS attempt_no,
+		           COALESCE(p.max_retries, 0) AS budget
+		      FROM policy_execution e
+		      LEFT JOIN policy p ON p.id = e.policy_id
+		     WHERE (e.status IN ('pending','failed') AND e.next_attempt_at <= $1)
+		        OR (e.status = 'running' AND e.claimed_at < $2)
+		     ORDER BY e.next_attempt_at
+		     LIMIT $3
+		     FOR UPDATE OF e SKIP LOCKED
+		),
+		exhausted AS (
+		    UPDATE policy_execution e
+		       SET status = 'dead_letter', claimed_at = NULL
+		      FROM candidate c
+		     WHERE e.id = c.id AND c.attempt_no > c.budget
+		),
+		claimed AS (
+		    UPDATE policy_execution e
+		       SET status = 'running', claimed_at = $1, retry_count = c.attempt_no
+		      FROM candidate c
+		     WHERE e.id = c.id AND c.attempt_no <= c.budget
+		    RETURNING `+prefixCols(execCols, "e")+`
+		)
+		SELECT `+execCols+` FROM claimed`, now, staleBefore, limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim executions: %w", err)
 	}
@@ -164,16 +203,46 @@ func (s *PolicyStore) ClaimDue(ctx context.Context, now time.Time, limit int) ([
 	return scanExecutions(rows)
 }
 
-// MarkResult records an execution attempt outcome.
-func (s *PolicyStore) MarkResult(ctx context.Context, id string, status policy.ExecutionStatus, retry int, errMsg string, started, ended, next time.Time) error {
+// ReleaseClaim returns an unused claim to the queue, giving back the attempt it
+// consumed. See WebhookStore.ReleaseClaim — a worker stopped between claiming
+// and running must not burn budget it never spent. Fenced on the claim token.
+func (s *PolicyStore) ReleaseClaim(ctx context.Context, id string, claimToken time.Time) error {
+	if claimToken.IsZero() {
+		return nil
+	}
 	_, err := s.pool.Exec(ctx, `
+		UPDATE policy_execution
+		   SET status = 'pending', claimed_at = NULL,
+		       retry_count = GREATEST(retry_count - 1, 0)
+		 WHERE id = $1 AND claimed_at = $2 AND status = 'running'`, id, claimToken)
+	if err != nil {
+		return fmt.Errorf("release execution claim: %w", err)
+	}
+	return nil
+}
+
+// MarkResult records an execution attempt outcome, fenced by the claim token
+// (ADR-CONCURRENCY-005). The write lands only if the row is still claimed under
+// `claimToken`; a worker whose lease expired and whose row was reclaimed holds a
+// stale token, matches zero rows, and gets policy.ErrStaleClaim — so its late
+// completion cannot overwrite the reclaimer's outcome or re-run the action's
+// bookkeeping. A zero token (the admin test path) writes unfenced.
+func (s *PolicyStore) MarkResult(ctx context.Context, id string, claimToken time.Time, status policy.ExecutionStatus, retry int, errMsg string, started, ended, next time.Time) error {
+	var tokenPtr *time.Time
+	if !claimToken.IsZero() {
+		tokenPtr = &claimToken
+	}
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE policy_execution
 		   SET status=$2, retry_count=$3, error=$4, started_at=$5, ended_at=$6,
 		       next_attempt_at=COALESCE($7, next_attempt_at)
-		 WHERE id=$1`,
-		id, string(status), retry, errMsg, nullTime(started), nullTime(ended), nullTime(next))
+		 WHERE id=$1 AND ($8::timestamptz IS NULL OR claimed_at = $8)`,
+		id, string(status), retry, errMsg, nullTime(started), nullTime(ended), nullTime(next), tokenPtr)
 	if err != nil {
 		return fmt.Errorf("mark execution: %w", err)
+	}
+	if tag.RowsAffected() == 0 && tokenPtr != nil {
+		return policy.ErrStaleClaim
 	}
 	return nil
 }
@@ -203,12 +272,17 @@ func (s *PolicyStore) GetPolicyCursor(ctx context.Context, chainID string) (int6
 	return seq, nil
 }
 
-// SetPolicyCursor advances the consumer cursor for a chain.
+// SetPolicyCursor advances the consumer cursor for a chain. The write is
+// monotonic (GREATEST): the watermark never moves backward, so a stale or
+// overlapping consumer cannot rewind it under a concurrent advance
+// (ADR-CONCURRENCY-004). A cursor never legitimately regresses — the consumer only
+// advances to the max seq of events it has already enqueued.
 func (s *PolicyStore) SetPolicyCursor(ctx context.Context, chainID string, seq int64) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO policy_cursor (chain_id, last_seq, updated_at)
 		VALUES ($1,$2,now())
-		ON CONFLICT (chain_id) DO UPDATE SET last_seq=EXCLUDED.last_seq, updated_at=now()`,
+		ON CONFLICT (chain_id) DO UPDATE
+		   SET last_seq=GREATEST(policy_cursor.last_seq, EXCLUDED.last_seq), updated_at=now()`,
 		chainID, seq)
 	if err != nil {
 		return fmt.Errorf("set policy cursor: %w", err)
@@ -219,7 +293,8 @@ func (s *PolicyStore) SetPolicyCursor(ctx context.Context, chainID string, seq i
 func scanPolicy(sc rowScanner) (policy.Policy, error) {
 	var p policy.Policy
 	var cond, cfg []byte
-	if err := sc.Scan(&p.ID, &p.Name, &p.Enabled, &cond, &p.Action.Type, &cfg, &p.MaxRetries, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	if err := sc.Scan(&p.ID, &p.Name, &p.Enabled, &cond, &p.Action.Type, &cfg, &p.MaxRetries,
+		&p.CreatedAt, &p.UpdatedAt, &p.TenantID); err != nil {
 		return policy.Policy{}, err
 	}
 	if len(cond) > 0 {
@@ -247,9 +322,9 @@ func scanExecution(sc rowScanner) (policy.Execution, error) {
 	var x policy.Execution
 	var status string
 	var ev []byte
-	var started, ended *time.Time
+	var started, ended, claimedAt *time.Time
 	if err := sc.Scan(&x.ID, &x.PolicyID, new(string), &ev, &status, &x.RetryCount, &x.Error,
-		&started, &ended, &x.NextAttemptAt, &x.CreatedAt); err != nil {
+		&started, &ended, &x.NextAttemptAt, &x.CreatedAt, &claimedAt); err != nil {
 		return policy.Execution{}, err
 	}
 	x.Status = policy.ExecutionStatus(status)
@@ -263,6 +338,9 @@ func scanExecution(sc rowScanner) (policy.Execution, error) {
 	}
 	if ended != nil {
 		x.EndedAt = *ended
+	}
+	if claimedAt != nil {
+		x.ClaimedAt = *claimedAt
 	}
 	return x, nil
 }

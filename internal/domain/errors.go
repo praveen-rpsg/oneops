@@ -13,6 +13,11 @@ var (
 	ErrConflict = errors.New("configuration object conflict")
 	// ErrVersionMismatch indicates an optimistic-locking failure.
 	ErrVersionMismatch = errors.New("row version mismatch")
+	// ErrDeletionForbidden indicates the object's Configuration Role is one that
+	// §8 never permits to be deleted. It is absolute: unlike the retention and
+	// dependents preconditions, no combination of the other three dimensions
+	// makes such an object deletable.
+	ErrDeletionForbidden = errors.New("deletion forbidden for this configuration role")
 )
 
 // ValidationError describes an invalid field on an entity or request.

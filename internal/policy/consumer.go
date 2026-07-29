@@ -2,10 +2,10 @@ package policy
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"log/slog"
 	"time"
+
+	"github.com/rpsg/oneops/internal/domain"
 )
 
 // ConsumerConfig parameterises the policy consumer.
@@ -35,7 +35,6 @@ type Consumer struct {
 	execs    ExecutionStore
 	metrics  Metrics
 	log      *slog.Logger
-	newID    func() string
 	now      func() time.Time
 	cfg      ConsumerConfig
 }
@@ -51,7 +50,7 @@ func NewConsumer(source EventSource, cursor CursorStore, policies Store, execs E
 	cfg.withDefaults()
 	return &Consumer{
 		source: source, cursor: cursor, policies: policies, execs: execs, metrics: metrics,
-		log: log, newID: newExecutionID, now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
+		log: log, now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
 	}
 }
 
@@ -138,22 +137,24 @@ func (c *Consumer) tailChain(ctx context.Context, chainID string, pols []Policy)
 // single evaluation path used for both live and replayed committed events.
 func (c *Consumer) Evaluate(ev Event, pols []Policy, now time.Time) []Execution {
 	var out []Execution
-	for _, p := range pols {
-		if !p.Enabled || !p.Condition.Matches(ev) {
-			continue
+	// domain.FanOut confines the cross-tenant policy list to the event's owner
+	// before any condition is evaluated. The consumer tails every tenant's
+	// audit chains on a privileged connection, and policy actions make outbound
+	// HTTP calls carrying operator-supplied configuration — so a policy
+	// selecting another tenant's events would be an oracle over their
+	// governance activity, and a request made on their behalf.
+	for _, p := range domain.FanOut(ev, pols, func(p Policy) bool {
+		return p.Enabled && p.Condition.Matches(ev)
+	}) {
+		{
+			out = append(out, Execution{
+				// Deterministic id makes production idempotent: a re-processed
+				// event collides rather than running the action twice
+				// (ADR-CONCURRENCY-003).
+				ID: ExecutionID(p.ID, ev.CfgID, ev.Seq), PolicyID: p.ID, Event: ev, Status: ExecPending,
+				NextAttemptAt: now, CreatedAt: now,
+			})
 		}
-		out = append(out, Execution{
-			ID: c.newID(), PolicyID: p.ID, Event: ev, Status: ExecPending,
-			NextAttemptAt: now, CreatedAt: now,
-		})
 	}
 	return out
-}
-
-func newExecutionID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic("policy: id generation failed")
-	}
-	return "pex_" + hex.EncodeToString(b[:])
 }

@@ -101,14 +101,21 @@ func (r *ConfigObjectRepo) insertTx(ctx context.Context, tx pgx.Tx, o *domain.Co
 	if o.RetentionPolicy == "" {
 		o.RetentionPolicy = "permanent"
 	}
+	// Ownership is written explicitly rather than left to the column DEFAULT.
+	// The default exists so a path that predates tenancy still produces a valid
+	// row, but under row-level security a row must be labelled with the tenant
+	// bound to the connection: inserting the default while connected as another
+	// tenant violates the policy's WITH CHECK and fails the write outright.
+	tenantID := domain.TenantIDFrom(ctx)
 	err := tx.QueryRow(ctx, `
 		INSERT INTO configuration_object
 			(cfg_id, artifact, version, role, lifecycle, retention_class, authority,
-			 ratified_by, review_cycle, retention_policy)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			 ratified_by, review_cycle, retention_policy, tenant_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		RETURNING row_version, created_at, updated_at`,
 		o.CfgID, o.Artifact, o.Version, string(o.Role), string(o.Lifecycle),
 		string(o.RetentionClass), string(o.Authority), o.RatifiedBy, o.ReviewCycle, o.RetentionPolicy,
+		tenantID,
 	).Scan(&o.RowVersion, &o.CreatedAt, &o.UpdatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -117,9 +124,16 @@ func (r *ConfigObjectRepo) insertTx(ctx context.Context, tx pgx.Tx, o *domain.Co
 		return fmt.Errorf("insert: %w", err)
 	}
 	for k, v := range o.Metadata {
+		// The descriptive-metadata channel never carries §9.1 constitutional
+		// inputs (ADR-GOV-003). This is the storage chokepoint, not a transport
+		// check: every present and future caller writing metadata passes here.
+		if domain.IsConstitutionalMetadataKey(k) {
+			return domain.NewValidationError("metadata",
+				"key "+k+" is a constitutional input (§9.1) and may not be written as descriptive metadata")
+		}
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO configuration_metadata (cfg_id, key, value) VALUES ($1,$2,$3)`,
-			o.CfgID, k, v,
+			`INSERT INTO configuration_metadata (cfg_id, key, value, tenant_id) VALUES ($1,$2,$3,$4)`,
+			o.CfgID, k, v, tenantID,
 		); err != nil {
 			return fmt.Errorf("insert metadata: %w", err)
 		}
@@ -223,15 +237,6 @@ func (r *ConfigObjectRepo) Update(ctx context.Context, cfgID string, expected in
 
 	a := &argset{}
 	var sets []string
-	if patch.Lifecycle != nil {
-		sets = append(sets, "lifecycle = "+a.add(string(*patch.Lifecycle)))
-	}
-	if patch.RetentionClass != nil {
-		sets = append(sets, "retention_class = "+a.add(string(*patch.RetentionClass)))
-	}
-	if patch.Authority != nil {
-		sets = append(sets, "authority = "+a.add(string(*patch.Authority)))
-	}
 	if patch.RatifiedBy != nil {
 		sets = append(sets, "ratified_by = "+a.add(*patch.RatifiedBy))
 	}
@@ -264,10 +269,23 @@ func (r *ConfigObjectRepo) Update(ctx context.Context, cfgID string, expected in
 	}
 
 	if patch.Metadata != nil {
-		if _, err := tx.Exec(ctx, `DELETE FROM configuration_metadata WHERE cfg_id = $1`, cfgID); err != nil {
+		// A descriptive patch replaces the descriptive map wholesale, so the
+		// delete below must spare the §9.1 constitutional inputs. Refusing to
+		// *set* them while allowing the same request to *erase* them is not a
+		// guard: proven live, a patch of an unrelated key returned 200 and
+		// removed `responsibilities`, which makes allResponsibilities(old) empty
+		// and the Replacement Test vacuously satisfied (ADR-GOV-003).
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM configuration_metadata WHERE cfg_id = $1 AND key <> ALL($2::text[])`,
+			cfgID, domain.ConstitutionalMetadataKeys(),
+		); err != nil {
 			return nil, fmt.Errorf("clear metadata: %w", err)
 		}
 		for k, v := range patch.Metadata {
+			if domain.IsConstitutionalMetadataKey(k) {
+				return nil, domain.NewValidationError("metadata",
+					"key "+k+" is a constitutional input (§9.1) and may not be written as descriptive metadata")
+			}
 			if _, err := tx.Exec(ctx,
 				`INSERT INTO configuration_metadata (cfg_id, key, value) VALUES ($1,$2,$3)`, cfgID, k, v,
 			); err != nil {
@@ -286,16 +304,30 @@ func (r *ConfigObjectRepo) Update(ctx context.Context, cfgID string, expected in
 }
 
 // Delete removes an object, or returns domain.ErrNotFound.
-func (r *ConfigObjectRepo) Delete(ctx context.Context, cfgID string) error {
-	tag, err := r.pool.Exec(ctx, `DELETE FROM configuration_object WHERE cfg_id = $1`, cfgID)
-	if err != nil {
-		return fmt.Errorf("delete: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return domain.ErrNotFound
-	}
-	return nil
-}
+//
+// The §8-protected roles are excluded in the statement itself, so this registry
+// path cannot destroy a Constitution/Governance/Validation/Evidence/Audit object
+// even though it does not go through the governance engine. The exclusion is
+// part of the DELETE rather than a preceding read, so no window exists between
+// the check and the delete. Role is immutable, so the set cannot be evaded.
+// (Deliberately no Delete method here.)
+//
+// Destroying a Configuration Object is a §8 constitutional operation, not a
+// persistence detail. It is owned by the Governance Engine, which enforces role
+// protection, working-material-only, the dependents check, and the atomic audit
+// append in one transaction (ADR-AUDIT-005), and reaches storage through
+// GovernanceStore.RemoveObject.
+//
+// This repository used to expose a `Delete` that issued a bare
+// `DELETE FROM configuration_object` guarded by the protected-role rule alone.
+// It was wired straight to DELETE /v1/artifacts/{id}, and it was a second,
+// unguarded door to a destructive constitutional effect: proven live, a
+// ratified current_baseline object the engine refuses to delete was destroyed
+// through it with no audit event and with its dependency edges cascaded away.
+//
+// The method is gone rather than hardened, so the class cannot return through a
+// new caller: an unguarded destructive path that does not exist cannot be wired
+// to anything (ADR-GOV-002).
 
 func (r *ConfigObjectRepo) attachMetadata(ctx context.Context, objs []*domain.ConfigObject) error {
 	if len(objs) == 0 {

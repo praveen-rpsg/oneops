@@ -22,6 +22,11 @@ var (
 	// ErrHasDependents is returned when Deletion is attempted on an object that
 	// still has dependents (State Model §8: deletion requires no dependents).
 	ErrHasDependents = errors.New("governance: object has dependents")
+	// ErrReplacementTesterUnavailable is returned when Replacement is attempted
+	// on an engine with no ReplacementTester wired. It FAILS CLOSED: §8 gates
+	// Replacement on the four-part test, so an engine that cannot evaluate the
+	// test must refuse the operation rather than perform it untested.
+	ErrReplacementTesterUnavailable = errors.New("governance: replacement test unavailable")
 )
 
 // Command is one constitutional configuration operation request (State Model §8).
@@ -151,14 +156,35 @@ type Auditor interface {
 	AppendTx(ctx context.Context, tx pgx.Tx, in audit.AppendInput) (domain.AuditEvent, error)
 }
 
+// ReplacementTester evaluates the four-part Replacement Test (State Model §9.1)
+// prospectively, for a pair not yet joined by a supersedes edge. It is declared
+// here, consumer-side; *authority.ReplacementTest satisfies it.
+//
+// The engine never re-implements the four conjuncts: it asks, and refuses when
+// the answer is no.
+type ReplacementTester interface {
+	Evaluate(ctx context.Context, oldCfgID, newCfgID string) (domain.ReplacementTestResult, error)
+}
+
 // Engine executes constitutional configuration operations, owning exactly one
 // transaction per operation. It depends only on the Store and Authorizer ports.
 type Engine struct {
-	store      Store
-	authorizer Authorizer
-	audit      Auditor
-	now        func() time.Time
+	store       Store
+	authorizer  Authorizer
+	audit       Auditor
+	replacement ReplacementTester
+	now         func() time.Time
 }
+
+// SetReplacementTester wires the §9.1 evaluator, following the same optional-
+// wiring idiom the HTTP server uses for its subsystems. It is set separately
+// rather than added to NewEngine because the seven operations that predate
+// Replacement do not need it, and widening the constructor would churn every
+// existing call site for no behavioural gain.
+//
+// Absence is NOT a silent skip: Execute refuses Replacement outright when this
+// is unset (ErrReplacementTesterUnavailable).
+func (e *Engine) SetReplacementTester(t ReplacementTester) { e.replacement = t }
 
 // NewEngine composes the engine. store, authorizer, and auditor are all required.
 func NewEngine(store Store, authorizer Authorizer, auditor Auditor) (*Engine, error) {
@@ -203,6 +229,26 @@ func (e *Engine) Execute(ctx context.Context, cmd Command) (Result, error) {
 	p, err := planTransition(cmd.Operation, obj, cmd)
 	if err != nil {
 		return Result{}, err
+	}
+
+	// §8 Replacement precondition — the four-part Replacement Test (§9.1).
+	// Evaluated here rather than in planTransition, which is pure and has no
+	// context. It runs INSIDE the transaction, while the base row is locked, so
+	// the state it judges cannot change between the verdict and the mutation.
+	// A failed test is a precondition failure and surfaces as a TransitionError,
+	// reusing the existing 409 mapping rather than adding an error contract.
+	if cmd.Operation == domain.OpReplacement {
+		if e.replacement == nil {
+			return Result{}, ErrReplacementTesterUnavailable
+		}
+		test, terr := e.replacement.Evaluate(ctx, cmd.CfgID, cmd.SuccessorID)
+		if terr != nil {
+			return Result{}, terr
+		}
+		if !test.Passed {
+			return Result{}, invalid(cmd.Operation, obj, fmt.Sprintf(
+				"replacement test failed on %s: %v", test.FailedClause, test.Evidence))
+		}
 	}
 
 	res := Result{Operation: cmd.Operation, CfgID: cmd.CfgID, Actor: cmd.Actor, OccurredAt: e.now()}

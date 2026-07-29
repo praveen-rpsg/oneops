@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -132,12 +133,19 @@ func (f *fakeDeliveries) Enqueue(_ context.Context, ds []Delivery) error {
 	}
 	return nil
 }
-func (f *fakeDeliveries) ClaimDue(_ context.Context, now time.Time, limit int) ([]Delivery, error) {
+
+// ClaimDue models the real store's contract: the claim charges the attempt
+// (retry_count is "attempts started") so a worker that never reports back still
+// consumes budget (ADR-CONCURRENCY-006).
+func (f *fakeDeliveries) ClaimDue(_ context.Context, now time.Time, _ time.Duration, limit int) ([]Delivery, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []Delivery
 	for _, d := range f.m {
 		if (d.Status == StatusPending || d.Status == StatusFailed) && !d.NextAttemptAt.After(now) {
+			d.RetryCount++
+			d.Status = StatusInflight
+			f.m[d.ID] = d
 			out = append(out, d)
 			if len(out) == limit {
 				break
@@ -146,11 +154,30 @@ func (f *fakeDeliveries) ClaimDue(_ context.Context, now time.Time, limit int) (
 	}
 	return out, nil
 }
-func (f *fakeDeliveries) MarkResult(_ context.Context, id string, status DeliveryStatus, retry, code int, last, next time.Time) error {
+func (f *fakeDeliveries) ReleaseClaim(_ context.Context, id string, _ time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d := f.m[id]
+	if d.RetryCount > 0 {
+		d.RetryCount--
+	}
+	d.Status = StatusPending
+	f.m[id] = d
+	return nil
+}
+func (f *fakeDeliveries) MarkResult(_ context.Context, id string, _ time.Time, status DeliveryStatus, retry, code int, last, next time.Time, facts AttemptFacts) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	d := f.m[id]
 	d.Status, d.RetryCount, d.LastStatusCode, d.LastAttempt, d.NextAttemptAt = status, retry, code, last, next
+	// Zero facts leave the recorded ones untouched, matching the store
+	// (ADR-GOV-004, AR-001).
+	if facts.Destination != "" {
+		d.DeliveredTo = facts.Destination
+	}
+	if facts.SignedTS != 0 {
+		d.SignedTS = facts.SignedTS
+	}
 	f.m[id] = d
 	return nil
 }
@@ -196,9 +223,38 @@ func resp(code int) *http.Response {
 	return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(""))}
 }
 
+// testTenant owns every fixture in the single-tenant relay tests. Matching now
+// requires the subscription and the event to agree on an owner, so a fixture
+// without one matches nothing — which is the fail-closed behaviour these tests
+// would otherwise silently depend on.
+const testTenant = "t-test"
+
+// fakeOwners is a stand-in EventOwnerResolver. It returns the authoritative
+// owner for a chain from a map, defaulting to testTenant so the existing
+// self-consistent fixtures resolve to the same tenant their webhook and event
+// already name. A test that needs the authoritative owner to DISAGREE with the
+// queue label sets it explicitly — that is the forged-row case.
+type fakeOwners struct {
+	byChain map[string]string
+	err     error
+}
+
+func newFakeOwners() *fakeOwners { return &fakeOwners{byChain: map[string]string{}} }
+
+func (f *fakeOwners) ResolveEventOwner(_ context.Context, chainID string, _ int64) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	if owner, ok := f.byChain[chainID]; ok {
+		return owner, nil
+	}
+	return testTenant, nil
+}
+
 func auditEvt(chain string, seq int64, op string) domain.AuditEvent {
 	return domain.AuditEvent{
-		ChainID: chain, Seq: seq, EventID: "evt_" + strconv.FormatInt(seq, 10),
+		TenantID: testTenant,
+		ChainID:  chain, Seq: seq, EventID: "evt_" + strconv.FormatInt(seq, 10),
 		OperationID: "op-" + strconv.FormatInt(seq, 10), Operation: domain.ConfigurationOperation(op),
 		Actor: "user:alice", OccurredAt: time.Now().UTC(),
 	}
@@ -234,7 +290,7 @@ func TestRelay_EnqueuesForCommittedEvents(t *testing.T) {
 		"c1": {auditEvt("c1", 1, "ratification"), auditEvt("c1", 2, "deprecation")},
 	}}
 	cur := newFakeCursors()
-	wh := newFakeWebhooks(Webhook{ID: "w1", URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 3})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 3})
 	del := newFakeDeliveries()
 	r := NewRelay(src, cur, wh, del, nil, quiet(), RelayConfig{})
 
@@ -255,7 +311,7 @@ func TestRelay_EnqueuesForCommittedEvents(t *testing.T) {
 func TestRelay_NoEventsMeansNoDeliveries(t *testing.T) {
 	// A rolled-back operation leaves no audit event, so the source yields nothing.
 	src := &fakeSource{chains: map[string][]domain.AuditEvent{"c1": nil}}
-	wh := newFakeWebhooks(Webhook{ID: "w1", Enabled: true, MaxRetries: 1})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, Enabled: true, MaxRetries: 1})
 	del := newFakeDeliveries()
 	r := NewRelay(src, newFakeCursors(), wh, del, nil, quiet(), RelayConfig{})
 
@@ -271,10 +327,10 @@ func TestRelay_Subscriptions(t *testing.T) {
 		"c2": {auditEvt("c2", 1, "deprecation")},
 	}}
 	wh := newFakeWebhooks(
-		Webhook{ID: "all", Enabled: true, MaxRetries: 1},                                              // all
-		Webhook{ID: "onlyRatify", Enabled: true, Operations: []string{"ratification"}, MaxRetries: 1}, // op filter
-		Webhook{ID: "onlyC2", Enabled: true, Resources: []string{"c2"}, MaxRetries: 1},                // resource filter
-		Webhook{ID: "disabled", Enabled: false, MaxRetries: 1},                                        // disabled
+		Webhook{ID: "all", TenantID: testTenant, Enabled: true, MaxRetries: 1},                                              // all
+		Webhook{ID: "onlyRatify", TenantID: testTenant, Enabled: true, Operations: []string{"ratification"}, MaxRetries: 1}, // op filter
+		Webhook{ID: "onlyC2", TenantID: testTenant, Enabled: true, Resources: []string{"c2"}, MaxRetries: 1},                // resource filter
+		Webhook{ID: "disabled", TenantID: testTenant, Enabled: false, MaxRetries: 1},                                        // disabled
 	)
 	del := newFakeDeliveries()
 	NewRelay(src, newFakeCursors(), wh, del, nil, quiet(), RelayConfig{}).RunOnce(context.Background())
@@ -291,11 +347,11 @@ func TestRelay_Subscriptions(t *testing.T) {
 // ---- dispatcher: delivery, retry, dead-letter, rotation ---------------------
 
 func newDelivery(id, webhookID string, at time.Time) Delivery {
-	return Delivery{ID: id, WebhookID: webhookID, Event: Event{Operation: "ratification", ChainID: "c1", CfgID: "c1", Seq: 1}, Status: StatusPending, NextAttemptAt: at, CreatedAt: at}
+	return Delivery{ID: id, WebhookID: webhookID, Event: Event{TenantID: testTenant, Operation: "ratification", ChainID: "c1", CfgID: "c1", Seq: 1}, Status: StatusPending, NextAttemptAt: at, CreatedAt: at}
 }
 
 func TestDispatcher_DeliversSignedPayload(t *testing.T) {
-	wh := newFakeWebhooks(Webhook{ID: "w1", URL: "http://x", Secret: "s3cr3t", Enabled: true, MaxRetries: 3})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, URL: "http://x", Secret: "s3cr3t", Enabled: true, MaxRetries: 3})
 	del := newFakeDeliveries()
 	_ = del.Enqueue(context.Background(), []Delivery{newDelivery("d1", "w1", time.Now())})
 
@@ -308,7 +364,7 @@ func TestDispatcher_DeliversSignedPayload(t *testing.T) {
 		gotBody, _ = io.ReadAll(r.Body)
 		return resp(200), nil
 	})
-	d := NewDispatcher(del, wh, doer, nil, quiet(), DispatcherConfig{})
+	d := NewDispatcher(del, wh, newFakeOwners(), doer, nil, quiet(), DispatcherConfig{})
 	d.RunOnce(context.Background())
 
 	if del.status("d1") != StatusDelivered {
@@ -321,11 +377,11 @@ func TestDispatcher_DeliversSignedPayload(t *testing.T) {
 }
 
 func TestDispatcher_RetryThenDeadLetter(t *testing.T) {
-	wh := newFakeWebhooks(Webhook{ID: "w1", URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 2})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 2})
 	del := newFakeDeliveries()
 	_ = del.Enqueue(context.Background(), []Delivery{newDelivery("d1", "w1", time.Unix(0, 0))})
 	doer := doerFunc(func(*http.Request) (*http.Response, error) { return resp(500), nil })
-	d := NewDispatcher(del, wh, doer, nil, quiet(), DispatcherConfig{BaseBackoff: time.Millisecond})
+	d := NewDispatcher(del, wh, newFakeOwners(), doer, nil, quiet(), DispatcherConfig{BaseBackoff: time.Millisecond})
 
 	// Attempt 1: fail -> retry (retryCount 1 < 2).
 	d.RunOnce(context.Background())
@@ -333,7 +389,7 @@ func TestDispatcher_RetryThenDeadLetter(t *testing.T) {
 		t.Fatalf("after attempt 1: status = %q, want failed", s)
 	}
 	// Make it due again and attempt 2: retryCount 2 >= 2 -> dead-letter.
-	_ = del.MarkResult(context.Background(), "d1", StatusFailed, 1, 500, time.Unix(0, 0), time.Unix(0, 0))
+	_ = del.MarkResult(context.Background(), "d1", time.Time{}, StatusFailed, 1, 500, time.Unix(0, 0), time.Unix(0, 0), AttemptFacts{})
 	d.RunOnce(context.Background())
 	if s := del.status("d1"); s != StatusDeadLetter {
 		t.Fatalf("after attempt 2: status = %q, want dead_letter", s)
@@ -341,12 +397,12 @@ func TestDispatcher_RetryThenDeadLetter(t *testing.T) {
 }
 
 func TestDispatcher_SecretRotationAppliesToPending(t *testing.T) {
-	wh := newFakeWebhooks(Webhook{ID: "w1", URL: "http://x", Secret: "old", Enabled: true, MaxRetries: 3})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, URL: "http://x", Secret: "old", Enabled: true, MaxRetries: 3})
 	del := newFakeDeliveries()
 	_ = del.Enqueue(context.Background(), []Delivery{newDelivery("d1", "w1", time.Now())})
 
 	// Rotate the secret before delivery; the dispatcher reads it live.
-	_ = wh.Update(context.Background(), Webhook{ID: "w1", URL: "http://x", Secret: "new", Enabled: true, MaxRetries: 3})
+	_ = wh.Update(context.Background(), Webhook{ID: "w1", TenantID: testTenant, URL: "http://x", Secret: "new", Enabled: true, MaxRetries: 3})
 
 	var gotSig, gotTS string
 	var gotBody []byte
@@ -356,7 +412,7 @@ func TestDispatcher_SecretRotationAppliesToPending(t *testing.T) {
 		gotBody, _ = io.ReadAll(r.Body)
 		return resp(200), nil
 	})
-	NewDispatcher(del, wh, doer, nil, quiet(), DispatcherConfig{}).RunOnce(context.Background())
+	NewDispatcher(del, wh, newFakeOwners(), doer, nil, quiet(), DispatcherConfig{}).RunOnce(context.Background())
 
 	ts, _ := strconv.ParseInt(gotTS, 10, 64)
 	if !Verify("new", ts, "d1", gotBody, gotSig) || Verify("old", ts, "d1", gotBody, gotSig) {
@@ -368,7 +424,7 @@ func TestDispatcher_MissingWebhookDeadLetters(t *testing.T) {
 	wh := newFakeWebhooks() // empty
 	del := newFakeDeliveries()
 	_ = del.Enqueue(context.Background(), []Delivery{newDelivery("d1", "gone", time.Now())})
-	NewDispatcher(del, wh, doerFunc(func(*http.Request) (*http.Response, error) { return resp(200), nil }), nil, quiet(), DispatcherConfig{}).RunOnce(context.Background())
+	NewDispatcher(del, wh, newFakeOwners(), doerFunc(func(*http.Request) (*http.Response, error) { return resp(200), nil }), nil, quiet(), DispatcherConfig{}).RunOnce(context.Background())
 	if del.status("d1") != StatusDeadLetter {
 		t.Fatalf("status = %q, want dead_letter", del.status("d1"))
 	}
@@ -388,13 +444,213 @@ func (m *countMetrics) ObserveDeliveryLatency(time.Duration) { m.latencies++ }
 func (m *countMetrics) SetActiveWebhooks(n int)              { m.active = n }
 
 func TestDispatcher_MetricsRecorded(t *testing.T) {
-	wh := newFakeWebhooks(Webhook{ID: "w1", URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 2})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 2})
 	del := newFakeDeliveries()
 	_ = del.Enqueue(context.Background(), []Delivery{newDelivery("d1", "w1", time.Now())})
 	m := &countMetrics{}
 	doer := doerFunc(func(*http.Request) (*http.Response, error) { return resp(500), nil })
-	NewDispatcher(del, wh, doer, m, quiet(), DispatcherConfig{BaseBackoff: time.Millisecond}).RunOnce(context.Background())
+	NewDispatcher(del, wh, newFakeOwners(), doer, m, quiet(), DispatcherConfig{BaseBackoff: time.Millisecond}).RunOnce(context.Background())
 	if m.failure != 1 || m.retry != 1 || m.latencies != 1 {
 		t.Fatalf("metrics = %+v", m)
+	}
+}
+
+// A worker that reads across tenants must re-establish tenant identity before
+// acting on what it read.
+//
+// The relay lists every chain and every enabled subscription on a privileged
+// connection — row-level security is bypassed there by design — and then
+// cross-products them. Matching on operation and resource alone meant a
+// subscription with no filters, which is the documented way to subscribe to
+// everything, received every other tenant's governance events signed with its
+// own HMAC secret.
+//
+// Verified against the running service before the fix: an attacker's endpoint
+// received the victim's chain_id, cfg_id, operation, actor and event_id.
+func TestFanOut_RequiresSameTenant(t *testing.T) {
+	victimEvent := Event{
+		TenantID: "t-victim", ChainID: "c-victim", CfgID: "c-victim",
+		Operation: "ratification", Seq: 1,
+	}
+	subs := []Webhook{
+		// The unfiltered subscription — the shape that made this total.
+		{ID: "atk", TenantID: "t-attacker", Enabled: true, MaxRetries: 1},
+		{ID: "own", TenantID: "t-victim", Enabled: true, MaxRetries: 1},
+	}
+
+	got := domain.FanOut(victimEvent, subs, func(w Webhook) bool { return w.Matches(victimEvent) })
+
+	for _, w := range got {
+		if w.TenantID != victimEvent.TenantID {
+			t.Fatalf("fan-out selected %q, owned by %q, for an event owned by %q",
+				w.ID, w.TenantID, victimEvent.TenantID)
+		}
+	}
+	if len(got) != 1 || got[0].ID != "own" {
+		t.Fatalf("fan-out = %v, want exactly the owning subscription", got)
+	}
+}
+
+// Matches decides what, never who. Left alone it selects another tenant's
+// event, which is precisely why ownership is enforced above it rather than
+// inside it — a predicate cannot widen the boundary it is not consulted about.
+func TestMatches_DecidesWhatNotWho(t *testing.T) {
+	foreign := Event{TenantID: "t-victim", ChainID: "c", CfgID: "c", Operation: "ratification"}
+	attacker := Webhook{ID: "atk", TenantID: "t-attacker", Enabled: true}
+
+	if !attacker.Matches(foreign) {
+		t.Error("Matches should still answer the 'what' question on its own")
+	}
+	if domain.SameOwner(attacker, foreign) {
+		t.Error("SameOwner must reject subscriptions owned by another tenant")
+	}
+}
+
+// A missing owner on either side must select nothing. Treating an absent tenant
+// as a wildcard would restore the vulnerability for any row written before the
+// column existed, or by any future path that forgets to populate it.
+func TestFanOut_MissingTenantFailsClosed(t *testing.T) {
+	owned := Event{TenantID: "t-a", ChainID: "c", CfgID: "c", Operation: "ratification"}
+	unowned := Event{ChainID: "c", CfgID: "c", Operation: "ratification"}
+	yes := func(Webhook) bool { return true }
+
+	if got := domain.FanOut(owned, []Webhook{{ID: "w", Enabled: true}}, yes); len(got) != 0 {
+		t.Error("a subscription with no owner must be selected for nothing")
+	}
+	if got := domain.FanOut(unowned, []Webhook{{ID: "w", TenantID: "t-a", Enabled: true}}, yes); len(got) != 0 {
+		t.Error("an event with no owner must select nothing")
+	}
+	if got := domain.FanOut(unowned, []Webhook{{ID: "w", Enabled: true}}, yes); len(got) != 0 {
+		t.Error("two absent owners must not be treated as equal")
+	}
+}
+
+// The relay must not deliver across tenants even when every other filter agrees.
+func TestRelay_DoesNotCrossTenantBoundary(t *testing.T) {
+	victim := auditEvt("c-victim", 1, "ratification")
+	victim.TenantID = "t-victim"
+
+	src := &fakeSource{chains: map[string][]domain.AuditEvent{"c-victim": {victim}}}
+	wh := newFakeWebhooks(
+		Webhook{ID: "attacker", TenantID: "t-attacker", Enabled: true, MaxRetries: 1},
+		Webhook{ID: "owner", TenantID: "t-victim", Enabled: true, MaxRetries: 1},
+	)
+	deliv := newFakeDeliveries()
+	r := NewRelay(src, newFakeCursors(), wh, deliv, NopMetrics{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)), RelayConfig{})
+
+	r.RunOnce(context.Background())
+
+	for _, d := range deliv.all() {
+		if d.WebhookID == "attacker" {
+			t.Errorf("the relay enqueued the victim's event for another tenant's endpoint "+
+				"(delivery %s, chain %s)", d.ID, d.Event.ChainID)
+		}
+	}
+	if len(deliv.all()) == 0 {
+		t.Error("the owning tenant's subscription received nothing")
+	}
+}
+
+// A queue is storage, and storage is untrusted — and the delivery row's own
+// owner label is part of the untrusted storage.
+//
+// The authoritative owner is re-derived from the audit log, never read from the
+// delivery. This is the test the previous fix could not pass: the forged row is
+// self-consistent — its label names the attacker, matching the attacker's
+// webhook — yet the audit log says the event belongs to the victim. Against the
+// running service the earlier, label-trusting validator delivered exactly this.
+func TestDispatcher_ForgedSelfConsistentRowIsRefused(t *testing.T) {
+	wh := newFakeWebhooks(Webhook{
+		ID: "w-attacker", TenantID: "t-attacker", URL: "http://attacker.example",
+		Secret: "s", Enabled: true, MaxRetries: 3,
+	})
+	del := newFakeDeliveries()
+
+	// The forged delivery: label says t-attacker, matching the webhook.
+	forged := Delivery{
+		ID: "dlv-forged", WebhookID: "w-attacker", Status: StatusPending,
+		Event: Event{
+			TenantID: "t-attacker", ChainID: "c-victim", CfgID: "c-victim",
+			Operation: "ratification", Seq: 1, EventID: "evt-1",
+		},
+	}
+	// The authoritative log disagrees: the event at c-victim/1 belongs to the victim.
+	owners := newFakeOwners()
+	owners.byChain["c-victim"] = "t-victim"
+
+	called := false
+	d := NewDispatcher(del, wh, owners, doerFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return resp(200), nil
+	}), nil, quiet(), DispatcherConfig{})
+
+	status, err := d.Deliver(context.Background(), forged)
+
+	if called {
+		t.Fatal("the dispatcher delivered a forged self-consistent row across tenants")
+	}
+	if !errors.Is(err, domain.ErrOwnershipMismatch) {
+		t.Fatalf("err = %v, want ErrOwnershipMismatch", err)
+	}
+	if status != StatusDeadLetter {
+		t.Errorf("status = %q, want %q", status, StatusDeadLetter)
+	}
+}
+
+// An event absent from the authoritative log — a delivery referencing a chain
+// and seq that never committed — is refused, not retried. It will never appear:
+// the log is append-only.
+func TestDispatcher_UnknownEventIsRefused(t *testing.T) {
+	wh := newFakeWebhooks(Webhook{
+		ID: "w", TenantID: "t-a", URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 3,
+	})
+	del := newFakeDeliveries()
+	owners := newFakeOwners()
+	owners.err = ErrEventNotFound
+
+	called := false
+	d := NewDispatcher(del, wh, owners, doerFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return resp(200), nil
+	}), nil, quiet(), DispatcherConfig{})
+
+	_, err := d.Deliver(context.Background(), Delivery{
+		ID: "dlv-phantom", WebhookID: "w", Status: StatusPending,
+		Event: Event{TenantID: "t-a", ChainID: "c-nonexistent", Seq: 99},
+	})
+	if called {
+		t.Fatal("the dispatcher delivered an event absent from the authoritative log")
+	}
+	if !errors.Is(err, ErrEventNotFound) {
+		t.Fatalf("err = %v, want ErrEventNotFound", err)
+	}
+}
+
+// A resolver failure fails closed: the dispatcher must not deliver when it
+// cannot establish ownership.
+func TestDispatcher_ResolverFailureFailsClosed(t *testing.T) {
+	wh := newFakeWebhooks(Webhook{
+		ID: "w", TenantID: "t-a", URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 3,
+	})
+	del := newFakeDeliveries()
+	owners := newFakeOwners()
+	owners.err = errors.New("database unavailable")
+
+	called := false
+	d := NewDispatcher(del, wh, owners, doerFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return resp(200), nil
+	}), nil, quiet(), DispatcherConfig{})
+
+	_, err := d.Deliver(context.Background(), Delivery{
+		ID: "dlv-x", WebhookID: "w", Status: StatusPending,
+		Event: Event{TenantID: "t-a", ChainID: "c", Seq: 1},
+	})
+	if called {
+		t.Fatal("the dispatcher delivered while ownership was unresolvable")
+	}
+	if err == nil {
+		t.Fatal("a resolver failure must refuse the delivery")
 	}
 }

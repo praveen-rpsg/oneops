@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"testing"
@@ -18,12 +19,15 @@ func (f *fakeDeliveries) GetDelivery(_ context.Context, id string) (Delivery, bo
 	d, ok := f.m[id]
 	return d, ok, nil
 }
-func (f *fakeDeliveries) Requeue(_ context.Context, ids []string) (int, error) {
+
+// Requeue models the store's containment: a delivery is requeued only if it
+// belongs to the webhook the caller was given (ADR-TENANCY-009).
+func (f *fakeDeliveries) Requeue(_ context.Context, webhookID string, ids []string) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	n := 0
 	for _, id := range ids {
-		if d, ok := f.m[id]; ok {
+		if d, ok := f.m[id]; ok && d.WebhookID == webhookID {
 			d.Status, d.RetryCount = StatusPending, 0
 			f.m[id] = d
 			n++
@@ -127,7 +131,7 @@ func TestReplay_WindowReadsCommittedOnlyAndPreserves(t *testing.T) {
 	src := &fakeSource{chains: map[string][]domain.AuditEvent{
 		"c1": {auditEvt("c1", 1, "ratification"), auditEvt("c1", 2, "deprecation")},
 	}}
-	wh := newFakeWebhooks(Webhook{ID: "w1", Secret: "s3cr3t", Enabled: true, Operations: []string{"ratification"}, MaxRetries: 3})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, Secret: "s3cr3t", Enabled: true, Operations: []string{"ratification"}, MaxRetries: 3})
 	del := newFakeDeliveries()
 	jobs := newFakeJobs()
 	_ = jobs.CreateJob(context.Background(), ReplayJob{ID: "j1", WebhookID: "w1", Status: JobPending})
@@ -144,10 +148,23 @@ func TestReplay_WindowReadsCommittedOnlyAndPreserves(t *testing.T) {
 	if d.Event.EventID != "evt_1" || d.Event.Operation != "ratification" || d.Event.ChainID != "c1" || d.Event.Seq != 1 {
 		t.Fatalf("event not preserved: %+v", d.Event)
 	}
-	// Signature preserved: verifies over the canonical payload with the secret.
-	payload, headers, err := DeliveryView(d, "s3cr3t", time.Now())
+	// A delivery that has not been attempted has no sent headers to show, and
+	// says so rather than minting a signature that never crossed the wire
+	// (AR-001).
+	if _, _, err := DeliveryView(d, "s3cr3t"); !errors.Is(err, ErrNotAttempted) {
+		t.Fatalf("DeliveryView on an unattempted delivery = %v, want ErrNotAttempted", err)
+	}
+
+	// Signature preserved: once attempted, the view renders the headers that were
+	// actually sent — the recorded timestamp, not a fresh one.
+	d.SignedTS = time.Now().Add(-time.Hour).Unix()
+	payload, headers, err := DeliveryView(d, "s3cr3t")
 	if err != nil {
 		t.Fatalf("DeliveryView: %v", err)
+	}
+	if headers[HeaderTimestamp] != strconv.FormatInt(d.SignedTS, 10) {
+		t.Errorf("rendered timestamp %s is not the one recorded (%d) — headers would not be the "+
+			"ones sent", headers[HeaderTimestamp], d.SignedTS)
 	}
 	ts, _ := strconv.ParseInt(headers[HeaderTimestamp], 10, 64)
 	if !Verify("s3cr3t", ts, d.ID, payload, headers[HeaderSignature]) {
@@ -162,7 +179,7 @@ func TestReplay_WindowReadsCommittedOnlyAndPreserves(t *testing.T) {
 
 func TestReplay_ByDeliveryIDsRequeues(t *testing.T) {
 	del := newFakeDeliveries()
-	_ = del.Enqueue(context.Background(), []Delivery{{ID: "d1", WebhookID: "w1", Status: StatusDeadLetter, Event: Event{Operation: "ratification"}}})
+	_ = del.Enqueue(context.Background(), []Delivery{{ID: "d1", WebhookID: "w1", Status: StatusDeadLetter, Event: Event{TenantID: testTenant, Operation: "ratification"}}})
 	jobs := newFakeJobs()
 	_ = jobs.CreateJob(context.Background(), ReplayJob{ID: "j1", WebhookID: "w1", DeliveryIDs: []string{"d1"}, Status: JobPending})
 
@@ -181,16 +198,16 @@ func TestReplay_ByDeliveryIDsRequeues(t *testing.T) {
 // unchanged dispatcher: requeue flips status to pending, then the PRS-018
 // dispatcher delivers it.
 func TestRetry_ReusesExistingDispatcher(t *testing.T) {
-	wh := newFakeWebhooks(Webhook{ID: "w1", URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 3})
+	wh := newFakeWebhooks(Webhook{ID: "w1", TenantID: testTenant, URL: "http://x", Secret: "s", Enabled: true, MaxRetries: 3})
 	del := newFakeDeliveries()
-	_ = del.Enqueue(context.Background(), []Delivery{{ID: "d1", WebhookID: "w1", Status: StatusDeadLetter, NextAttemptAt: time.Unix(0, 0), Event: Event{Operation: "ratification"}}})
+	_ = del.Enqueue(context.Background(), []Delivery{{ID: "d1", WebhookID: "w1", Status: StatusDeadLetter, NextAttemptAt: time.Unix(0, 0), Event: Event{TenantID: testTenant, Operation: "ratification"}}})
 
 	n, _ := del.RequeueDeadLetters(context.Background(), "w1")
 	if n != 1 || del.status("d1") != StatusPending {
 		t.Fatalf("requeue failed: n=%d status=%q", n, del.status("d1"))
 	}
 	doer := doerFunc(func(*http.Request) (*http.Response, error) { return resp(200), nil })
-	NewDispatcher(del, wh, doer, nil, quiet(), DispatcherConfig{}).RunOnce(context.Background())
+	NewDispatcher(del, wh, newFakeOwners(), doer, nil, quiet(), DispatcherConfig{}).RunOnce(context.Background())
 	if del.status("d1") != StatusDelivered {
 		t.Fatalf("existing dispatcher did not deliver requeued item: %q", del.status("d1"))
 	}

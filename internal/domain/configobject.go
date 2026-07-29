@@ -56,10 +56,118 @@ func (c *ConfigObject) Validate() error {
 	if c.RetentionPolicy == "" {
 		return newValidation("retention_policy", "must not be empty")
 	}
-	// Cross-dimension invariant (Configuration State Model §9.3, rule 1):
-	// current_baseline retention requires active authority.
-	if c.RetentionClass == RetentionCurrentBaseline && c.Authority == AuthorityHistorical {
-		return newValidation("retention_class", "current_baseline is incompatible with historical authority")
+	// --- §9.3 cross-dimension consistency invariants -------------------------
+	//
+	// §9.3 states seven. This function owns the ones decidable from a single
+	// object; the status of each is recorded here so the gap is visible rather
+	// than silently absent.
+	//
+	//  1. ENFORCED below.
+	//  2. ENFORCED below, per CI-1 Issue 1.
+	//  3. DELEGATED to the Authority engine (CI-1 Issue 3) — it needs
+	//     SupersededBy, which is an edge in the dependency graph, not a field of
+	//     this struct. A single-object validator structurally cannot decide it.
+	//  4. NOT A CONSTRAINT — §9.3-4 forbids *inferring* Authority from
+	//     Lifecycle == Complete. There is nothing to reject; it is satisfied by
+	//     this function containing no such inference.
+	//  5. ENFORCED below, per CI-1 Issue 2.
+	//  6. DELEGATED to the Authority engine (CI-1 Issue 3) — its "unless an
+	//     Active artifact depends on it" clause is a graph query.
+	//  7. STRUCTURALLY SATISFIED — each dimension is a single-valued field, so
+	//     no object can hold two values on one dimension.
+	//
+	// Authority is a computed field (§6), so an empty value means "not yet
+	// computed" and is not a violation. The invariants below apply only when it
+	// is present.
+
+	// §9.3-1: Retention == Current Baseline ⇒ Authority == Active.
+	if c.RetentionClass == RetentionCurrentBaseline && c.Authority != "" && c.Authority != AuthorityActive {
+		return newValidation("retention_class",
+			"current_baseline requires active authority, got "+string(c.Authority))
+	}
+
+	// §9.3-2 as interpreted by CI-1 Issue 1: Active ⇒ Lifecycle ∉ {Draft,
+	// Withdrawn}. The Council ruled §9.3-2's enumeration illustrative rather
+	// than exhaustive: §2 states "Authority = Active is reachable from any
+	// lifecycle state except Withdrawn", and reading the enumeration strictly
+	// would invalidate Suspended and In Review — and make §8 Suspension
+	// ("Authority unchanged") inoperable for any Active artifact.
+	if c.Authority == AuthorityActive &&
+		(c.Lifecycle == LifecycleDraft || c.Lifecycle == LifecycleWithdrawn) {
+		return newValidation("lifecycle",
+			"active authority is incompatible with lifecycle "+string(c.Lifecycle))
+	}
+
+	// §9.3-5 as interpreted by CI-1 Issue 2: the three named archival classes
+	// imply Authority ≠ Active. Audit Record is deliberately OUTSIDE the
+	// invariant — that is what allows §8 Archiving ("Authority NEVER changed")
+	// to archive an Active artifact without contradiction.
+	if c.Authority == AuthorityActive && retentionBarredForActive(c.RetentionClass) {
+		return newValidation("retention_class",
+			string(c.RetentionClass)+" retention is incompatible with active authority")
+	}
+	return nil
+}
+
+// retentionBarredForActive reports whether §9.3-5 forbids this retention class
+// for an Active artifact. Audit Record is intentionally absent: CI-1 Issue 2
+// ruled it outside the invariant, and §4 defines the other three as records of
+// former authority.
+func retentionBarredForActive(rc RetentionClass) bool {
+	switch rc {
+	case RetentionHistoricalRecord, RetentionHistoricalEvidence, RetentionSupersededPlan:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidateInception reports whether this object is in the state INT-3 fixes for
+// a newly created Configuration Object:
+//
+//	"A Configuration Object exists for every artifact from inception, in an
+//	 unratified state (Lifecycle = Draft/In-Progress · Authority = Non-Normative
+//	 · Retention = Working Material). Existence ≠ Ratification; implementation
+//	 creates an artifact, never authority."
+//
+// It is deliberately SEPARATE from Validate(). Validate() runs on the result of
+// every §8 transition, where ratified / current_baseline / active is the correct
+// outcome; folding inception into it would make Ratification impossible. This
+// constrains creation only.
+//
+// It lives here rather than in a transport layer so that every caller observes
+// it — HTTP today, and any in-process caller that constructs a ConfigObject
+// directly (ADR-CP5).
+func (c *ConfigObject) ValidateInception() error {
+	switch c.Lifecycle {
+	case LifecycleDraft, LifecycleInProgress:
+	default:
+		return newValidation("lifecycle",
+			"at inception must be draft or in_progress (INT-3), got "+string(c.Lifecycle))
+	}
+	if c.RetentionClass != RetentionWorkingMaterial {
+		return newValidation("retention_class",
+			"at inception must be working_material (INT-3), got "+string(c.RetentionClass))
+	}
+	// Authority is computed (§6); an unset value is the normal case at creation.
+	// A caller that sets it to anything other than the inception value is
+	// asserting authority, which INT-3 forbids.
+	if c.Authority != "" && c.Authority != AuthorityNonNormative {
+		return newValidation("authority",
+			"at inception must be non_normative (INT-3), got "+string(c.Authority))
+	}
+	// §9.1 inputs are carried in the metadata map but are not descriptive data.
+	// They decide computed Authority and the four-part Replacement Test, so a
+	// caller that supplies them at creation is deciding a constitutional verdict
+	// with an unaudited client field. Patch already refuses them; creation did
+	// not, and a successor seeded with crafted `responsibilities` turned a
+	// Replacement that the engine refused (409) into one it granted (200) against
+	// a ratified current_baseline artifact (ADR-GOV-003).
+	for k := range c.Metadata {
+		if IsConstitutionalMetadataKey(k) {
+			return newValidation("metadata",
+				"key "+k+" is a constitutional input (§9.1) and may not be set at creation")
+		}
 	}
 	return nil
 }

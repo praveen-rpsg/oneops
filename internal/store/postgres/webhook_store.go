@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"strings"
+
 	"github.com/rpsg/oneops/internal/domain"
 	"github.com/rpsg/oneops/internal/events"
 )
@@ -29,14 +31,19 @@ var (
 	_ events.CursorStore   = (*WebhookStore)(nil)
 )
 
-const webhookCols = `id, url, secret, enabled, operations, resources, max_retries, created_at, updated_at`
+// tenant_id is read on every path so subscription matching can compare
+// ownership. The relay lists subscriptions across all tenants on a privileged
+// connection, so a subscription without its owner would match every tenant's
+// events — which it did.
+const webhookCols = `id, url, secret, enabled, operations, resources, max_retries, created_at, updated_at, tenant_id`
 
 // Create inserts a webhook.
 func (s *WebhookStore) Create(ctx context.Context, w events.Webhook) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO webhook (`+webhookCols+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now())`,
-		w.ID, w.URL, w.Secret, w.Enabled, textArray(w.Operations), textArray(w.Resources), w.MaxRetries)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now(),$8)`,
+		w.ID, w.URL, w.Secret, w.Enabled, textArray(w.Operations), textArray(w.Resources), w.MaxRetries,
+		domain.TenantIDFrom(ctx))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return domain.ErrConflict
@@ -117,7 +124,7 @@ func (s *WebhookStore) Delete(ctx context.Context, id string) error {
 }
 
 const deliveryCols = `id, webhook_id, chain_id, seq, event_id, operation_id, operation, actor,
-	cfg_id, occurred_at, status, retry_count, last_status_code, last_attempt, next_attempt_at, created_at`
+	cfg_id, occurred_at, status, retry_count, last_status_code, last_attempt, next_attempt_at, created_at, tenant_id, claimed_at, delivered_to, signed_ts`
 
 // Enqueue inserts pending deliveries. Duplicate ids are ignored (idempotent relay).
 func (s *WebhookStore) Enqueue(ctx context.Context, ds []events.Delivery) error {
@@ -127,11 +134,18 @@ func (s *WebhookStore) Enqueue(ctx context.Context, ds []events.Delivery) error 
 		batch.Queue(`
 			INSERT INTO webhook_delivery
 				(id, webhook_id, chain_id, seq, event_id, operation_id, operation, actor,
-				 cfg_id, occurred_at, status, retry_count, next_attempt_at, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,0,$12,now())
+				 cfg_id, occurred_at, status, retry_count, next_attempt_at, created_at, tenant_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,0,$12,now(),$13)
 			ON CONFLICT (id) DO NOTHING`,
 			d.ID, d.WebhookID, d.Event.ChainID, d.Event.Seq, d.Event.EventID, d.Event.OperationID,
-			d.Event.Operation, d.Event.Actor, d.Event.CfgID, d.Event.OccurredAt, string(d.Status), d.NextAttemptAt)
+			d.Event.Operation, d.Event.Actor, d.Event.CfgID, d.Event.OccurredAt, string(d.Status),
+			d.NextAttemptAt,
+			// The owner comes from the event, not from the enqueuing context.
+			// The relay enqueues on the privileged pool with no tenant bound, so
+			// deriving it from context labelled every delivery `system` — leaving
+			// tenants unable to see their own delivery history through the
+			// scoped administration API.
+			d.Event.TenantID)
 	}
 	br := s.pool.SendBatch(ctx, batch)
 	defer func() { _ = br.Close() }()
@@ -144,13 +158,55 @@ func (s *WebhookStore) Enqueue(ctx context.Context, ds []events.Delivery) error 
 }
 
 // ClaimDue returns deliveries eligible for a send attempt (pending/failed and due).
-func (s *WebhookStore) ClaimDue(ctx context.Context, now time.Time, limit int) ([]events.Delivery, error) {
+//
+// The claim is where the retry budget is enforced, because the claim is the only
+// event a failing worker cannot skip (ADR-CONCURRENCY-006). retry_count is
+// "attempts started", incremented here as the row is handed out — so an attempt
+// whose worker never reports back (crash, OOM, a demotion that cancels the
+// outcome write) still consumes budget. A row whose next attempt would exceed
+// its webhook's max_retries is not handed out at all: it is moved to
+// 'dead_letter' in the same statement. A missing webhook is budget 0 — the
+// delivery can never succeed, so it terminates rather than looping.
+//
+// Before this, the budget was consulted only by a worker that survived its own
+// attempt, and the reclaim path — the path that exists precisely for workers
+// that did not survive — left retry_count untouched. A crash-looping row was
+// therefore re-delivered forever with no terminating state (proven live).
+func (s *WebhookStore) ClaimDue(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]events.Delivery, error) {
+	// Atomic claim: move due pending/failed rows — and stale inflight rows whose
+	// claimer crashed — to 'inflight' with claimed_at set, under FOR UPDATE SKIP
+	// LOCKED so no two workers claim the same row. The status change is what
+	// stops a concurrent worker re-selecting the row: it is no longer due, and
+	// no longer stale, until the lease elapses. A row left inflight by a crashed
+	// worker is reclaimed once claimed_at is older than the lease (ADR-CONCURRENCY-002).
+	staleBefore := now.Add(-lease)
 	rows, err := s.pool.Query(ctx, `
-		SELECT `+deliveryCols+`
-		  FROM webhook_delivery
-		 WHERE status IN ('pending','failed') AND next_attempt_at <= $1
-		 ORDER BY next_attempt_at
-		 LIMIT $2`, now, limit)
+		WITH candidate AS (
+		    SELECT d.id,
+		           d.retry_count + 1 AS attempt_no,
+		           COALESCE(w.max_retries, 0) AS budget
+		      FROM webhook_delivery d
+		      LEFT JOIN webhook w ON w.id = d.webhook_id
+		     WHERE (d.status IN ('pending','failed') AND d.next_attempt_at <= $1)
+		        OR (d.status = 'inflight' AND d.claimed_at < $2)
+		     ORDER BY d.next_attempt_at
+		     LIMIT $3
+		     FOR UPDATE OF d SKIP LOCKED
+		),
+		exhausted AS (
+		    UPDATE webhook_delivery d
+		       SET status = 'dead_letter', claimed_at = NULL
+		      FROM candidate c
+		     WHERE d.id = c.id AND c.attempt_no > c.budget
+		),
+		claimed AS (
+		    UPDATE webhook_delivery d
+		       SET status = 'inflight', claimed_at = $1, retry_count = c.attempt_no
+		      FROM candidate c
+		     WHERE d.id = c.id AND c.attempt_no <= c.budget
+		    RETURNING `+prefixCols(deliveryCols, "d")+`
+		)
+		SELECT `+deliveryCols+` FROM claimed`, now, staleBefore, limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim deliveries: %w", err)
 	}
@@ -166,23 +222,75 @@ func (s *WebhookStore) ClaimDue(ctx context.Context, now time.Time, limit int) (
 	return out, rows.Err()
 }
 
+// ReleaseClaim returns an unused claim to the queue: the row goes back to
+// 'pending' and the attempt it consumed at claim time is given back.
+//
+// It is the honest counterpart to ClaimDue's budget accounting. A worker that is
+// stopped between claiming a batch and attempting it (demotion, shutdown) has
+// not spent those attempts, and must not burn budget it never used — otherwise a
+// few restarts would dead-letter healthy deliveries that were never sent. The
+// write is fenced on the claim token exactly like MarkResult
+// (ADR-CONCURRENCY-005): a worker whose row was already reclaimed releases
+// nothing.
+func (s *WebhookStore) ReleaseClaim(ctx context.Context, id string, claimToken time.Time) error {
+	if claimToken.IsZero() {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE webhook_delivery
+		   SET status = 'pending', claimed_at = NULL,
+		       retry_count = GREATEST(retry_count - 1, 0)
+		 WHERE id = $1 AND claimed_at = $2 AND status = 'inflight'`, id, claimToken)
+	if err != nil {
+		return fmt.Errorf("release delivery claim: %w", err)
+	}
+	return nil
+}
+
 // MarkResult records the outcome of a delivery attempt.
-func (s *WebhookStore) MarkResult(ctx context.Context, id string, status events.DeliveryStatus, retry, code int, last, next time.Time) error {
-	var lastPtr, nextPtr *time.Time
+// MarkResult records the outcome of a delivery attempt, fenced by the claim
+// token (ADR-CONCURRENCY-005). The write lands only if the row is still claimed
+// under `claimToken` — the claimed_at this worker was handed. A worker whose
+// lease expired and whose row was reclaimed by another holds a stale token; its
+// UPDATE matches zero rows and returns events.ErrStaleClaim, so its late
+// completion (a slow POST that outlived the lease) cannot resurrect a delivered
+// row or overwrite the reclaimer's retry state. A zero token (the admin test
+// path, whose row was never claimed) writes unfenced.
+func (s *WebhookStore) MarkResult(ctx context.Context, id string, claimToken time.Time, status events.DeliveryStatus, retry, code int, last, next time.Time, facts events.AttemptFacts) error {
+	var lastPtr, nextPtr, tokenPtr *time.Time
 	if !last.IsZero() {
 		lastPtr = &last
 	}
 	if !next.IsZero() {
 		nextPtr = &next
 	}
-	_, err := s.pool.Exec(ctx, `
+	if !claimToken.IsZero() {
+		tokenPtr = &claimToken
+	}
+	// An empty destination leaves the recorded one untouched: an outcome reached
+	// without an attempt (a refused delivery) must not erase or invent the fact
+	// of where a previous attempt went (ADR-GOV-004).
+	var destPtr *string
+	if facts.Destination != "" {
+		destPtr = &facts.Destination
+	}
+	var tsPtr *int64
+	if facts.SignedTS != 0 {
+		tsPtr = &facts.SignedTS
+	}
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE webhook_delivery
 		   SET status=$2, retry_count=$3, last_status_code=$4, last_attempt=$5,
-		       next_attempt_at=COALESCE($6, next_attempt_at)
-		 WHERE id=$1`,
-		id, string(status), retry, code, lastPtr, nextPtr)
+		       next_attempt_at=COALESCE($6, next_attempt_at),
+		       delivered_to=COALESCE($8, delivered_to),
+		       signed_ts=COALESCE($9, signed_ts)
+		 WHERE id=$1 AND ($7::timestamptz IS NULL OR claimed_at = $7)`,
+		id, string(status), retry, code, lastPtr, nextPtr, tokenPtr, destPtr, tsPtr)
 	if err != nil {
 		return fmt.Errorf("mark delivery: %w", err)
+	}
+	if tag.RowsAffected() == 0 && tokenPtr != nil {
+		return events.ErrStaleClaim
 	}
 	return nil
 }
@@ -220,12 +328,20 @@ func (s *WebhookStore) GetCursor(ctx context.Context, chainID string) (int64, er
 	return seq, nil
 }
 
-// Set advances the relay cursor for a chain.
+// SetCursor advances the relay cursor for a chain. The write is monotonic: the
+// stored watermark is GREATEST(current, seq), so it never moves backward. A stale
+// or overlapping writer — a demoted leader still running its relay for the
+// bounded step-down window (ADR-CONCURRENCY-003) — carrying an older sequence
+// cannot rewind the watermark under a concurrent advance and force already-
+// processed events to be re-read (ADR-CONCURRENCY-004). A cursor never legitimately
+// regresses: the relay only ever advances to the max seq of a batch it has already
+// enqueued.
 func (s *WebhookStore) SetCursor(ctx context.Context, chainID string, seq int64) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO webhook_cursor (chain_id, last_seq, updated_at)
 		VALUES ($1,$2,now())
-		ON CONFLICT (chain_id) DO UPDATE SET last_seq=EXCLUDED.last_seq, updated_at=now()`,
+		ON CONFLICT (chain_id) DO UPDATE
+		   SET last_seq=GREATEST(webhook_cursor.last_seq, EXCLUDED.last_seq), updated_at=now()`,
 		chainID, seq)
 	if err != nil {
 		return fmt.Errorf("set cursor: %w", err)
@@ -236,18 +352,32 @@ func (s *WebhookStore) SetCursor(ctx context.Context, chainID string, seq int64)
 func scanWebhook(sc rowScanner) (events.Webhook, error) {
 	var w events.Webhook
 	err := sc.Scan(&w.ID, &w.URL, &w.Secret, &w.Enabled, &w.Operations, &w.Resources,
-		&w.MaxRetries, &w.CreatedAt, &w.UpdatedAt)
+		&w.MaxRetries, &w.CreatedAt, &w.UpdatedAt, &w.TenantID)
 	return w, err
 }
 
 func scanDelivery(sc rowScanner) (events.Delivery, error) {
 	var d events.Delivery
 	var op, status string
-	var lastAttempt *time.Time
+	var lastAttempt, claimedAt *time.Time
+	var deliveredTo *string
+	var signedTS *int64
 	if err := sc.Scan(
 		&d.ID, &d.WebhookID, &d.Event.ChainID, &d.Event.Seq, &d.Event.EventID, &d.Event.OperationID,
 		&op, &d.Event.Actor, &d.Event.CfgID, &d.Event.OccurredAt, &status, &d.RetryCount,
 		&d.LastStatusCode, &lastAttempt, &d.NextAttemptAt, &d.CreatedAt,
+		// The delivery's stored owner is the event's owner: the producer writes
+		// d.Event.TenantID into the row. Reading it back here is what lets the
+		// dispatcher authorise execution without re-reading the audit log.
+		&d.Event.TenantID,
+		// The fencing token carried into MarkResult (ADR-CONCURRENCY-005).
+		&claimedAt,
+		// Where the most recent attempt actually went, recorded at attempt time
+		// rather than derived from the webhook's current URL (ADR-GOV-004).
+		&deliveredTo,
+		// The timestamp this attempt actually signed, so historical headers are
+		// rendered from what was sent rather than minted afresh (AR-001).
+		&signedTS,
 	); err != nil {
 		return events.Delivery{}, err
 	}
@@ -256,5 +386,25 @@ func scanDelivery(sc rowScanner) (events.Delivery, error) {
 	if lastAttempt != nil {
 		d.LastAttempt = *lastAttempt
 	}
+	if claimedAt != nil {
+		d.ClaimedAt = *claimedAt
+	}
+	if deliveredTo != nil {
+		d.DeliveredTo = *deliveredTo
+	}
+	if signedTS != nil {
+		d.SignedTS = *signedTS
+	}
 	return d, nil
+}
+
+// prefixCols qualifies a comma-separated column list with a table alias, so an
+// UPDATE ... FROM ... RETURNING can name the target table's columns unambiguously
+// when a joined subquery shares a column name (id).
+func prefixCols(cols, alias string) string {
+	parts := strings.Split(cols, ",")
+	for i, p := range parts {
+		parts[i] = alias + "." + strings.TrimSpace(p)
+	}
+	return strings.Join(parts, ", ")
 }

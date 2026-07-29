@@ -12,7 +12,6 @@ type createRequest struct {
 	Role            string            `json:"role"`
 	Lifecycle       string            `json:"lifecycle"`
 	RetentionClass  string            `json:"retention_class"`
-	Authority       string            `json:"authority,omitempty"`
 	RatifiedBy      string            `json:"ratified_by,omitempty"`
 	ReviewCycle     string            `json:"review_cycle,omitempty"`
 	RetentionPolicy string            `json:"retention_policy,omitempty"`
@@ -25,12 +24,16 @@ func (req createRequest) toDomain() *domain.ConfigObject {
 		rp = "permanent"
 	}
 	return &domain.ConfigObject{
-		Artifact:        req.Artifact,
-		Version:         req.Version,
-		Role:            domain.Role(req.Role),
-		Lifecycle:       domain.Lifecycle(req.Lifecycle),
-		RetentionClass:  domain.RetentionClass(req.RetentionClass),
-		Authority:       domain.Authority(req.Authority),
+		Artifact:       req.Artifact,
+		Version:        req.Version,
+		Role:           domain.Role(req.Role),
+		Lifecycle:      domain.Lifecycle(req.Lifecycle),
+		RetentionClass: domain.RetentionClass(req.RetentionClass),
+		// Authority is a computed field (§6, RFC-AUTH): it is never accepted from
+		// a client. At inception the artifact is in no baseline and has no
+		// dependents, so §9.1 computes Non-Normative — which is also the value
+		// INT-3 fixes for the inception state.
+		Authority:       domain.AuthorityNonNormative,
 		RatifiedBy:      req.RatifiedBy,
 		ReviewCycle:     req.ReviewCycle,
 		RetentionPolicy: rp,
@@ -74,10 +77,11 @@ func fromDomain(o *domain.ConfigObject) configObjectResponse {
 	}
 }
 
+// patchRequest carries only NON-CONSTITUTIONAL fields. Lifecycle, Retention and
+// Authority were removed in CP-1.3: §8 states "No dimension changes except as an
+// operation specifies", and Authority is additionally a computed field (§6).
+// Every dimension change is reached through a §8 governance operation.
 type patchRequest struct {
-	Lifecycle       *string           `json:"lifecycle,omitempty"`
-	RetentionClass  *string           `json:"retention_class,omitempty"`
-	Authority       *string           `json:"authority,omitempty"`
 	RatifiedBy      *string           `json:"ratified_by,omitempty"`
 	ReviewCycle     *string           `json:"review_cycle,omitempty"`
 	RetentionPolicy *string           `json:"retention_policy,omitempty"`
@@ -94,28 +98,16 @@ type bulkCreateRequest struct {
 }
 
 func (p patchRequest) toPatch() (*domain.Patch, error) {
+	// §9.1 inputs are carried in metadata but are not descriptive data (CP-0.1).
+	// Changing them would change computed Authority and the Replacement Test
+	// verdict without a §8 operation and without an audit event.
+	for k := range p.Metadata {
+		if domain.IsConstitutionalMetadataKey(k) {
+			return nil, domain.NewValidationError("metadata",
+				"key "+k+" is a constitutional input (§9.1) and may not be set through patch")
+		}
+	}
 	out := &domain.Patch{Metadata: p.Metadata}
-	if p.Lifecycle != nil {
-		lc := domain.Lifecycle(*p.Lifecycle)
-		if !lc.Valid() {
-			return nil, domain.NewValidationError("lifecycle", "unknown lifecycle: "+*p.Lifecycle)
-		}
-		out.Lifecycle = &lc
-	}
-	if p.RetentionClass != nil {
-		rc := domain.RetentionClass(*p.RetentionClass)
-		if !rc.Valid() {
-			return nil, domain.NewValidationError("retention_class", "unknown retention class: "+*p.RetentionClass)
-		}
-		out.RetentionClass = &rc
-	}
-	if p.Authority != nil {
-		a := domain.Authority(*p.Authority)
-		if !a.Valid() {
-			return nil, domain.NewValidationError("authority", "unknown authority: "+*p.Authority)
-		}
-		out.Authority = &a
-	}
 	if p.RatifiedBy != nil {
 		out.RatifiedBy = p.RatifiedBy
 	}

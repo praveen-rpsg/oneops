@@ -12,18 +12,17 @@ import (
 
 func mkCiteObj(t *testing.T, co *ConfigObjectRepo, artifact string, retention domain.RetentionClass, citations string) string {
 	t.Helper()
-	meta := map[string]string{}
-	if citations != "" {
-		meta["citations"] = citations
-	}
 	created, err := co.Create(context.Background(), &domain.ConfigObject{
 		Artifact: artifact, Version: "1.0.0", Role: domain.RoleReference,
 		Lifecycle: domain.LifecycleDraft, RetentionClass: retention,
-		RetentionPolicy: "permanent", Metadata: meta,
+		RetentionPolicy: "permanent",
 	})
 	if err != nil {
 		t.Fatalf("obj %s: %v", artifact, err)
 	}
+	// §9.1 inputs are not descriptive metadata and no surface may write them
+	// (ADR-GOV-003); seed directly.
+	seedConstitutionalInput(t, co, created.CfgID, "citations", citations)
 	return created.CfgID
 }
 

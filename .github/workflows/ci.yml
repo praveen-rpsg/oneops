@@ -3,7 +3,11 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main, "release/**"]
+    # The default branch is `master`. It was previously absent from this list,
+    # so every push to the default branch bypassed CI entirely — which is how
+    # the two HTTP 500 defects reached the v1.0.0 GA tag. `main` is retained so
+    # the pipeline survives a future default-branch rename.
+    branches: [master, main, "release/**"]
 
 permissions:
   contents: read
@@ -15,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
           cache: true
       - name: vet
         run: go vet ./...
@@ -30,7 +34,7 @@ jobs:
   # (so the unit job never compiles them) and require TEST_DATABASE_URL. The job
   # FAILS if any integration test is skipped — the pipeline must actually exercise
   # the SQL layer (governance atomic transaction, hash chain, webhook/policy/
-  # timeline persistence), not silently skip it.
+  # timeline persistence, leader election and step-down), not silently skip it.
   integration:
     runs-on: ubuntu-latest
     services:
@@ -53,15 +57,34 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
           cache: true
-      - name: integration tests (race, fail on skip)
+      - name: integration tests (race; must actually reach the database)
         run: |
           set -euo pipefail
-          go test -tags integration -race -count=1 -v \
-            ./internal/store/postgres/... ./internal/httpapi/... 2>&1 | tee itest.log
-          if grep -q -- '--- SKIP' itest.log; then
-            echo "::error::an integration test was SKIPPED — the SQL layer was not exercised"
+          # The whole tree, not a list of packages. The list omitted
+          # internal/ops, whose leader-election and step-down integration tests
+          # are the live proofs behind two eliminated classes — so those two had
+          # never run in CI. A package added tomorrow is covered by construction.
+          go test -tags integration -race -count=1 -v ./... 2>&1 | tee itest.log
+
+          # What this guards is a pipeline reporting green while the SQL layer
+          # was never touched, which is exactly what an unset TEST_DATABASE_URL
+          # produces — every integration test skips with this message.
+          #
+          # It deliberately does not fail on *any* skip. The graph performance
+          # gates skip themselves under -race, on purpose and with their reasons
+          # in the code: latency measured under race instrumentation is a
+          # property of the instrumentation, not of the system. Failing on those
+          # made the job red on a green tree, and a job that is always red is a
+          # job everyone learns to ignore.
+          if grep -q 'TEST_DATABASE_URL not set' itest.log; then
+            echo "::error::an integration test skipped for want of a database — the SQL layer was not exercised"
+            exit 1
+          fi
+          # A run that asserted nothing is not a passing run.
+          if ! grep -q -- '--- PASS' itest.log; then
+            echo "::error::no test reported PASS — the integration run was vacuous"
             exit 1
           fi
 
@@ -73,16 +96,63 @@ jobs:
       - name: validate migration directory and checksum
         run: atlas migrate validate --dir "file://internal/store/migrate/sql"
 
+  # The published contract may not break clients already built against it.
+  # Whether the contract still matches the router is a Go test
+  # (httpapi.TestOpenAPIContract_*) and runs in build-test; this job answers the
+  # different question of whether the contract changed compatibly, which needs a
+  # base revision to compare against and so only makes sense on a pull request.
+  contract:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # oasdiff reads the base spec out of git history, which a shallow
+          # clone does not contain.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: extract the contract as the base branch publishes it
+        id: base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if git show "$BASE_SHA:internal/httpapi/openapi.yaml" > /tmp/openapi-base.yaml 2>/dev/null; then
+            echo "comparable=true" >> "$GITHUB_OUTPUT"
+          else
+            # The spec is new on this branch, so no client can have been built
+            # against it and nothing can be broken.
+            echo "::notice::no openapi.yaml at the base revision — nothing to compare"
+            echo "comparable=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: fail on backward-incompatible API changes
+        if: steps.base.outputs.comparable == 'true'
+        # Pinned, and kept identical to OASDIFF_VERSION in the Makefile so
+        # `make contract-breaking` and CI agree on what counts as breaking.
+        #
+        # --fail-on ERR is load-bearing: `oasdiff breaking` prints its findings
+        # and exits 0 without it, which would make this gate decorative.
+        run: |
+          go run github.com/oasdiff/oasdiff@v1.11.7 breaking \
+            --fail-on ERR /tmp/openapi-base.yaml internal/httpapi/openapi.yaml
+
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          # Pinned, and kept identical to GOLANGCI_VERSION in the Makefile.
+          # `latest` silently changes the gate under the team: a release that
+          # adds a check turns an unrelated push red, and local `make lint`
+          # would disagree with CI about what passes.
+          version: v2.12.2
 
   security:
     runs-on: ubuntu-latest
@@ -98,9 +168,33 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
 
+  # The console ships inside the Go binary, so its typecheck and unit tests are
+  # release gates exactly like the Go suite. The bundle itself is a build
+  # artifact and is not committed; this job proves it still builds from source.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: install
+        run: pnpm --dir web install --frozen-lockfile
+      - name: typecheck
+        run: pnpm --dir web exec tsc -b --noEmit
+      - name: unit tests
+        run: pnpm --dir web exec vitest run
+      - name: build bundle
+        run: pnpm --dir web build
+
   docker:
     runs-on: ubuntu-latest
-    needs: [build-test]
+    needs: [build-test, web]
     steps:
       - uses: actions/checkout@v4
       - name: build image (no push)

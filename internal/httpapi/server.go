@@ -32,13 +32,17 @@ type idempotencyStore interface {
 
 // Server wires the registry dependencies into an HTTP handler.
 type Server struct {
-	cfg        *config.Config
-	log        *slog.Logger
-	repo       domain.ConfigObjectRepository
-	idem       idempotencyStore
-	verifier   *auth.Verifier
-	metrics    *observability.Metrics
-	health     *Health
+	cfg      *config.Config
+	log      *slog.Logger
+	repo     domain.ConfigObjectRepository
+	idem     idempotencyStore
+	verifier *auth.Verifier
+	metrics  *observability.Metrics
+	health   *Health
+	// invariant reports why the platform must not serve tenant data, or nil when
+	// it may. Nil (unset) leaves the gate open, which is what unit tests and any
+	// deployment without a sentinel get (ADR-SECURITY-002).
+	invariant  func() error
 	graph      *graph.Service        // M2.3 graph transport; nil until SetGraph
 	graphRepo  domain.GraphTraversal // direct (one-hop) lookups
 	diag       http.Handler          // operational diagnostics; nil until SetDiagnostics
@@ -72,6 +76,10 @@ type Server struct {
 	// Read-only compliance & evidence engine; nil until SetCompliance.
 	compliance       complianceService
 	complianceExport func()
+
+	// Tenant registry; nil until SetTenants. While nil the platform resolves
+	// every request to the system tenant, which is the pre-tenancy behaviour.
+	tenants domain.TenantRepository
 }
 
 // SetGovernance wires the Governance Engine behind the constitutional-operation
@@ -117,17 +125,47 @@ func NewServer(
 	}
 }
 
+// SetInvariantGate installs the check that decides whether the tenant-data
+// surface may serve. Additive, like the other Set* wiring: a server without it
+// serves unconditionally (ADR-SECURITY-002).
+func (s *Server) SetInvariantGate(invariant func() error) { s.invariant = invariant }
+
 // Router builds the fully-wired HTTP handler.
 func (s *Server) Router() http.Handler {
+	return otelhttp.NewHandler(s.routes(), "oneops-controlplane")
+}
+
+// routes builds the mux Router serves. It is separate from Router only so the
+// route table stays reachable as a chi.Routes: the OpenAPI contract guard walks
+// it to derive its subject set, and the alternative — restating the routes in a
+// test — is a second list that drifts from this one silently.
+func (s *Server) routes() *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(s.recoverer, s.requestID, s.logging, s.metrics.Middleware)
 
 	r.Get("/healthz", s.health.Live)
 	r.Get("/readyz", s.health.Ready)
-	r.Handle("/metrics", s.metrics.Handler())
+	r.Get("/auth/config", s.serveAuthConfig)
+	// /metrics rides the public listener only when no separate observability
+	// listener is configured. It discloses audit-integrity state, per-route
+	// request volumes and dependency health — no tenant data, but enough to
+	// tell an attacker when audit verification is failing. Production config
+	// validation refuses an empty ONEOPS_METRICS_ADDR.
+	if s.cfg.MetricsAddr == "" {
+		r.Handle("/metrics", s.metrics.Handler())
+	}
 	r.Get("/openapi.yaml", serveOpenAPI)
 	r.Get("/docs", serveDocs)
-	r.Get("/", s.serveRoot)
+
+	// The console, when built, is served from this origin so the browser and the
+	// API share it — no CORS layer required. Falls back to the JSON service
+	// descriptor when the console has not been built.
+	if root, ok := webFS(); ok {
+		r.Get("/", serveConsoleIndex(root))
+		r.Handle("/assets/*", serveConsoleAssets(root))
+	} else {
+		r.Get("/", s.serveRoot)
+	}
 
 	// Operational diagnostics: read-only, authenticated, no secrets. Additive.
 	if s.diag != nil {
@@ -139,6 +177,13 @@ func (s *Server) Router() http.Handler {
 	s.mountPProf(r)
 
 	r.Route("/v1", func(rt chi.Router) {
+		// The invariant gate precedes authentication: when the boundary that
+		// makes tenant identity mean anything is gone, no request on the
+		// tenant-data surface may proceed — including one that would otherwise
+		// authenticate perfectly (ADR-SECURITY-002). /healthz, /readyz and
+		// /metrics stay outside it so a breached instance can still be
+		// diagnosed.
+		rt.Use(s.invariantGate)
 		rt.Use(s.authenticate)
 		rt.With(s.requirePermission(auth.PermRead)).Get("/artifacts", s.listArtifacts)
 		rt.With(s.requirePermission(auth.PermRead)).Get("/artifacts/{id}", s.getArtifact)
@@ -157,6 +202,7 @@ func (s *Server) Router() http.Handler {
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/ratify", s.ratifyGovernance)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/approve", s.approveGovernance)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/extend", s.extendGovernance)
+		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/replace", s.replaceGovernance)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/suspend", s.suspendGovernance)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/deprecate", s.deprecateGovernance)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/governance/{id}/withdraw", s.withdrawGovernance)
@@ -179,6 +225,23 @@ func (s *Server) Router() http.Handler {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/metrics", s.adminMetrics)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/config", s.adminConfig)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/report", s.adminReport)
+
+		// Tenant registry — the isolation boundary every other row belongs to.
+		//
+		// These are platform operations, not tenant operations, and they are the
+		// one part of /admin that row-level security does not confine: the
+		// registry is exempt by necessity, since resolving a token to a tenant
+		// must precede binding one (ADR-TENANCY-001 §4).
+		//
+		// They previously required PermAdmin, the same permission that
+		// administers webhooks inside a tenant. Any tenant administrator could
+		// therefore enumerate every customer, register tenants binding external
+		// identifiers of its choosing, and suspend a different customer — locking
+		// them out of the platform entirely. Verified against the running
+		// service; see ADR-AUTHZ-001.
+		rt.With(s.requirePlatformAdmin).Get("/admin/tenants", s.listTenants)
+		rt.With(s.requirePlatformAdmin).Post("/admin/tenants", s.createTenant)
+		rt.With(s.requirePlatformAdmin).Patch("/admin/tenants/{id}", s.patchTenant)
 
 		// Event delivery — webhook administration (admin permission).
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/webhooks", s.listWebhooks)
@@ -220,7 +283,29 @@ func (s *Server) Router() http.Handler {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/compliance/{governanceID}/checks", s.getComplianceChecks)
 	})
 
-	return otelhttp.NewHandler(r, "oneops-controlplane")
+	return r
+}
+
+// MetricsServer builds the observability listener, or nil when /metrics is
+// served on the public listener instead.
+//
+// It carries no authentication and must not be exposed by the public ingress:
+// the isolation is the bind address. Kept deliberately separate from Router so
+// nothing tenant-facing can be added to it by accident.
+func (s *Server) MetricsServer() *http.Server {
+	if s.cfg.MetricsAddr == "" {
+		return nil
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", s.metrics.Handler())
+	return &http.Server{
+		Addr:              s.cfg.MetricsAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 }
 
 // HTTPServer builds an *http.Server with production timeouts.

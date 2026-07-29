@@ -80,6 +80,24 @@ func (g *GovernanceClient) Extend(ctx context.Context, id, successorID string, o
 	return g.post(ctx, id, "extend", body, opts)
 }
 
+// Replace supersedes the configuration object id with successorID
+// (Configuration State Model §8 Replacement). The server gates this on the
+// four-part Replacement Test (§9.1): the successor must own every
+// responsibility of the base, no Active artifact may cite it, no Active
+// configuration may depend on it, and its removal must leave no operational
+// gap. On success the base becomes authority=historical,
+// retention=historical_record.
+//
+// A failed test is returned as an *APIError with Status 409 whose Detail names
+// the clause that failed. The client evaluates nothing — the server decides.
+func (g *GovernanceClient) Replace(ctx context.Context, id, successorID string, opts WriteOptions) (*GovernanceResult, error) {
+	if successorID == "" {
+		return nil, errors.New("oneops: Replace requires a successor id")
+	}
+	body := map[string]string{"successor_id": successorID}
+	return g.post(ctx, id, "replace", body, opts)
+}
+
 // Delete deletes a working-material configuration object (engine enforces the rules).
 func (g *GovernanceClient) Delete(ctx context.Context, id string, opts WriteOptions) (*GovernanceResult, error) {
 	h, err := opts.headers()
