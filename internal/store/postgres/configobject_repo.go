@@ -124,6 +124,13 @@ func (r *ConfigObjectRepo) insertTx(ctx context.Context, tx pgx.Tx, o *domain.Co
 		return fmt.Errorf("insert: %w", err)
 	}
 	for k, v := range o.Metadata {
+		// The descriptive-metadata channel never carries §9.1 constitutional
+		// inputs (ADR-GOV-003). This is the storage chokepoint, not a transport
+		// check: every present and future caller writing metadata passes here.
+		if domain.IsConstitutionalMetadataKey(k) {
+			return domain.NewValidationError("metadata",
+				"key "+k+" is a constitutional input (§9.1) and may not be written as descriptive metadata")
+		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO configuration_metadata (cfg_id, key, value, tenant_id) VALUES ($1,$2,$3,$4)`,
 			o.CfgID, k, v, tenantID,
@@ -262,10 +269,23 @@ func (r *ConfigObjectRepo) Update(ctx context.Context, cfgID string, expected in
 	}
 
 	if patch.Metadata != nil {
-		if _, err := tx.Exec(ctx, `DELETE FROM configuration_metadata WHERE cfg_id = $1`, cfgID); err != nil {
+		// A descriptive patch replaces the descriptive map wholesale, so the
+		// delete below must spare the §9.1 constitutional inputs. Refusing to
+		// *set* them while allowing the same request to *erase* them is not a
+		// guard: proven live, a patch of an unrelated key returned 200 and
+		// removed `responsibilities`, which makes allResponsibilities(old) empty
+		// and the Replacement Test vacuously satisfied (ADR-GOV-003).
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM configuration_metadata WHERE cfg_id = $1 AND key <> ALL($2::text[])`,
+			cfgID, domain.ConstitutionalMetadataKeys(),
+		); err != nil {
 			return nil, fmt.Errorf("clear metadata: %w", err)
 		}
 		for k, v := range patch.Metadata {
+			if domain.IsConstitutionalMetadataKey(k) {
+				return nil, domain.NewValidationError("metadata",
+					"key "+k+" is a constitutional input (§9.1) and may not be written as descriptive metadata")
+			}
 			if _, err := tx.Exec(ctx,
 				`INSERT INTO configuration_metadata (cfg_id, key, value) VALUES ($1,$2,$3)`, cfgID, k, v,
 			); err != nil {

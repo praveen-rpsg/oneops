@@ -10,20 +10,39 @@ import (
 	"github.com/rpsg/oneops/internal/domain"
 )
 
+// seedConstitutionalInput writes a §9.1 input directly.
+//
+// No API or repository surface may write these keys — they decide computed
+// Authority and the Replacement Test verdict, and the descriptive-metadata
+// channel is not a constitutional act (ADR-GOV-003). The platform has no
+// constitutional operation for declaring them either, which is the open gap
+// referred to the governance process; until it exists, direct insertion is the
+// only way these inputs come to be, and tests must say so rather than route
+// around the guard.
+func seedConstitutionalInput(t *testing.T, co *ConfigObjectRepo, cfgID, key, value string) {
+	t.Helper()
+	if value == "" {
+		return
+	}
+	if _, err := co.pool.Exec(context.Background(),
+		`INSERT INTO configuration_metadata (cfg_id, key, value) VALUES ($1,$2,$3)
+		 ON CONFLICT (cfg_id, key) DO UPDATE SET value = EXCLUDED.value`,
+		cfgID, key, value); err != nil {
+		t.Fatalf("seed %s for %s: %v", key, cfgID, err)
+	}
+}
+
 func mkRespObj(t *testing.T, co *ConfigObjectRepo, artifact string, responsibilities string) string {
 	t.Helper()
-	meta := map[string]string{}
-	if responsibilities != "" {
-		meta["responsibilities"] = responsibilities
-	}
 	created, err := co.Create(context.Background(), &domain.ConfigObject{
 		Artifact: artifact, Version: "1.0.0", Role: domain.RoleReference,
 		Lifecycle: domain.LifecycleDraft, RetentionClass: domain.RetentionWorkingMaterial,
-		RetentionPolicy: "permanent", Metadata: meta,
+		RetentionPolicy: "permanent",
 	})
 	if err != nil {
 		t.Fatalf("obj %s: %v", artifact, err)
 	}
+	seedConstitutionalInput(t, co, created.CfgID, "responsibilities", responsibilities)
 	return created.CfgID
 }
 

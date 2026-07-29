@@ -38,6 +38,7 @@ fail-closed startup validator.
 | 21 | **Outcome lost when the worker is stopped** (outcome written through the leadership context; a demotion mid-flight POSTed to the subscriber, recorded nothing, incremented the success metric anyway, and left the row claimed for unbounded re-send) | **Outcomes written on a context detached from the worker's cancellation (`WithoutCancel` + own deadline); a failed outcome write is reported, not swallowed** | ✓ | arch, int | **ADR-CONCURRENCY-006** |
 | 22 | **A security invariant weakened after startup goes unnoticed** (schema invariants proven once at boot; RLS disabled post-startup produced a live cross-tenant read while the process reported ready, served traffic, and logged nothing) | **Continuous re-verification (`ops.Sentinel`) re-running the same startup validator; a breach fails closed — `/v1` refused, readiness red, workers stopped — and clears on repair** | ✓ | arch, int, unit | **ADR-SECURITY-002** |
 | 23 | **Unaudited destruction of a governed object via a second, non-constitutional door** (`DELETE /v1/artifacts/{id}` issued a bare SQL delete enforcing only the protected-role rule: a ratified `current_baseline` object the engine refuses (409) was destroyed (204) with **zero** audit events, the dependents check skipped and its dependency edges silently cascaded away) | **Destruction has one door: the route executes the engine's §8 deletion, and the destructive method is removed from the repository *and* from the persistence contract — not hardened** | ✓ | arch, int, unit | **ADR-GOV-002** |
+| 24 | **§9.1 constitutional inputs writable and erasable through the descriptive-metadata channel** (`responsibilities`/`citations`/`coverage` refused by PATCH but accepted at CREATE/BULK — a successor seeded that way turned a Replacement the engine refused (409) into one it granted (200) on a ratified `current_baseline` artifact; and a PATCH of an unrelated key returned 200 while **erasing** `responsibilities`) | **Enforced at the storage chokepoint both writers pass through, plus the inception boundary; a wholesale metadata clear spares them; one definition of the key set** | ✓ | arch, int | **ADR-GOV-003** |
 
 ## Guarantees stated, not overstated
 
@@ -70,6 +71,14 @@ The register records what was *eliminated*. Two properties are deliberately
   with direct SQL access can still delete rows — that residual is covered by the
   audit-immutability triggers and the schema sentinel (ADR-SECURITY-002), not by
   this entry.
+- **The §9.1 write channel is closed; the §9.1 *verdict* is not fixed.** A client
+  can no longer forge or erase the inputs to the Replacement Test
+  (ADR-GOV-003). It remains true that `owns(new, ∅)` is vacuously satisfied, so an
+  artifact declaring no responsibilities can still be replaced by any successor —
+  the ratified clause says so, and changing it is an Amendment. Registered as
+  **CMR-A05**, BLOCKED. There is also now no constitutional operation for
+  establishing those inputs at all; that gap is part of the same referral. This
+  register entry claims the closed channel, nothing more.
 - **The leadership step-down window is bounded, not zero.** Up to the health-watch
   interval, a demoted leader may still run its workers; that overlap is made
   *safe* by idempotent production and the atomic claim, not eliminated
@@ -351,6 +360,47 @@ evidence, residual risks, status. New investigations add their boundary here.
   `arch.TestConfigObjectRepo_HasNoUnguardedDelete`,
   `arch.TestHTTPHandlers_DoNotDestroyObjectsDirectly`,
   `httpapi.TestDestruction_*` and `httpapi.TestCreateGetDelete`.
+
+### Constitutional inputs vs descriptive data (ADR-GOV-003)
+
+- **Property.** The descriptive-metadata channel can neither write nor destroy a
+  §9.1 constitutional input (`responsibilities`, `citations`, `coverage`).
+- **Threat model.** (a) Seeding a successor at creation so the four-part
+  Replacement Test passes. (b) The same via bulk create. (c) Erasing the
+  incumbent's inputs through a patch of an unrelated key, which is as powerful as
+  forgery because an empty set satisfies the clause. (d) A future surface writing
+  metadata without remembering the rule. (e) Two copies of the key set drifting.
+- **Root authority.** `domain.ConstitutionalMetadataKeys()` — one definition —
+  enforced at the two storage writers every caller passes through, plus the
+  inception boundary for a clean 422.
+- **Failure assumptions.** A caller may hold ordinary write permission and craft
+  metadata deliberately; a future contributor may add a metadata-writing surface
+  without reading this ADR.
+- **Recovery assumptions.** None needed for the write channel. Inputs already
+  written before this change persist and are now immutable through the API.
+- **Operational assumptions.** Direct SQL bypasses this, as it bypasses every
+  application control (see ADR-SECURITY-002's controls). Because no constitutional
+  operation exists to declare these inputs, direct SQL is currently the only way
+  they can come to exist — stated, not hidden.
+- **Startup validation.** None specific.
+- **Runtime validation.** Both metadata writers refuse constitutional keys; the
+  wholesale clear excludes them; `ValidateInception` refuses them at ingress.
+- **Evidence.** Live exploit: create stored `responsibilities` while patch
+  refused it (400); a seeded successor moved a Replacement 409 → 200 against a
+  ratified `current_baseline` artifact; a patch of an unrelated key returned 200
+  and erased `responsibilities`. Live fix: create and bulk → 422; patch preserves
+  the input and still applies the descriptive change; seeded successor refused;
+  replacement with a plain successor → 409.
+- **Residual risks.** The vacuous-pass property of §9.1 is untouched and is
+  registered as **CMR-A05** (BLOCKED, Amendment required). No constitutional path
+  exists to establish these inputs. Breaking change: create/bulk return 422 for
+  bodies that previously succeeded.
+- **Status.** ✓ Closed *for the write channel only*. Enforced by
+  `arch.TestMetadataWrites_AreGuardedAtTheStorageChokepoint`,
+  `arch.TestMetadataClear_PreservesConstitutionalInputs`,
+  `arch.TestInception_RefusesConstitutionalMetadata`,
+  `arch.TestConstitutionalMetadataKeys_HaveOneDefinition` and
+  `postgres.TestConstitutionalMetadata_*`.
 
 ## How to add an entry
 

@@ -12,18 +12,17 @@ import (
 
 func mkCoverObj(t *testing.T, co *ConfigObjectRepo, artifact string, retention domain.RetentionClass, coverage string) string {
 	t.Helper()
-	meta := map[string]string{}
-	if coverage != "" {
-		meta["coverage"] = coverage
-	}
 	created, err := co.Create(context.Background(), &domain.ConfigObject{
 		Artifact: artifact, Version: "1.0.0", Role: domain.RoleReference,
 		Lifecycle: domain.LifecycleDraft, RetentionClass: retention,
-		RetentionPolicy: "permanent", Metadata: meta,
+		RetentionPolicy: "permanent",
 	})
 	if err != nil {
 		t.Fatalf("obj %s: %v", artifact, err)
 	}
+	// §9.1 inputs are not descriptive metadata and no surface may write them
+	// (ADR-GOV-003); seed directly.
+	seedConstitutionalInput(t, co, created.CfgID, "coverage", coverage)
 	return created.CfgID
 }
 

@@ -156,6 +156,19 @@ func (c *ConfigObject) ValidateInception() error {
 		return newValidation("authority",
 			"at inception must be non_normative (INT-3), got "+string(c.Authority))
 	}
+	// §9.1 inputs are carried in the metadata map but are not descriptive data.
+	// They decide computed Authority and the four-part Replacement Test, so a
+	// caller that supplies them at creation is deciding a constitutional verdict
+	// with an unaudited client field. Patch already refuses them; creation did
+	// not, and a successor seeded with crafted `responsibilities` turned a
+	// Replacement that the engine refused (409) into one it granted (200) against
+	// a ratified current_baseline artifact (ADR-GOV-003).
+	for k := range c.Metadata {
+		if IsConstitutionalMetadataKey(k) {
+			return newValidation("metadata",
+				"key "+k+" is a constitutional input (§9.1) and may not be set at creation")
+		}
+	}
 	return nil
 }
 
