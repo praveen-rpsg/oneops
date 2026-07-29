@@ -294,3 +294,47 @@ func TestAuditAppend_TakesTheChainHeadLock(t *testing.T) {
 	}
 	t.Logf("audit append paths swept: %d", appenders)
 }
+
+// The transport half of the cross-tenant key-confusion class (entry 1).
+//
+// Several unique keys on tenant-owned tables are justified as safe because the
+// platform generates their identity — `configuration_object.cfg_id` and the
+// `wh_`/`pol_`/`rpl_` ids. Those justifications hold only while a client cannot
+// supply one. The repository itself honours a pre-set id by design (the
+// governance engine and replay both construct rows with known ids), so the
+// guarantee lives entirely at the transport boundary: no client-facing create
+// DTO may expose an entity-identity field.
+//
+// Verified live during EVR-005: a POST carrying `"cfg_id":"ATTACKER-CHOSEN-ID"`
+// was ignored and a server ULID assigned.
+func TestCreateDTOs_DoNotExposeEntityIdentity(t *testing.T) {
+	src := stripComments(readFile(t, "../httpapi/dto.go"))
+
+	// Identity fields a client must never be able to set on a create.
+	banned := []string{`json:"cfg_id`, `json:"id`, `json:"chain_id`, `json:"tenant_id`}
+
+	checked := 0
+	for _, decl := range []string{"type createRequest struct", "type patchRequest struct"} {
+		i := strings.Index(src, decl)
+		if i < 0 {
+			t.Fatalf("%s not found in dto.go — this guard can no longer see the DTO it protects", decl)
+		}
+		checked++
+		body := src[i:]
+		if end := strings.Index(body, "\n}"); end > 0 {
+			body = body[:end]
+		}
+		for _, b := range banned {
+			if strings.Contains(body, b) {
+				t.Errorf("%s exposes %s — a client-supplied entity identity turns every "+
+					"single-column key on a tenant-owned table into a shared key space across "+
+					"tenants, which is the defect Trust Register entry 1 records (EVR-005)",
+					decl, b)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no create/patch DTOs examined; the guard would be vacuous")
+	}
+	t.Logf("client-facing DTOs checked for entity identity: %d", checked)
+}

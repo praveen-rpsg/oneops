@@ -55,18 +55,22 @@ fail-closed startup validator.
 ## Class status
 
 **Audit coverage (2026-07-29).** Entries swept: 2, 4, 5, 6, 7, 14, 15, 17, 18,
-11, 19, 20, 21, 22, 25, 26, 27, 28, 30. Evidence Validation Records live in `docs/evr/` —
+1, 11, 19, 20, 21, 22, 25, 26, 27, 28, 30. Evidence Validation Records live in `docs/evr/` —
 **EVR-001** (ownership family, PARTIALLY VALIDATED), **EVR-002** (authorization
 scope + producer identity, VALIDATED at ECL-5), **EVR-003** (retry accounting +
 outcome durability, PARTIALLY VALIDATED — entry 21 reopened), **EVR-004** (audit
 chain append authority, PARTIALLY VALIDATED — class closed, evidence
-insufficient). Entries **1, 3, 8, 9, 10, 12, 13, 16, 23, 24 have not yet been
-swept** — they are recorded as verified on the evidence in their ADRs,
+insufficient), **EVR-005** (cross-tenant key confusion, VALIDATED at ECL-5).
+Entries **3, 8, 9, 10, 12, 13, 16, 23, 24 have not yet been swept** — they are recorded as verified on the evidence in their ADRs,
 which is not the same as verified complete. Three of the six classes examined so
 far were found overstated, so the unswept remainder should be treated as
 *insufficiently verified* rather than closed.
 
-Each row records **Class Status** and **Evidence Confidence** (ECL-1…ECL-5).
+Each row records **Class Status**, **Evidence Confidence** (ECL-1…ECL-5) and,
+where audited, **Enforcement Maturity** (L0 comment · L1 integration · L2 AST ·
+L3 whole-tree · L4 registry-derived · L5 schema-derived). Raising maturity is an
+outcome in its own right: a class can be implementation-complete while still
+governance-incomplete.
 ECL-5 requires structural or schema/registry-derived completeness plus mutation
 verification; ECL-3 means fresh evidence but known-instance enforcement; ECL-2
 means historical evidence not recently reproduced. **An entry with no EVR is at
@@ -79,6 +83,7 @@ most ECL-2 and must not be read as certainty.**
 | Platform operation under tenant-scope authorization | 2 | **CLOSED** — EVR-002, **ECL-5** | none — subject set derived from the router's route paths |
 | Non-deterministic identity for a queued row | 15 | **CLOSED** — EVR-002, **ECL-5** | none — whole-tree sweep of row producers |
 | Privileged consumer trusting what it was handed | 4, 5, 6, 7 | **CLOSED** — EVR-001, **ECL-5** | none — guard derives its subject set from `TenantOwnedTables` (ADR-TENANCY-009) |
+| Cross-tenant key confusion (a client key as a global key) | 1 | **CLOSED** — EVR-005, **ECL-5**, maturity **L5 discovery / L4 justification** | none — every unique key on every tenant-owned table is discovered from the catalogue and must be tenant-keyed or justified |
 | Audit-chain append authority (the chain-head lock) | 11 | **CLOSED** — EVR-004, **ECL-5** (was ECL-2) | none — one append path; lock is a named method, tree-swept |
 | Outcome lost when the worker is stopped | 21 | **CLOSED** — EVR-003, **ECL-5** (reopened and re-closed) | none — tree-derived worker sweep (ADR-CONCURRENCY-008) |
 | Unbounded retry of unrecorded attempts | 20 | **CLOSED** — EVR-003, **ECL-4** | none; the replay queue has no retry semantics, so the class does not apply there (stated exception) |
