@@ -204,3 +204,101 @@ func readStoreSources(t *testing.T) string {
 	}
 	return b.String()
 }
+
+// A privileged mutation must be confined to the work the caller was given.
+//
+// Trust Register audit: entries 5/6 record "privileged-worker ownership drift"
+// as an eliminated class — every privileged consumer re-derives the owner rather
+// than trusting what it was handed. Verified on the dispatcher and the policy
+// executor; the replay worker's by-id path was never swept. `Requeue` was
+// `UPDATE webhook_delivery … WHERE id = ANY($1)` on the privileged pool with the
+// ids taken from the request body, so naming another tenant's delivery id reset
+// their row — proven live, `dead_letter`/retry_count=3 became
+// `pending`/retry_count=0, resurrecting it with a refilled budget.
+//
+// The subject set is the tenant-owned table registry, not a list of methods: a
+// mutation of tenant data keyed only by client-supplied ids must also carry an
+// owning predicate (ADR-TENANCY-009).
+func TestPrivilegedMutations_AreScopedToAnOwner(t *testing.T) {
+	tenantTables := tenantOwnedTables(t)
+	if len(tenantTables) == 0 {
+		t.Fatal("no tenant-owned tables found; the sweep would be vacuous")
+	}
+	// Predicates that confine a statement to an owner or to one named row.
+	owning := []string{"tenant_id", "webhook_id", "policy_id", "cfg_id", "chain_id", "WHERE id=$1", "WHERE id = $1"}
+
+	for _, body := range storeFuncBodies(t) {
+		for _, table := range tenantTables {
+			// Word-boundary match: "UPDATE webhook" is a substring of
+			// "UPDATE webhook_delivery", which flagged the wrong table.
+			if !mutatesTable(body, table) {
+				continue
+			}
+			// Only statements keyed on a caller-supplied *id set* are at risk. A
+			// single-row write by primary key is already confined, and the
+			// retention sweep's `status = ANY($2)` is an array of statuses, not
+			// ids — matching bare "= ANY($" flagged it as an ownership hole.
+			if !strings.Contains(body, "id = ANY($") && !strings.Contains(body, "id=ANY($") {
+				continue
+			}
+			scoped := false
+			for _, p := range owning {
+				if strings.Contains(body, p) {
+					scoped = true
+					break
+				}
+			}
+			if !scoped {
+				t.Errorf("a privileged mutation of %s is keyed only on a caller-supplied id set "+
+					"with no owning predicate — naming another tenant's ids reaches their rows "+
+					"(ADR-TENANCY-009)", table)
+			}
+		}
+	}
+}
+
+// mutatesTable reports whether the body mutates exactly this table, matching on
+// a word boundary so a table name that prefixes another is not confused for it.
+func mutatesTable(body, table string) bool {
+	for _, verb := range []string{"UPDATE " + table, "DELETE FROM " + table} {
+		i := strings.Index(body, verb)
+		for i >= 0 {
+			rest := body[i+len(verb):]
+			if rest == "" {
+				return true
+			}
+			// A real match is followed by whitespace or a statement break, not by
+			// more identifier characters.
+			c := rest[0]
+			if c == ' ' || c == '\n' || c == '\t' || c == '\r' {
+				return true
+			}
+			next := strings.Index(rest, verb)
+			if next < 0 {
+				break
+			}
+			i = i + len(verb) + next
+		}
+	}
+	return false
+}
+
+// tenantOwnedTables reads the canonical registry rather than repeating it, so a
+// table added there is swept automatically.
+func tenantOwnedTables(t *testing.T) []string {
+	t.Helper()
+	src := readFile(t, "../store/postgres/tenant_tables.go")
+	start := strings.Index(src, "var TenantOwnedTables = []string{")
+	if start < 0 {
+		t.Fatal("TenantOwnedTables registry not found — the sweep cannot derive its subject set")
+	}
+	end := strings.Index(src[start:], "}")
+	var out []string
+	for _, line := range strings.Split(src[start:start+end], "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line), ","))
+		if strings.HasPrefix(line, `"`) && strings.HasSuffix(line, `"`) {
+			out = append(out, strings.Trim(line, `"`))
+		}
+	}
+	return out
+}

@@ -51,7 +51,10 @@ type ReplayJobStore interface {
 // retention. It is additive to the delivery store — it adds no delivery logic.
 type DeliveryOps interface {
 	GetDelivery(ctx context.Context, id string) (Delivery, bool, error)
-	Requeue(ctx context.Context, ids []string) (int, error)
+	// Requeue resets the named deliveries of one webhook to pending. webhookID
+	// confines the write to the work the caller was given: keyed on ids alone it
+	// reset another tenant's deliveries (ADR-TENANCY-009).
+	Requeue(ctx context.Context, webhookID string, ids []string) (int, error)
 	RequeueDeadLetters(ctx context.Context, webhookID string) (int, error) // webhookID "" = all
 	ListDeadLetters(ctx context.Context, webhookID string, limit int) ([]Delivery, error)
 	DeleteOlderThan(ctx context.Context, cutoff time.Time, statuses []DeliveryStatus) (int, error)

@@ -17,10 +17,11 @@ import (
 )
 
 type fakeConsume struct {
-	deliveries map[string]events.Delivery
-	jobs       map[string]events.ReplayJob
-	requeued   []string
-	dlRetried  int
+	deliveries  map[string]events.Delivery
+	jobs        map[string]events.ReplayJob
+	requeued    []string
+	requeuedFor string
+	dlRetried   int
 }
 
 func newFakeConsume() *fakeConsume {
@@ -31,7 +32,11 @@ func (f *fakeConsume) GetDelivery(_ context.Context, id string) (events.Delivery
 	d, ok := f.deliveries[id]
 	return d, ok, nil
 }
-func (f *fakeConsume) Requeue(_ context.Context, ids []string) (int, error) {
+
+// Requeue records the webhook it was scoped to, so a test can assert the
+// containment the store enforces (ADR-TENANCY-009).
+func (f *fakeConsume) Requeue(_ context.Context, webhookID string, ids []string) (int, error) {
+	f.requeuedFor = webhookID
 	f.requeued = append(f.requeued, ids...)
 	return len(ids), nil
 }
@@ -173,6 +178,12 @@ func TestRetryDeliveryAndDeadLetters(t *testing.T) {
 
 	if rec := do(h, http.MethodPost, "/v1/admin/webhooks/wh_1/deliveries/d1/retry", nil, nil); rec.Code != http.StatusOK {
 		t.Fatalf("retry status = %d", rec.Code)
+	}
+	// The requeue must be scoped to the webhook in the route, so it cannot reach
+	// another owner's deliveries (ADR-TENANCY-009).
+	if con.requeuedFor != "wh_1" {
+		t.Errorf("requeue was scoped to %q, want the route's webhook — an unscoped requeue "+
+			"resets deliveries the caller does not own", con.requeuedFor)
 	}
 	if len(con.requeued) != 1 || con.requeued[0] != "d1" {
 		t.Fatalf("requeued = %v", con.requeued)

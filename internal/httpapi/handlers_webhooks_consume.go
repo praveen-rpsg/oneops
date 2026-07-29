@@ -160,7 +160,7 @@ func (s *Server) retryDelivery(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusNotFound, "not found", "no such delivery for this webhook")
 		return
 	}
-	n, err := s.deliveryOps.Requeue(r.Context(), []string{deliveryID})
+	n, err := s.deliveryOps.Requeue(r.Context(), id, []string{deliveryID})
 	if err != nil {
 		s.mapError(w, r, err)
 		return

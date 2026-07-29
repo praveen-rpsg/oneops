@@ -120,7 +120,7 @@ func (w *ReplayWorker) execute(ctx context.Context, job ReplayJob) {
 func (w *ReplayWorker) run(ctx context.Context, job ReplayJob) (int, error) {
 	if len(job.DeliveryIDs) > 0 {
 		// Re-send existing deliveries by id (preserves everything).
-		return w.ops.Requeue(ctx, job.DeliveryIDs)
+		return w.ops.Requeue(ctx, job.WebhookID, job.DeliveryIDs)
 	}
 	return w.replayWindow(ctx, job)
 }

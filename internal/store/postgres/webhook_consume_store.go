@@ -37,14 +37,27 @@ func (s *WebhookStore) GetDelivery(ctx context.Context, id string) (events.Deliv
 
 // Requeue resets the given deliveries to pending and due-now, so the existing
 // dispatcher re-attempts them. It returns the number of rows affected.
-func (s *WebhookStore) Requeue(ctx context.Context, ids []string) (int, error) {
-	if len(ids) == 0 {
+//
+// The requeue is confined to the webhook it was asked to replay
+// (ADR-TENANCY-009). It used to key on `id = ANY($1)` alone, on the privileged
+// pool, with the ids taken from the request body — so naming another tenant's
+// delivery id reset that tenant's row. Proven live: a victim's terminated
+// delivery went from `dead_letter`/retry_count=3 to `pending`/retry_count=0,
+// resurrecting it with a refilled retry budget (ADR-CONCURRENCY-006) so their
+// subscriber received it again.
+//
+// webhookID is the containment: the caller proved that webhook is theirs at the
+// API boundary on the tenant-scoped pool, and a delivery is reachable only
+// through the webhook it belongs to. It is a required parameter rather than an
+// optional filter so a caller cannot omit it.
+func (s *WebhookStore) Requeue(ctx context.Context, webhookID string, ids []string) (int, error) {
+	if len(ids) == 0 || webhookID == "" {
 		return 0, nil
 	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE webhook_delivery
 		   SET status='pending', retry_count=0, next_attempt_at=now()
-		 WHERE id = ANY($1)`, ids)
+		 WHERE id = ANY($1) AND webhook_id = $2`, ids, webhookID)
 	if err != nil {
 		return 0, fmt.Errorf("requeue deliveries: %w", err)
 	}

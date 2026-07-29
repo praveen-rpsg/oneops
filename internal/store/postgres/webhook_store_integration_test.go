@@ -86,7 +86,7 @@ func TestWebhookStore_Integration(t *testing.T) {
 	if d, _, _ := s.GetDelivery(ctx, "d2"); d.Status != events.StatusPending {
 		t.Fatalf("requeue did not reset status: %q", d.Status)
 	}
-	if n, err := s.Requeue(ctx, []string{"d1"}); err != nil || n != 1 {
+	if n, err := s.Requeue(ctx, "wh_1", []string{"d1"}); err != nil || n != 1 {
 		t.Fatalf("Requeue: %d %v", n, err)
 	}
 	if c, err := s.CountByStatus(ctx, events.StatusPending); err != nil || c != 2 {

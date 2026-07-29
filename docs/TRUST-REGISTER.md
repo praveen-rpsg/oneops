@@ -48,12 +48,14 @@ fail-closed startup validator.
 | 25 | **A delivery record's destination was retroactively rewritable** — *one instance of a wider class; see the scope note below* (`webhook_delivery` stored only `webhook_id`; the destination was derived by joining to the mutable `webhook.url`, so one admin `PATCH` — 200, no audit event — rewrote where every past delivery through that subscription had gone) | **The delivery holds `delivered_to`, captured at attempt time in the same fenced UPDATE as the outcome; an unattempted outcome records nothing and erases nothing; reads never join to the subscription** | ✓ | arch, int | **ADR-GOV-004** |
 | 26 | **A platform invariant enforced at only one of its two enforcement points** (`OwnershipValidator` ran at startup only, so a divergent ownership graph served `/v1` with `readyz=200` and 0 breaches while the same binary refused to boot on it — an instance would serve indefinitely but never restart) + **an outbound client outside the SSRF guard** (JWKS used a bare `http.Get`, unguarded and untimed) | **One `ops.Invariant` registry read by both the startup gate and the sentinel, with every validator required to be registered; and a whole-tree sweep for unguarded outbound HTTP instead of named call sites** | ✓ | arch, unit | **ADR-SECURITY-003** |
 | 27 | **A work queue with no atomic claim and no fencing token** (`webhook_replay_job` had neither: 8 of 8 pending jobs claimed by two workers at once, and a stale worker overwrote the owner's `completed/42` outcome with `failed/0`) | **The claim is a compare-and-set under `FOR UPDATE … SKIP LOCKED` that stamps the token; the outcome write is fenced on it; and the guards derive the queue and cursor sets from the schema instead of naming them** | ✓ | arch, int | **ADR-CONCURRENCY-007** |
+| 28 | **A privileged mutation confined by nothing but caller-supplied ids** (the replay-by-id path called `Requeue` with ids from the request body on the privileged pool — `WHERE id = ANY($1)` with no owner and not even the job's own webhook — resetting another tenant's terminated delivery to `pending`/retry_count=0 and resurrecting it) | **The requeue takes its webhook as a required parameter and filters on it; the guard derives its subject set from the `TenantOwnedTables` registry and fails any privileged mutation keyed only on a caller-supplied id set** | ✓ | arch, int | **ADR-TENANCY-009** |
 
 ## Class status
 
 **Audit coverage (2026-07-29).** Entries swept under the Class Elimination Law:
-14, 17, 18, 19, 22, 25, 26, 27. Entries **1–13, 15, 16, 20, 21, 23, 24 have not
-yet been swept** — they are recorded as verified on the evidence in their ADRs,
+4, 5, 6, 7, 14, 17, 18, 19, 22, 25, 26, 27, 28 — the ownership family is recorded
+in **EVR-001** (`docs/evr/`). Entries **1–3, 8–13, 15, 16, 20, 21, 23, 24 have
+not yet been swept** — they are recorded as verified on the evidence in their ADRs,
 which is not the same as verified complete. Three of the six classes examined so
 far were found overstated, so the unswept remainder should be treated as
 *insufficiently verified* rather than closed.
@@ -62,6 +64,7 @@ far were found overstated, so the unswept remainder should be treated as
 |---|---|---|---|
 | Boundary verified only at boot | 22 | **CLOSED** (2026-07-29) | none — one registry now feeds the startup gate and the sentinel, and every validator must be registered (ADR-SECURITY-003) |
 | Unguarded outbound HTTP client | 19 | **CLOSED** (2026-07-29) | none — whole-tree sweep, not named call sites (ADR-SECURITY-003) |
+| Privileged consumer trusting what it was handed | 4, 5, 6, 7 | **CLOSED** (2026-07-29) — see EVR-001 | none — guard derives its subject set from `TenantOwnedTables` (ADR-TENANCY-009) |
 | Historical record derived from mutable state | 25 | **OPEN** | `policy_execution` does not record the action it ran (held under AR-001) |
 | Non-exclusive claim on shared work | 14 | **CLOSED** (2026-07-29) | none — queue set derived from the schema, not named (ADR-CONCURRENCY-007) |
 | Unfenced completion by a worker that lost its claim | 18 | **CLOSED** (2026-07-29) | none — same schema-derived sweep (ADR-CONCURRENCY-007) |
@@ -102,7 +105,19 @@ class was in fact closed — but its enforcement named the two known cursors. Th
 guard now derives the cursor set from the schema, so the *claim* of completeness
 is now backed by a completeness check rather than by two examples.
 
-**The same failure mode, twice in two audits.** Enumerated enforcement was the
+### Reopened and re-closed on 2026-07-29 (third audit — EVR-001)
+
+**Entries 5 and 6 were reopened.** Ownership re-derivation was verified on the
+dispatcher and the policy executor. The replay worker is a fifth privileged path
+and has two branches: `replayWindow` re-derives correctly from the audit log, but
+the **by-id branch** called `Requeue` with ids taken verbatim from the request
+body — `UPDATE webhook_delivery … WHERE id = ANY($1)` on the privileged pool,
+with neither the delivery's owner nor the job's own webhook consulted. Proven
+live: a victim tenant's `dead_letter`/retry_count=3 delivery became
+`pending`/retry_count=0, resurrected with a refilled budget. Closed by
+ADR-TENANCY-009. **Entries 4 and 7 were re-verified and stand.**
+
+**The same failure mode, three times in three audits.** Enumerated enforcement was the
 common cause in both this audit and ADR-SECURITY-003. Guards in this programme
 must derive their subject set from the schema or the tree, not from a list.
 
@@ -599,6 +614,24 @@ evidence, residual risks, status. New investigations add their boundary here.
   deliberately, because giving it lease recovery requires giving it retry
   accounting (ADR-CONCURRENCY-006) as well. Documented by
   `postgres.TestReplayJob_StuckRunningIsNotReclaimed`.
+
+### Privileged mutation scoping — swept over the tenant-table registry (ADR-TENANCY-009)
+
+- **Verified class.** A privileged consumer mutating tenant-owned rows that it
+  never proved belong to the work it was given.
+- **Remaining instances.** None known. The subject set is
+  `postgres.TenantOwnedTables`, so a table added there is swept automatically.
+- **Scope of elimination.** Any privileged `UPDATE`/`DELETE` on a tenant-owned
+  table keyed on a caller-supplied id set must also carry an owning predicate.
+  `Requeue` takes its webhook as a required parameter rather than an optional
+  filter, so a caller cannot omit it.
+- **Known exceptions.** The retention sweep (`DeleteOlderThan`) is deliberately
+  owner-agnostic (ADR-TENANCY-008) and is excluded by the id-set criterion.
+  Single-row writes by primary key are already confined.
+- **Residual risk.** The guard proves an owning predicate is *present*, not that
+  it is *correct*. `Requeue` is confined to the webhook — the work the caller was
+  given — and does not re-derive the event owner from the audit log; that check
+  remains at send time in the dispatcher, where the outbound effect happens.
 
 ## How to add an entry
 

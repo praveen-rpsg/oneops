@@ -19,12 +19,15 @@ func (f *fakeDeliveries) GetDelivery(_ context.Context, id string) (Delivery, bo
 	d, ok := f.m[id]
 	return d, ok, nil
 }
-func (f *fakeDeliveries) Requeue(_ context.Context, ids []string) (int, error) {
+
+// Requeue models the store's containment: a delivery is requeued only if it
+// belongs to the webhook the caller was given (ADR-TENANCY-009).
+func (f *fakeDeliveries) Requeue(_ context.Context, webhookID string, ids []string) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	n := 0
 	for _, id := range ids {
-		if d, ok := f.m[id]; ok {
+		if d, ok := f.m[id]; ok && d.WebhookID == webhookID {
 			d.Status, d.RetryCount = StatusPending, 0
 			f.m[id] = d
 			n++
