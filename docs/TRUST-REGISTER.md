@@ -57,7 +57,7 @@ fail-closed startup validator.
 ## Class status
 
 **Audit coverage (2026-07-29).** Entries swept: 2, 4, 5, 6, 7, 14, 15, 17, 18,
-1, 8, 10, 11, 16, 19, 20, 21, 22, 25, 26, 27, 28, 30, 31, 32. Evidence Validation Records live in `docs/evr/` —
+**all entries 1–32.** Evidence Validation Records live in `docs/evr/` —
 **EVR-001** (ownership family, PARTIALLY VALIDATED), **EVR-002** (authorization
 scope + producer identity, VALIDATED at ECL-5), **EVR-003** (retry accounting +
 outcome durability, PARTIALLY VALIDATED — entry 21 reopened), **EVR-004** (audit
@@ -65,8 +65,9 @@ chain append authority, PARTIALLY VALIDATED — class closed, evidence
 insufficient), **EVR-005** (cross-tenant key confusion, VALIDATED at ECL-5),
 **EVR-006** (operational tooling, PARTIALLY VALIDATED — a defective sibling
 script found), **EVR-007** (leader step-down, VALIDATED at ECL-5), **EVR-008** (restore
-consistency, PARTIALLY VALIDATED — a documented instance was open). Entries
-**3, 9, 12, 13, 23, 24 have not yet been swept** — they are recorded as verified on the evidence in their ADRs,
+consistency, PARTIALLY VALIDATED — a documented instance was open), **EVR-009**
+(the remaining six entries; two overstated their enforcement tier). **No entry
+remains unswept** — they are recorded as verified on the evidence in their ADRs,
 which is not the same as verified complete. Three of the six classes examined so
 far were found overstated, so the unswept remainder should be treated as
 *insufficiently verified* rather than closed.
@@ -88,6 +89,11 @@ most ECL-2 and must not be read as certainty.**
 | Platform operation under tenant-scope authorization | 2 | **CLOSED** — EVR-002, **ECL-5** | none — subject set derived from the router's route paths |
 | Non-deterministic identity for a queued row | 15 | **CLOSED** — EVR-002, **ECL-5** | none — whole-tree sweep of row producers |
 | Privileged consumer trusting what it was handed | 4, 5, 6, 7 | **CLOSED** — EVR-001, **ECL-5** | none — guard derives its subject set from `TenantOwnedTables` (ADR-TENANCY-009) |
+| Concurrent-boot migration race | 13 | **CLOSED** — EVR-009, **ECL-4** | none — one lock, one path; race now reproduced and mutation-verified |
+| Metrics on the public listener | 3 | **CLOSED** — EVR-009, **ECL-4** | none — conditional mount + production config refusal, now guarded |
+| Multi-replica double-execution | 12 | **CLOSED** — EVR-009, **ECL-4** | none — AST sweep of the composition root + worker cancellation sweep |
+| Ownership-model schema weakening | 9 | **CLOSED** — EVR-009, **ECL-5**, maturity **L1 → L4** | none — a registered platform invariant (ADR-SECURITY-003) |
+| Unaudited destruction / constitutional inputs | 23, 24 | **CLOSED** — EVR-009, **ECL-4** | none — destructive method removed from the contract; metadata guarded at the storage chokepoint |
 | Inconsistent restore silently trusted | 8 | **CLOSED** — EVR-008, **ECL-5**, maturity **L1 → L4** | none — cursor consistency joined the invariant registry |
 | Demoted leader keeps running its workers | 16 | **CLOSED** — EVR-007, **ECL-5**, maturity **L1 → L3** | none — every worker Run loop is tree-swept for cancellation |
 | Privileged operational tooling outside the trust model | 10 | **CLOSED** — EVR-006, **ECL-5**, maturity **L1 → L4** | none — `cmd/` and `scripts/` both registry-guarded |

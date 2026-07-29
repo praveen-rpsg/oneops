@@ -383,3 +383,48 @@ func TestEveryWorkerRunLoop_ObservesCancellation(t *testing.T) {
 	}
 	t.Logf("worker Run loops swept for cancellation: %d", checked)
 }
+
+// Completeness guard for the metrics listener (entry 3).
+//
+// `/metrics` discloses audit-integrity state, per-route request volumes and
+// dependency health. It is not tenant data, but it tells an attacker when audit
+// verification is failing, so it belongs on its own listener.
+//
+// The Trust Register recorded `arch` enforcement for this entry. No architecture
+// test existed — the protection was a production-config check plus a conditional
+// mount, and the register overstated the tier (EVR-009). This is that guard.
+func TestMetricsIsNotOnThePublicListenerInProduction(t *testing.T) {
+	server := stripComments(readFile(t, "../httpapi/server.go"))
+
+	// The public router may mount /metrics only when no separate observability
+	// listener is configured — a development convenience, refused in production.
+	i := strings.Index(server, `r.Handle("/metrics"`)
+	if i < 0 {
+		t.Log("the public router does not mount /metrics at all; stronger than required")
+	} else {
+		window := server[max0(i-300):i]
+		if !strings.Contains(window, "MetricsAddr ==") {
+			t.Error("the public router mounts /metrics unconditionally — it would be reachable on " +
+				"the tenant-facing listener in every deployment, disclosing audit-integrity and " +
+				"dependency state (entry 3)")
+		}
+	}
+
+	// And production configuration must refuse the conditional case outright.
+	cfg := stripComments(readFile(t, "../config/config.go"))
+	if !strings.Contains(cfg, "ONEOPS_METRICS_ADDR is empty") {
+		t.Error("production config validation no longer refuses an empty ONEOPS_METRICS_ADDR, so " +
+			"a production deployment could serve /metrics on the public listener (entry 3)")
+	}
+	if !strings.Contains(cfg, "insecure production configuration") {
+		t.Error("production config problems no longer fail startup — the metrics check would be " +
+			"advisory rather than enforced (entry 3)")
+	}
+}
+
+func max0(i int) int {
+	if i < 0 {
+		return 0
+	}
+	return i
+}
