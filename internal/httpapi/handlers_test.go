@@ -336,12 +336,18 @@ func TestCreateGetDelete(t *testing.T) {
 		t.Errorf("expected 304, got %d", nm.Code)
 	}
 
+	// Destroying a Configuration Object is a §8 constitutional operation executed
+	// by the Governance Engine (ADR-GOV-002). This server is built without one,
+	// so destruction must be refused — and, critically, the object must survive.
+	// The previous behaviour destroyed it here through a repository method that
+	// enforced only the protected-role rule and wrote no audit event.
 	del := do(h, http.MethodDelete, "/v1/artifacts/"+created.CfgID, nil, nil)
-	if del.Code != http.StatusNoContent {
-		t.Fatalf("delete = %d", del.Code)
+	if del.Code == http.StatusNoContent || del.Code == http.StatusOK {
+		t.Fatalf("delete = %d: a governed object was destroyed with no Governance Engine to "+
+			"authorise or audit it", del.Code)
 	}
-	if again := do(h, http.MethodGet, "/v1/artifacts/"+created.CfgID, nil, nil); again.Code != 404 {
-		t.Errorf("expected 404 after delete, got %d", again.Code)
+	if again := do(h, http.MethodGet, "/v1/artifacts/"+created.CfgID, nil, nil); again.Code != 200 {
+		t.Errorf("the object did not survive a refused deletion: GET = %d", again.Code)
 	}
 }
 

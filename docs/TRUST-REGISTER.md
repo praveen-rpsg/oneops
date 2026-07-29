@@ -37,6 +37,7 @@ fail-closed startup validator.
 | 20 | **Unbounded retry of a row whose worker never reports back** (the reclaim path left `retry_count` untouched, so a crash-looping row was re-delivered/re-executed forever; the queue had no terminating state for it) | **The claim charges the attempt and enforces the budget: `ClaimDue` advances `retry_count` and dead-letters a row whose next attempt would exceed `max_retries`, atomically** | ✓ | arch, int | **ADR-CONCURRENCY-006** |
 | 21 | **Outcome lost when the worker is stopped** (outcome written through the leadership context; a demotion mid-flight POSTed to the subscriber, recorded nothing, incremented the success metric anyway, and left the row claimed for unbounded re-send) | **Outcomes written on a context detached from the worker's cancellation (`WithoutCancel` + own deadline); a failed outcome write is reported, not swallowed** | ✓ | arch, int | **ADR-CONCURRENCY-006** |
 | 22 | **A security invariant weakened after startup goes unnoticed** (schema invariants proven once at boot; RLS disabled post-startup produced a live cross-tenant read while the process reported ready, served traffic, and logged nothing) | **Continuous re-verification (`ops.Sentinel`) re-running the same startup validator; a breach fails closed — `/v1` refused, readiness red, workers stopped — and clears on repair** | ✓ | arch, int, unit | **ADR-SECURITY-002** |
+| 23 | **Unaudited destruction of a governed object via a second, non-constitutional door** (`DELETE /v1/artifacts/{id}` issued a bare SQL delete enforcing only the protected-role rule: a ratified `current_baseline` object the engine refuses (409) was destroyed (204) with **zero** audit events, the dependents check skipped and its dependency edges silently cascaded away) | **Destruction has one door: the route executes the engine's §8 deletion, and the destructive method is removed from the repository *and* from the persistence contract — not hardened** | ✓ | arch, int, unit | **ADR-GOV-002** |
 
 ## Guarantees stated, not overstated
 
@@ -62,6 +63,13 @@ The register records what was *eliminated*. Two properties are deliberately
   interval and stops trusting itself — refusing tenant traffic, leaving the load
   balancer, and stopping its workers (ADR-SECURITY-002). Reads occurring inside
   that detection window are not prevented, and the window is bounded, not zero.
+- **Destruction is authorised and recorded, not reversible.** A permitted
+  deletion still removes the object; what is guaranteed is that it passed the §8
+  preconditions and appended exactly one audit event in the same transaction
+  (ADR-GOV-002). The audit chain deliberately outlives the object. An operator
+  with direct SQL access can still delete rows — that residual is covered by the
+  audit-immutability triggers and the schema sentinel (ADR-SECURITY-002), not by
+  this entry.
 - **The leadership step-down window is bounded, not zero.** Up to the health-watch
   interval, a demoted leader may still run its workers; that overlap is made
   *safe* by idempotent production and the atomic claim, not eliminated
@@ -299,6 +307,50 @@ evidence, residual risks, status. New investigations add their boundary here.
   `arch.TestSentinel_TreatsUnverifiedAsUnhealthy`, `ops.TestSentinel_*`,
   `ops.TestRunWhileHealthy_*`, `httpapi.TestInvariantGate_*`, and
   `postgres.TestRuntimeInvariant_*`.
+
+### Constitutional destruction — one door (ADR-GOV-002)
+
+- **Property.** A Configuration Object can be destroyed only by the Governance
+  Engine, only when §8 permits it (role not protected, working material, no
+  dependents), and never without exactly one audit event committed in the same
+  transaction as the removal.
+- **Threat model.** (a) A second route reaching storage directly — `DELETE
+  /v1/artifacts/{id}` did, enforcing one of the four preconditions. (b) Unaudited
+  destruction, making the audit log an incomplete record of state changes.
+  (c) The dependents check skipped, so `ON DELETE CASCADE` silently destroys the
+  edges an audited Extension created, leaving the log asserting a relationship
+  the graph no longer contains. (d) A future handler wired to a destructive
+  repository method. (e) Destruction attempted with no engine present.
+- **Root authority.** The Governance Engine's §8 transition plan plus the atomic
+  audit append (ADR-AUDIT-005). Storage is reached only through
+  `GovernanceStore.RemoveObject` inside that transaction.
+- **Failure assumptions.** A caller may hold `delete` permission and intend
+  destruction of governed content; a future contributor may add a handler without
+  reading this ADR; an engine may be absent from a given wiring.
+- **Recovery assumptions.** None — destruction is terminal by design. The audit
+  chain survives the object deliberately, so the record of its existence and
+  removal persists. Orphaned chains from before this change are harmless to
+  startup (verified live).
+- **Operational assumptions.** Direct SQL access bypasses this entirely; that
+  residual belongs to ADR-SECURITY-002's controls.
+- **Startup validation.** None specific.
+- **Runtime validation.** The engine's §8 preconditions on every destruction; the
+  route refuses outright when no engine is wired.
+- **Evidence.** Live exploit: ratified `current_baseline` object refused by the
+  governance route (409) destroyed by the registry route (204), 0 rows left,
+  0 deletion audit events; concurrent variant diverged the graph from the audit
+  log. Live fix: 409 and the object survives; a permitted deletion returns 200
+  with exactly 1 `deletion` audit event; an object with a dependent is refused and
+  its edge survives.
+- **Residual risks.** Breaking API change (Idempotency-Key now required; 200 not
+  204; 409 where destruction formerly succeeded). `ON DELETE CASCADE` is still the
+  removal mechanism and is safe only because the dependents check now precedes it
+  on every path — the architecture tests exist to keep that true.
+- **Status.** ✓ Closed. Enforced by
+  `arch.TestConfigObjectRepository_ExposesNoDestructiveMethod`,
+  `arch.TestConfigObjectRepo_HasNoUnguardedDelete`,
+  `arch.TestHTTPHandlers_DoNotDestroyObjectsDirectly`,
+  `httpapi.TestDestruction_*` and `httpapi.TestCreateGetDelete`.
 
 ## How to add an entry
 

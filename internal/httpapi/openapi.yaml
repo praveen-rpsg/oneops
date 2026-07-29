@@ -109,13 +109,31 @@ paths:
         '412': { $ref: '#/components/responses/Problem' }
         '428': { $ref: '#/components/responses/Problem' }
     delete:
-      summary: Delete a configuration object
+      summary: Delete a working-material configuration object
+      description: >
+        Destroying a Configuration Object is a §8 constitutional operation and is
+        executed by the Governance Engine, identically to
+        DELETE /v1/governance/{id}: deletion is permitted only for
+        working_material with no dependents, protected roles are never deletable,
+        and the removal is recorded in the object's audit chain.
+
+
+        Breaking change (ADR-GOV-002): this route previously performed an
+        unaudited delete that enforced only the protected-role rule. It now
+        requires an Idempotency-Key, returns 200 with the governance result
+        instead of 204, and returns 409 where it formerly destroyed a governed
+        object.
       operationId: deleteArtifact
+      security: [ { bearerAuth: [] } ]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/IfMatch' }
       responses:
-        '204': { description: Deleted }
+        '200': { $ref: '#/components/responses/GovernanceResult' }
+        '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
   /v1/configurations/{cfgId}/dependencies:
     get:
       summary: Dependencies of a configuration object (forward graph)

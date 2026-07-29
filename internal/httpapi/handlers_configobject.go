@@ -153,12 +153,22 @@ func (s *Server) patchArtifact(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, fromDomain(updated))
 }
 
+// deleteArtifact destroys a Configuration Object, which is a §8 constitutional
+// operation and is therefore executed by the Governance Engine — the same path
+// as DELETE /v1/governance/{id} (ADR-GOV-002).
+//
+// It previously issued a bare `DELETE FROM configuration_object` through the
+// repository, enforcing only the protected-role rule and nothing else. Proven
+// live: a ratified, current_baseline object that the engine refuses to delete
+// (409) was destroyed through this route (204), with the dependents check
+// skipped, its dependency edges silently cascaded away, and **no audit event
+// written at all**. A governed object could be erased with no record of who did
+// it or when.
+//
+// Destruction now goes through the one door that enforces §8: role protection,
+// working-material-only, the dependents check, and the atomic audit append.
 func (s *Server) deleteArtifact(w http.ResponseWriter, r *http.Request) {
-	if err := s.repo.Delete(r.Context(), chi.URLParam(r, "id")); err != nil {
-		s.mapError(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	s.execGovernance(w, r, domain.OpDeletion)
 }
 
 func (s *Server) bulkCreateArtifacts(w http.ResponseWriter, r *http.Request) {

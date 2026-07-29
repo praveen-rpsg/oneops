@@ -290,26 +290,24 @@ func (r *ConfigObjectRepo) Update(ctx context.Context, cfgID string, expected in
 // even though it does not go through the governance engine. The exclusion is
 // part of the DELETE rather than a preceding read, so no window exists between
 // the check and the delete. Role is immutable, so the set cannot be evaded.
-func (r *ConfigObjectRepo) Delete(ctx context.Context, cfgID string) error {
-	tag, err := r.pool.Exec(ctx,
-		`DELETE FROM configuration_object WHERE cfg_id = $1 AND role <> ALL($2::text[])`,
-		cfgID, domain.ProtectedDeletionRoles())
-	if err != nil {
-		return fmt.Errorf("delete: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		// Nothing was removed: either the object is absent, or its role forbids
-		// deletion. Distinguish only on this rare path so the caller gets the
-		// right status (404 vs a refusal).
-		var role string
-		qerr := r.pool.QueryRow(ctx, `SELECT role FROM configuration_object WHERE cfg_id = $1`, cfgID).Scan(&role)
-		if qerr != nil {
-			return domain.ErrNotFound
-		}
-		return domain.ErrDeletionForbidden
-	}
-	return nil
-}
+// (Deliberately no Delete method here.)
+//
+// Destroying a Configuration Object is a §8 constitutional operation, not a
+// persistence detail. It is owned by the Governance Engine, which enforces role
+// protection, working-material-only, the dependents check, and the atomic audit
+// append in one transaction (ADR-AUDIT-005), and reaches storage through
+// GovernanceStore.RemoveObject.
+//
+// This repository used to expose a `Delete` that issued a bare
+// `DELETE FROM configuration_object` guarded by the protected-role rule alone.
+// It was wired straight to DELETE /v1/artifacts/{id}, and it was a second,
+// unguarded door to a destructive constitutional effect: proven live, a
+// ratified current_baseline object the engine refuses to delete was destroyed
+// through it with no audit event and with its dependency edges cascaded away.
+//
+// The method is gone rather than hardened, so the class cannot return through a
+// new caller: an unguarded destructive path that does not exist cannot be wired
+// to anything (ADR-GOV-002).
 
 func (r *ConfigObjectRepo) attachMetadata(ctx context.Context, objs []*domain.ConfigObject) error {
 	if len(objs) == 0 {

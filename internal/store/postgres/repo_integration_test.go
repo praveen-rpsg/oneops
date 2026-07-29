@@ -191,48 +191,17 @@ func TestRepoUpdateOptimistic(t *testing.T) {
 	}
 }
 
-func TestRepoDelete(t *testing.T) {
-	repo := NewConfigObjectRepo(testPool(t))
-	ctx := context.Background()
+// Destruction is deliberately absent from this repository's contract: it is a §8
+// constitutional operation owned by the Governance Engine (ADR-GOV-002), covered
+// by httpapi.TestDestruction_* against the real routes and by
+// arch.TestConfigObjectRepository_ExposesNoDestructiveMethod.
 
-	// sample() builds a governance-role object, which §8 never permits to be
-	// deleted. Use a deletable role for the round-trip assertion.
-	deletable := sample("C.md", "1.0.0")
-	deletable.Role = domain.RoleReference
-	created, _ := repo.Create(ctx, deletable)
-	if err := repo.Delete(ctx, created.CfgID); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	if err := repo.Delete(ctx, created.CfgID); err != domain.ErrNotFound {
-		t.Errorf("expected ErrNotFound, got %v", err)
-	}
-}
-
-// The registry DELETE path does not go through the governance engine, so it
-// enforces §8's role prohibition itself. Before this guard a protected artifact
-// could be destroyed here outright.
-func TestRepoDeleteForbiddenForProtectedRoles(t *testing.T) {
-	repo := NewConfigObjectRepo(testPool(t))
-	ctx := context.Background()
-	for i, role := range []domain.Role{
-		domain.RoleConstitution, domain.RoleGovernance,
-		domain.RoleValidation, domain.RoleEvidence, domain.RoleAudit,
-	} {
-		o := sample(fmt.Sprintf("Protected-%d.md", i), "1.0.0")
-		o.Role = role
-		o.RetentionClass = domain.RetentionWorkingMaterial // the exploitable case
-		created, err := repo.Create(ctx, o)
-		if err != nil {
-			t.Fatalf("%s: create: %v", role, err)
-		}
-		if err := repo.Delete(ctx, created.CfgID); err != domain.ErrDeletionForbidden {
-			t.Errorf("%s: Delete() = %v, want ErrDeletionForbidden", role, err)
-		}
-		if _, err := repo.Get(ctx, created.CfgID); err != nil {
-			t.Errorf("%s: object was destroyed despite the refusal: %v", role, err)
-		}
-	}
-}
+// The protected-role prohibition used to be enforced here, by the registry's own
+// DELETE — a second door to a destructive constitutional effect that also
+// skipped the working-material rule, the dependents check and the audit append.
+// Hardening that door was a symptom fix; the door itself is gone
+// (ADR-GOV-002). §8 role protection is now enforced in one place, the
+// Governance Engine, and covered by governance and httpapi.TestDestruction_*.
 
 func TestRepoBulkAndPagination(t *testing.T) {
 	repo := NewConfigObjectRepo(testPool(t))
