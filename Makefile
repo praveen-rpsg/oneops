@@ -6,10 +6,17 @@ LDFLAGS := -s -w -X $(PKG)/pkg/version.Version=$(VERSION) -X $(PKG)/pkg/version.
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down build run test test-integration cover lint fmt vet tidy docker gen migrate-hash migrate-validate clean db-backup db-restore dr-drill db-reset web web-test
+.PHONY: help up down build run test test-integration cover lint fmt vet tidy docker gen migrate-hash migrate-validate clean db-backup db-restore dr-drill db-reset web web-test contract-breaking
 
 MIGRATIONS_DIR := internal/store/migrate/sql
 ATLAS := docker run --rm -v "$(PWD)":/src -w /src arigaio/atlas:latest
+
+OPENAPI_SPEC := internal/httpapi/openapi.yaml
+# Pinned, and kept identical to the version in .github/workflows/ci.yml. An
+# unpinned diff tool silently changes what counts as a breaking change, so a
+# release that adds a rule turns an unrelated PR red and `make contract-breaking`
+# would disagree with CI about what passes.
+OASDIFF_VERSION := v1.11.7
 
 # Backup tooling runs in a container pinned to the server's major version.
 # pg_dump refuses to dump a server newer than itself, so a developer's
@@ -100,6 +107,16 @@ migrate-hash: ## Recompute the Atlas migration checksum (atlas.sum)
 
 migrate-validate: ## Validate the Atlas migration directory
 	$(ATLAS) migrate validate --dir "file://$(MIGRATIONS_DIR)"
+
+# BASE_REF is the git ref to compare against; override to check against
+# something other than the trunk, e.g. `make contract-breaking BASE_REF=HEAD~1`.
+BASE_REF ?= origin/master
+
+contract-breaking: ## Fail if the OpenAPI contract breaks clients built against BASE_REF
+	@git show "$(BASE_REF):$(OPENAPI_SPEC)" > /tmp/oneops-openapi-base.yaml 2>/dev/null \
+		|| { echo "no $(OPENAPI_SPEC) at $(BASE_REF) — nothing to compare"; exit 0; }
+	@go run github.com/oasdiff/oasdiff@$(OASDIFF_VERSION) breaking \
+		--fail-on ERR /tmp/oneops-openapi-base.yaml $(OPENAPI_SPEC)
 
 clean: ## Remove build artifacts
 	rm -rf bin coverage.out coverage.html cover.out
