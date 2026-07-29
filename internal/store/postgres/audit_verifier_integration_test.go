@@ -53,7 +53,7 @@ func headSeq(t *testing.T, s *AuditStore, chain string) int64 {
 	ctx := context.Background()
 	tx, _ := s.pool.Begin(ctx)
 	defer func() { _ = tx.Rollback(ctx) }()
-	seq, _, _, err := s.ReadChainHead(ctx, tx, chain, false)
+	seq, _, _, err := s.ReadChainHead(ctx, tx, chain)
 	if err != nil {
 		t.Fatal(err)
 	}

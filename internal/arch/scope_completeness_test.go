@@ -246,3 +246,51 @@ func TestEveryWorkerOutcomeWrite_UsesADetachedContext(t *testing.T) {
 	}
 	t.Logf("worker files swept for outcome-write context: %d", workerPkgs)
 }
+
+// Completeness sweep for audit-chain append authority (entry 11).
+//
+// The chain-head lock is the platform's most load-bearing invariant: the gapless
+// committed prefix (ADR-CONCURRENCY-004) and audit-derived ownership
+// (ADR-TENANCY-003/004) both rest on it. Proven live — 12 concurrent appends
+// take seqs 1..12 under the lock; without it only 4 commit and eight governance
+// operations are lost.
+//
+// Entry 11's enforcement was an integration test with no architecture tier, and
+// the lock was a *boolean argument*, so the unsafe form was expressible by
+// forgetting a parameter. ADR-AUDIT-006 split it into a distinctly named method;
+// this sweep proves no production code can reach the non-locking read.
+func TestAuditAppend_TakesTheChainHeadLock(t *testing.T) {
+	// The non-locking read exists for read-only verification. No production file
+	// may call it — reaching it from an append path silently removes the
+	// serialisation the whole governance model depends on.
+	nonLocking := regexp.MustCompile(`\.ReadChainHead\(`)
+	locking := regexp.MustCompile(`\.ReadChainHeadForUpdate\(`)
+
+	files := goFilesUnder(t, "..")
+	appenders := 0
+	for _, f := range files {
+		src := stripComments(f.src)
+		// Strip the locking calls first: ".ReadChainHead(" is a substring of
+		// ".ReadChainHeadForUpdate(", so matching the short name naively would
+		// flag every correct call site.
+		stripped := locking.ReplaceAllString(src, ".READ_LOCKED(")
+
+		if nonLocking.MatchString(stripped) {
+			t.Errorf("%s calls the non-locking ReadChainHead — every append path must serialise "+
+				"on the chain head, or concurrent appends collide and governance events are lost "+
+				"(ADR-AUDIT-006)", f.path)
+		}
+		// The append path itself must take the lock.
+		if strings.Contains(src, "AppendAuditEvent(ctx, tx") {
+			appenders++
+			if !locking.MatchString(src) {
+				t.Errorf("%s appends to the audit log without reading the chain head under "+
+					"FOR UPDATE — this is the split-brain/lost-event class (ADR-AUDIT-006)", f.path)
+			}
+		}
+	}
+	if appenders == 0 {
+		t.Fatal("no audit append path found; the sweep would be vacuous")
+	}
+	t.Logf("audit append paths swept: %d", appenders)
+}

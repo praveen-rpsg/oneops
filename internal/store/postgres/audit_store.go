@@ -72,7 +72,29 @@ func (s *AuditStore) EnsureChainHead(ctx context.Context, tx pgx.Tx, chainID str
 // ReadChainHead returns the current last_seq and last_hash for chainID. When
 // forUpdate is true the row is locked FOR UPDATE (use inside the append
 // transaction). found is false when no head row exists.
-func (s *AuditStore) ReadChainHead(ctx context.Context, tx pgx.Tx, chainID string, forUpdate bool) (lastSeq int64, lastHash []byte, found bool, err error) {
+func (s *AuditStore) ReadChainHead(ctx context.Context, tx pgx.Tx, chainID string) (lastSeq int64, lastHash []byte, found bool, err error) {
+	return s.readChainHead(ctx, tx, chainID, false)
+}
+
+// ReadChainHeadForUpdate reads the head under `FOR UPDATE`, serialising every
+// concurrent appender on this chain.
+//
+// This is a separate method rather than a boolean because the lock is the most
+// load-bearing invariant in the platform: the gapless committed prefix
+// (ADR-CONCURRENCY-004, "no lost events") and audit-derived ownership
+// (ADR-TENANCY-003/004) both rest on it. Proven live: 12 concurrent appends take
+// seqs 1..12 under the lock; without it only 4 of 12 commit and the rest are
+// rejected by the (chain_id, seq) backstop — eight governance operations lost.
+//
+// As a boolean argument the unsafe form was expressible by accident and guarded
+// only by an integration test. As a distinct name it cannot be reached by
+// forgetting an argument; choosing the non-locking read is a visible, reviewable
+// act (ADR-AUDIT-006).
+func (s *AuditStore) ReadChainHeadForUpdate(ctx context.Context, tx pgx.Tx, chainID string) (lastSeq int64, lastHash []byte, found bool, err error) {
+	return s.readChainHead(ctx, tx, chainID, true)
+}
+
+func (s *AuditStore) readChainHead(ctx context.Context, tx pgx.Tx, chainID string, forUpdate bool) (lastSeq int64, lastHash []byte, found bool, err error) {
 	q := `SELECT last_seq, last_hash FROM audit_chain_head WHERE chain_id = $1`
 	if forUpdate {
 		q += ` FOR UPDATE`

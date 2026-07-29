@@ -121,7 +121,7 @@ func TestAuditChainHeadLifecycle(t *testing.T) {
 	if err := s.EnsureChainHead(ctx, tx, chain, zero32()); err != nil {
 		t.Fatalf("ensure idempotent: %v", err)
 	}
-	seq, hash, found, err := s.ReadChainHead(ctx, tx, chain, true)
+	seq, hash, found, err := s.ReadChainHeadForUpdate(ctx, tx, chain)
 	if err != nil || !found || seq != 0 || len(hash) != 32 {
 		t.Fatalf("head after genesis: seq=%d found=%v err=%v", seq, found, err)
 	}
@@ -129,12 +129,12 @@ func TestAuditChainHeadLifecycle(t *testing.T) {
 	if err := s.UpsertChainHead(ctx, tx, chain, 1, h32(1)); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
-	seq, hash, found, err = s.ReadChainHead(ctx, tx, chain, false)
+	seq, hash, found, err = s.ReadChainHead(ctx, tx, chain)
 	if err != nil || !found || seq != 1 || hash[0] != 1 {
 		t.Fatalf("head after advance: seq=%d hash0=%d err=%v", seq, hash[0], err)
 	}
 	// unknown chain → not found
-	_, _, found, err = s.ReadChainHead(ctx, tx, uniqueChain(t), false)
+	_, _, found, err = s.ReadChainHead(ctx, tx, uniqueChain(t))
 	if err != nil || found {
 		t.Fatalf("unknown head: found=%v err=%v", found, err)
 	}
