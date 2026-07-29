@@ -34,7 +34,7 @@ jobs:
   # (so the unit job never compiles them) and require TEST_DATABASE_URL. The job
   # FAILS if any integration test is skipped — the pipeline must actually exercise
   # the SQL layer (governance atomic transaction, hash chain, webhook/policy/
-  # timeline persistence), not silently skip it.
+  # timeline persistence, leader election and step-down), not silently skip it.
   integration:
     runs-on: ubuntu-latest
     services:
@@ -59,13 +59,32 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: integration tests (race, fail on skip)
+      - name: integration tests (race; must actually reach the database)
         run: |
           set -euo pipefail
-          go test -tags integration -race -count=1 -v \
-            ./internal/store/postgres/... ./internal/httpapi/... 2>&1 | tee itest.log
-          if grep -q -- '--- SKIP' itest.log; then
-            echo "::error::an integration test was SKIPPED — the SQL layer was not exercised"
+          # The whole tree, not a list of packages. The list omitted
+          # internal/ops, whose leader-election and step-down integration tests
+          # are the live proofs behind two eliminated classes — so those two had
+          # never run in CI. A package added tomorrow is covered by construction.
+          go test -tags integration -race -count=1 -v ./... 2>&1 | tee itest.log
+
+          # What this guards is a pipeline reporting green while the SQL layer
+          # was never touched, which is exactly what an unset TEST_DATABASE_URL
+          # produces — every integration test skips with this message.
+          #
+          # It deliberately does not fail on *any* skip. The graph performance
+          # gates skip themselves under -race, on purpose and with their reasons
+          # in the code: latency measured under race instrumentation is a
+          # property of the instrumentation, not of the system. Failing on those
+          # made the job red on a green tree, and a job that is always red is a
+          # job everyone learns to ignore.
+          if grep -q 'TEST_DATABASE_URL not set' itest.log; then
+            echo "::error::an integration test skipped for want of a database — the SQL layer was not exercised"
+            exit 1
+          fi
+          # A run that asserted nothing is not a passing run.
+          if ! grep -q -- '--- PASS' itest.log; then
+            echo "::error::no test reported PASS — the integration run was vacuous"
             exit 1
           fi
 
