@@ -134,6 +134,28 @@ type Delivery struct {
 	// made through it (proven live). A record of a past event must hold the
 	// facts as they were (ADR-GOV-004).
 	DeliveredTo string
+	// SignedTS is the Unix timestamp actually signed on the most recent attempt.
+	// Zero until attempted.
+	//
+	// The delivery-detail view used to sign a *fresh* timestamp with the
+	// subscription's *current* secret, so the headers it showed for a past
+	// delivery were never the headers sent. AR-001 adopted "snapshot the facts of
+	// an act": the signed timestamp is such a fact and is recorded here.
+	SignedTS int64
+}
+
+// AttemptFacts are the facts an attempt produced in the outside world, recorded
+// with its outcome in one fenced write (ADR-CONCURRENCY-005).
+//
+// They are grouped rather than passed as loose parameters because they share one
+// rule (AR-001): a fact of an act is snapshotted on the record of that act, and
+// the zero value means "no attempt was made", which must neither invent a fact
+// nor erase one already recorded.
+type AttemptFacts struct {
+	// Destination is the URL this attempt was sent to (ADR-GOV-004).
+	Destination string
+	// SignedTS is the Unix timestamp this attempt signed.
+	SignedTS int64
 }
 
 // OwnerTenantID implements domain.Owned. A delivery belongs to the tenant that

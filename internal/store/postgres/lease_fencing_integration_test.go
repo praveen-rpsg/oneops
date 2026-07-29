@@ -60,12 +60,12 @@ func TestLeaseFencing_WebhookEvictedWorkerIsFenced(t *testing.T) {
 	}
 
 	// W2 (current owner) delivers.
-	if err := s.MarkResult(ctx, id, token2, events.StatusDelivered, 0, 200, t0.Add(lease+2*time.Second), time.Time{}, "https://owner.invalid/hook"); err != nil {
+	if err := s.MarkResult(ctx, id, token2, events.StatusDelivered, 0, 200, t0.Add(lease+2*time.Second), time.Time{}, events.AttemptFacts{Destination: "https://owner.invalid/hook", SignedTS: 1700000000}); err != nil {
 		t.Fatalf("W2 mark delivered: %v", err)
 	}
 
 	// W1 (evicted) tries to fail+reschedule with its stale token → must be fenced.
-	err = s.MarkResult(ctx, id, token1, events.StatusFailed, 1, 500, t0.Add(lease+3*time.Second), t0.Add(lease+time.Minute), "https://evicted.invalid/hook")
+	err = s.MarkResult(ctx, id, token1, events.StatusFailed, 1, 500, t0.Add(lease+3*time.Second), t0.Add(lease+time.Minute), events.AttemptFacts{Destination: "https://evicted.invalid/hook", SignedTS: 1700000000})
 	if !errors.Is(err, events.ErrStaleClaim) {
 		t.Fatalf("evicted worker's write was NOT fenced: err=%v (want ErrStaleClaim)", err)
 	}
@@ -88,7 +88,7 @@ func TestLeaseFencing_WebhookEvictedWorkerIsFenced(t *testing.T) {
 	}
 
 	// The admin/direct path (no claim token) still writes unfenced.
-	if err := s.MarkResult(ctx, id, time.Time{}, events.StatusDelivered, 0, 200, t0, time.Time{}, "https://admin-test.invalid/hook"); err != nil {
+	if err := s.MarkResult(ctx, id, time.Time{}, events.StatusDelivered, 0, 200, t0, time.Time{}, events.AttemptFacts{Destination: "https://admin-test.invalid/hook", SignedTS: 1700000000}); err != nil {
 		t.Fatalf("unfenced (zero-token) write should still succeed: %v", err)
 	}
 }

@@ -24,9 +24,13 @@ func TestDelivery_RecordsItsOwnDestination(t *testing.T) {
 	}
 
 	ports := stripComments(readFile(t, "../events/ports.go"))
-	if !strings.Contains(ports, "destination string") {
-		t.Error("DeliveryStore.MarkResult does not take the destination, so the fact cannot be " +
-			"captured in the same write as the outcome (ADR-GOV-004)")
+	if !strings.Contains(ports, "facts AttemptFacts") {
+		t.Error("DeliveryStore.MarkResult does not take the attempt's facts, so they cannot be " +
+			"captured in the same write as the outcome (ADR-GOV-004, AR-001)")
+	}
+	if !strings.Contains(src, "SignedTS") {
+		t.Error("events.Delivery does not record the timestamp it signed — the delivery view " +
+			"would mint a fresh one and show headers that were never sent (AR-001)")
 	}
 }
 
@@ -48,6 +52,10 @@ func TestDeliveryDestination_IsWrittenWithTheOutcome(t *testing.T) {
 			strings.Count(body, "UPDATE webhook_delivery"))
 	}
 	// An outcome reached without an attempt must not erase or invent a destination.
+	if !strings.Contains(body, "COALESCE($9, signed_ts)") {
+		t.Error("MarkResult overwrites signed_ts unconditionally — an outcome reached without an " +
+			"attempt would erase the timestamp a real attempt signed (AR-001)")
+	}
 	if !strings.Contains(body, "COALESCE($8, delivered_to)") {
 		t.Error("MarkResult overwrites delivered_to unconditionally — an outcome reached without " +
 			"an attempt (a refused delivery) would erase the record of where a previous attempt " +
@@ -61,14 +69,18 @@ func TestDeliveryDestination_IsWrittenWithTheOutcome(t *testing.T) {
 func TestDispatcher_RecordsTheURLItPosted(t *testing.T) {
 	body := stripComments(methodBody(t, "../events/dispatcher.go", "attempt"))
 
-	if !strings.Contains(body, "wh.URL)") {
-		t.Error("the dispatcher does not pass the URL it posted to into MarkResult, so the " +
-			"recorded destination would not be the one used (ADR-GOV-004)")
+	if !strings.Contains(body, "Destination: wh.URL") {
+		t.Error("the dispatcher does not record the URL it posted to, so the recorded destination " +
+			"would not be the one used (ADR-GOV-004)")
 	}
-	// The delivered outcome specifically must carry it.
-	if !strings.Contains(body, "StatusDelivered, del.RetryCount, code, now, time.Time{}, wh.URL)") {
-		t.Error("a successful delivery does not record its destination — the successful case is " +
-			"precisely the one an investigator needs (ADR-GOV-004)")
+	if !strings.Contains(body, "SignedTS: ts") {
+		t.Error("the dispatcher does not record the timestamp it signed, so historical headers " +
+			"would again be minted at read time (AR-001)")
+	}
+	// The delivered outcome specifically must carry the facts: the successful
+	// case is precisely the one an investigator needs.
+	if !strings.Contains(body, "StatusDelivered, del.RetryCount, code, now, time.Time{}, AttemptFacts{Destination: wh.URL, SignedTS: ts}") {
+		t.Error("a successful delivery does not record the facts of its attempt (ADR-GOV-004, AR-001)")
 	}
 }
 
@@ -88,5 +100,24 @@ func TestDeliveryReads_DoNotDeriveDestinationFromTheWebhook(t *testing.T) {
 				"delivery must come from the delivery row, not from the subscription's current "+
 				"state (ADR-GOV-004)", file)
 		}
+	}
+}
+
+// The delivery view must render headers from the recorded timestamp. Taking a
+// caller-supplied "now" is how the defect arose: every caller passed
+// time.Now(), so the headers shown for a past delivery were freshly minted and
+// had never been sent (AR-001).
+func TestDeliveryView_DoesNotMintATimestamp(t *testing.T) {
+	src := stripComments(readFile(t, "../events/sign.go"))
+	if strings.Contains(src, "func DeliveryView(d Delivery, secret string, at time.Time)") {
+		t.Error("DeliveryView still accepts a timestamp from its caller — it must render from the " +
+			"timestamp the delivery recorded (AR-001)")
+	}
+	if !strings.Contains(src, "d.SignedTS") {
+		t.Error("DeliveryView does not read the recorded signing timestamp (AR-001)")
+	}
+	if !strings.Contains(src, "ErrNotAttempted") {
+		t.Error("DeliveryView does not distinguish an unattempted delivery — it would render " +
+			"headers for a request that was never sent (AR-001)")
 	}
 }

@@ -170,7 +170,7 @@ func (d *Dispatcher) attempt(ctx context.Context, del Delivery) (DeliveryStatus,
 	wh, err := d.webhooks.Get(ctx, del.WebhookID)
 	if err != nil {
 		// The subscriber is gone; the delivery can never succeed.
-		_ = d.deliv.MarkResult(octx, del.ID, del.ClaimedAt, StatusDeadLetter, del.RetryCount, 0, d.now(), time.Time{}, "")
+		_ = d.deliv.MarkResult(octx, del.ID, del.ClaimedAt, StatusDeadLetter, del.RetryCount, 0, d.now(), time.Time{}, AttemptFacts{})
 		return StatusDeadLetter, err
 	}
 
@@ -199,7 +199,7 @@ func (d *Dispatcher) attempt(ctx context.Context, del Delivery) (DeliveryStatus,
 			"chain_id", del.Event.ChainID, "seq", del.Event.Seq,
 			"webhook_tenant", wh.OwnerTenantID(), "claimed_delivery_tenant", del.OwnerTenantID(),
 			"err", err.Error())
-		_ = d.deliv.MarkResult(octx, del.ID, del.ClaimedAt, StatusDeadLetter, del.RetryCount, 0, d.now(), time.Time{}, "")
+		_ = d.deliv.MarkResult(octx, del.ID, del.ClaimedAt, StatusDeadLetter, del.RetryCount, 0, d.now(), time.Time{}, AttemptFacts{})
 		return StatusDeadLetter, err
 	}
 
@@ -215,7 +215,7 @@ func (d *Dispatcher) attempt(ctx context.Context, del Delivery) (DeliveryStatus,
 	d.metrics.ObserveDeliveryLatency(time.Since(now))
 
 	if derr == nil && code >= 200 && code < 300 {
-		if err := d.deliv.MarkResult(octx, del.ID, del.ClaimedAt, StatusDelivered, del.RetryCount, code, now, time.Time{}, wh.URL); err != nil {
+		if err := d.deliv.MarkResult(octx, del.ID, del.ClaimedAt, StatusDelivered, del.RetryCount, code, now, time.Time{}, AttemptFacts{Destination: wh.URL, SignedTS: ts}); err != nil {
 			if errors.Is(err, ErrStaleClaim) {
 				// This worker's lease expired and the row was reclaimed mid-flight; the
 				// reclaiming worker owns the outcome. The POST still happened (the
@@ -240,13 +240,13 @@ func (d *Dispatcher) attempt(ctx context.Context, del Delivery) (DeliveryStatus,
 	d.metrics.IncFailure()
 	retry := del.RetryCount
 	if retry >= wh.MaxRetries {
-		_ = d.deliv.MarkResult(octx, del.ID, del.ClaimedAt, StatusDeadLetter, retry, code, now, time.Time{}, wh.URL)
+		_ = d.deliv.MarkResult(octx, del.ID, del.ClaimedAt, StatusDeadLetter, retry, code, now, time.Time{}, AttemptFacts{Destination: wh.URL, SignedTS: ts})
 		d.log.Warn("event dispatcher: dead-letter", "delivery_id", del.ID, "webhook_id", wh.ID, "attempts", retry)
 		return StatusDeadLetter, derr
 	}
 	d.metrics.IncRetry()
 	next := now.Add(d.backoff(retry))
-	if err := d.deliv.MarkResult(octx, del.ID, del.ClaimedAt, StatusFailed, retry, code, now, next, wh.URL); errors.Is(err, ErrStaleClaim) {
+	if err := d.deliv.MarkResult(octx, del.ID, del.ClaimedAt, StatusFailed, retry, code, now, next, AttemptFacts{Destination: wh.URL, SignedTS: ts}); errors.Is(err, ErrStaleClaim) {
 		// Reclaimed mid-flight: do not reschedule against the reclaimer's owned row.
 		d.log.Info("event dispatcher: failed result fenced — row reclaimed by another worker", "delivery_id", del.ID)
 	}

@@ -124,7 +124,7 @@ func (s *WebhookStore) Delete(ctx context.Context, id string) error {
 }
 
 const deliveryCols = `id, webhook_id, chain_id, seq, event_id, operation_id, operation, actor,
-	cfg_id, occurred_at, status, retry_count, last_status_code, last_attempt, next_attempt_at, created_at, tenant_id, claimed_at, delivered_to`
+	cfg_id, occurred_at, status, retry_count, last_status_code, last_attempt, next_attempt_at, created_at, tenant_id, claimed_at, delivered_to, signed_ts`
 
 // Enqueue inserts pending deliveries. Duplicate ids are ignored (idempotent relay).
 func (s *WebhookStore) Enqueue(ctx context.Context, ds []events.Delivery) error {
@@ -256,7 +256,7 @@ func (s *WebhookStore) ReleaseClaim(ctx context.Context, id string, claimToken t
 // completion (a slow POST that outlived the lease) cannot resurrect a delivered
 // row or overwrite the reclaimer's retry state. A zero token (the admin test
 // path, whose row was never claimed) writes unfenced.
-func (s *WebhookStore) MarkResult(ctx context.Context, id string, claimToken time.Time, status events.DeliveryStatus, retry, code int, last, next time.Time, destination string) error {
+func (s *WebhookStore) MarkResult(ctx context.Context, id string, claimToken time.Time, status events.DeliveryStatus, retry, code int, last, next time.Time, facts events.AttemptFacts) error {
 	var lastPtr, nextPtr, tokenPtr *time.Time
 	if !last.IsZero() {
 		lastPtr = &last
@@ -271,16 +271,21 @@ func (s *WebhookStore) MarkResult(ctx context.Context, id string, claimToken tim
 	// without an attempt (a refused delivery) must not erase or invent the fact
 	// of where a previous attempt went (ADR-GOV-004).
 	var destPtr *string
-	if destination != "" {
-		destPtr = &destination
+	if facts.Destination != "" {
+		destPtr = &facts.Destination
+	}
+	var tsPtr *int64
+	if facts.SignedTS != 0 {
+		tsPtr = &facts.SignedTS
 	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE webhook_delivery
 		   SET status=$2, retry_count=$3, last_status_code=$4, last_attempt=$5,
 		       next_attempt_at=COALESCE($6, next_attempt_at),
-		       delivered_to=COALESCE($8, delivered_to)
+		       delivered_to=COALESCE($8, delivered_to),
+		       signed_ts=COALESCE($9, signed_ts)
 		 WHERE id=$1 AND ($7::timestamptz IS NULL OR claimed_at = $7)`,
-		id, string(status), retry, code, lastPtr, nextPtr, tokenPtr, destPtr)
+		id, string(status), retry, code, lastPtr, nextPtr, tokenPtr, destPtr, tsPtr)
 	if err != nil {
 		return fmt.Errorf("mark delivery: %w", err)
 	}
@@ -356,6 +361,7 @@ func scanDelivery(sc rowScanner) (events.Delivery, error) {
 	var op, status string
 	var lastAttempt, claimedAt *time.Time
 	var deliveredTo *string
+	var signedTS *int64
 	if err := sc.Scan(
 		&d.ID, &d.WebhookID, &d.Event.ChainID, &d.Event.Seq, &d.Event.EventID, &d.Event.OperationID,
 		&op, &d.Event.Actor, &d.Event.CfgID, &d.Event.OccurredAt, &status, &d.RetryCount,
@@ -369,6 +375,9 @@ func scanDelivery(sc rowScanner) (events.Delivery, error) {
 		// Where the most recent attempt actually went, recorded at attempt time
 		// rather than derived from the webhook's current URL (ADR-GOV-004).
 		&deliveredTo,
+		// The timestamp this attempt actually signed, so historical headers are
+		// rendered from what was sent rather than minted afresh (AR-001).
+		&signedTS,
 	); err != nil {
 		return events.Delivery{}, err
 	}
@@ -382,6 +391,9 @@ func scanDelivery(sc rowScanner) (events.Delivery, error) {
 	}
 	if deliveredTo != nil {
 		d.DeliveredTo = *deliveredTo
+	}
+	if signedTS != nil {
+		d.SignedTS = *signedTS
 	}
 	return d, nil
 }

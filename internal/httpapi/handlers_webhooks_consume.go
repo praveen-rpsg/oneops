@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -126,8 +127,13 @@ func (s *Server) getDelivery(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusNotFound, "not found", "no such delivery for this webhook")
 		return
 	}
-	payload, headers, err := events.DeliveryView(d, wh.Secret, time.Now().UTC())
-	if err != nil {
+	// Headers are rendered from the timestamp this delivery actually signed, not
+	// from now (AR-001). A delivery that was never attempted has no sent headers
+	// to show, and saying so is the honest answer.
+	payload, headers, err := events.DeliveryView(d, wh.Secret)
+	if errors.Is(err, events.ErrNotAttempted) {
+		payload, headers = nil, map[string]string{}
+	} else if err != nil {
 		writeProblem(w, r, http.StatusInternalServerError, "internal error", "could not render delivery")
 		return
 	}

@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"testing"
@@ -144,10 +145,23 @@ func TestReplay_WindowReadsCommittedOnlyAndPreserves(t *testing.T) {
 	if d.Event.EventID != "evt_1" || d.Event.Operation != "ratification" || d.Event.ChainID != "c1" || d.Event.Seq != 1 {
 		t.Fatalf("event not preserved: %+v", d.Event)
 	}
-	// Signature preserved: verifies over the canonical payload with the secret.
-	payload, headers, err := DeliveryView(d, "s3cr3t", time.Now())
+	// A delivery that has not been attempted has no sent headers to show, and
+	// says so rather than minting a signature that never crossed the wire
+	// (AR-001).
+	if _, _, err := DeliveryView(d, "s3cr3t"); !errors.Is(err, ErrNotAttempted) {
+		t.Fatalf("DeliveryView on an unattempted delivery = %v, want ErrNotAttempted", err)
+	}
+
+	// Signature preserved: once attempted, the view renders the headers that were
+	// actually sent — the recorded timestamp, not a fresh one.
+	d.SignedTS = time.Now().Add(-time.Hour).Unix()
+	payload, headers, err := DeliveryView(d, "s3cr3t")
 	if err != nil {
 		t.Fatalf("DeliveryView: %v", err)
+	}
+	if headers[HeaderTimestamp] != strconv.FormatInt(d.SignedTS, 10) {
+		t.Errorf("rendered timestamp %s is not the one recorded (%d) — headers would not be the "+
+			"ones sent", headers[HeaderTimestamp], d.SignedTS)
 	}
 	ts, _ := strconv.ParseInt(headers[HeaderTimestamp], 10, 64)
 	if !Verify("s3cr3t", ts, d.ID, payload, headers[HeaderSignature]) {

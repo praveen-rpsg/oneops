@@ -47,6 +47,13 @@ went — was being derived *from* mutable state. The same principle, inverted.
 The failure class is: **a record of a past event that stores a reference to
 mutable configuration instead of the fact that occurred.**
 
+> **Scope correction (2026-07-29).** This ADR closes one *instance* of that
+> class. A later sweep proved two siblings remain open — `policy_execution` does
+> not record the action it ran, and a delivery's headers are re-minted from the
+> current secret and current time at read time. Both are held under **AR-001**,
+> which must decide how the platform records a historical fact before either is
+> implemented. Read this ADR as closing the delivery destination, not the class.
+
 ### Decision gate — ADR, not CMR
 
 The Constitution governs Configuration Objects and §8 operations. Webhook

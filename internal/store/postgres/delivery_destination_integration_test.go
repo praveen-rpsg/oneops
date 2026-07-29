@@ -55,7 +55,7 @@ func TestDeliveryDestination_SurvivesWebhookRepointing(t *testing.T) {
 	}
 
 	// The attempt happens and is recorded, destination included.
-	if err := s.MarkResult(ctx, id, time.Time{}, events.StatusDelivered, 1, 200, t0, time.Time{}, approved); err != nil {
+	if err := s.MarkResult(ctx, id, time.Time{}, events.StatusDelivered, 1, 200, t0, time.Time{}, events.AttemptFacts{Destination: approved, SignedTS: 1700000000}); err != nil {
 		t.Fatalf("mark delivered: %v", err)
 	}
 
@@ -119,7 +119,7 @@ func TestDeliveryDestination_UnattemptedOutcomeRecordsNothing(t *testing.T) {
 	}
 
 	// Dead-lettered without an attempt: no destination.
-	if err := s.MarkResult(ctx, id, time.Time{}, events.StatusDeadLetter, 0, 0, t0, time.Time{}, ""); err != nil {
+	if err := s.MarkResult(ctx, id, time.Time{}, events.StatusDeadLetter, 0, 0, t0, time.Time{}, events.AttemptFacts{}); err != nil {
 		t.Fatalf("mark dead-letter: %v", err)
 	}
 	if got := deliveredTo(t, pool, id); got != "" {
@@ -129,10 +129,10 @@ func TestDeliveryDestination_UnattemptedOutcomeRecordsNothing(t *testing.T) {
 
 	// Now an attempt happens, and a later unattempted outcome must not erase it.
 	const real = "https://real.invalid/hook"
-	if err := s.MarkResult(ctx, id, time.Time{}, events.StatusFailed, 1, 500, t0, t0.Add(time.Minute), real); err != nil {
+	if err := s.MarkResult(ctx, id, time.Time{}, events.StatusFailed, 1, 500, t0, t0.Add(time.Minute), events.AttemptFacts{Destination: real, SignedTS: 1700000001}); err != nil {
 		t.Fatalf("mark failed: %v", err)
 	}
-	if err := s.MarkResult(ctx, id, time.Time{}, events.StatusDeadLetter, 2, 0, t0, time.Time{}, ""); err != nil {
+	if err := s.MarkResult(ctx, id, time.Time{}, events.StatusDeadLetter, 2, 0, t0, time.Time{}, events.AttemptFacts{}); err != nil {
 		t.Fatalf("mark dead-letter after attempt: %v", err)
 	}
 	if got := deliveredTo(t, pool, id); got != real {

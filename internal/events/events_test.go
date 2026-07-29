@@ -165,15 +165,18 @@ func (f *fakeDeliveries) ReleaseClaim(_ context.Context, id string, _ time.Time)
 	f.m[id] = d
 	return nil
 }
-func (f *fakeDeliveries) MarkResult(_ context.Context, id string, _ time.Time, status DeliveryStatus, retry, code int, last, next time.Time, destination string) error {
+func (f *fakeDeliveries) MarkResult(_ context.Context, id string, _ time.Time, status DeliveryStatus, retry, code int, last, next time.Time, facts AttemptFacts) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	d := f.m[id]
 	d.Status, d.RetryCount, d.LastStatusCode, d.LastAttempt, d.NextAttemptAt = status, retry, code, last, next
-	// An empty destination leaves the recorded one untouched, matching the store
-	// (ADR-GOV-004).
-	if destination != "" {
-		d.DeliveredTo = destination
+	// Zero facts leave the recorded ones untouched, matching the store
+	// (ADR-GOV-004, AR-001).
+	if facts.Destination != "" {
+		d.DeliveredTo = facts.Destination
+	}
+	if facts.SignedTS != 0 {
+		d.SignedTS = facts.SignedTS
 	}
 	f.m[id] = d
 	return nil
@@ -386,7 +389,7 @@ func TestDispatcher_RetryThenDeadLetter(t *testing.T) {
 		t.Fatalf("after attempt 1: status = %q, want failed", s)
 	}
 	// Make it due again and attempt 2: retryCount 2 >= 2 -> dead-letter.
-	_ = del.MarkResult(context.Background(), "d1", time.Time{}, StatusFailed, 1, 500, time.Unix(0, 0), time.Unix(0, 0), "")
+	_ = del.MarkResult(context.Background(), "d1", time.Time{}, StatusFailed, 1, 500, time.Unix(0, 0), time.Unix(0, 0), AttemptFacts{})
 	d.RunOnce(context.Background())
 	if s := del.status("d1"); s != StatusDeadLetter {
 		t.Fatalf("after attempt 2: status = %q, want dead_letter", s)

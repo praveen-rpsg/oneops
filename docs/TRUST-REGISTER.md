@@ -39,7 +39,42 @@ fail-closed startup validator.
 | 22 | **A security invariant weakened after startup goes unnoticed** (schema invariants proven once at boot; RLS disabled post-startup produced a live cross-tenant read while the process reported ready, served traffic, and logged nothing) | **Continuous re-verification (`ops.Sentinel`) re-running the same startup validator; a breach fails closed — `/v1` refused, readiness red, workers stopped — and clears on repair** | ✓ | arch, int, unit | **ADR-SECURITY-002** |
 | 23 | **Unaudited destruction of a governed object via a second, non-constitutional door** (`DELETE /v1/artifacts/{id}` issued a bare SQL delete enforcing only the protected-role rule: a ratified `current_baseline` object the engine refuses (409) was destroyed (204) with **zero** audit events, the dependents check skipped and its dependency edges silently cascaded away) | **Destruction has one door: the route executes the engine's §8 deletion, and the destructive method is removed from the repository *and* from the persistence contract — not hardened** | ✓ | arch, int, unit | **ADR-GOV-002** |
 | 24 | **§9.1 constitutional inputs writable and erasable through the descriptive-metadata channel** (`responsibilities`/`citations`/`coverage` refused by PATCH but accepted at CREATE/BULK — a successor seeded that way turned a Replacement the engine refused (409) into one it granted (200) on a ratified `current_baseline` artifact; and a PATCH of an unrelated key returned 200 while **erasing** `responsibilities`) | **Enforced at the storage chokepoint both writers pass through, plus the inception boundary; a wholesale metadata clear spares them; one definition of the key set** | ✓ | arch, int | **ADR-GOV-003** |
-| 25 | **A delivery record's destination was retroactively rewritable** (`webhook_delivery` stored only `webhook_id`; the destination was derived by joining to the mutable `webhook.url`, so one admin `PATCH` — 200, no audit event — rewrote where every past delivery through that subscription had gone, and an actor who repointed, collected and repointed back left the history attesting to the approved destination) | **The delivery holds `delivered_to`, captured at attempt time in the same fenced UPDATE as the outcome; an unattempted outcome records nothing and erases nothing; reads never join to the subscription** | ✓ | arch, int | **ADR-GOV-004** |
+| 25 | **A delivery record's destination was retroactively rewritable** — *one instance of a wider class; see the scope note below* (`webhook_delivery` stored only `webhook_id`; the destination was derived by joining to the mutable `webhook.url`, so one admin `PATCH` — 200, no audit event — rewrote where every past delivery through that subscription had gone) | **The delivery holds `delivered_to`, captured at attempt time in the same fenced UPDATE as the outcome; an unattempted outcome records nothing and erases nothing; reads never join to the subscription** | ✓ | arch, int | **ADR-GOV-004** |
+
+## Scope correction — entry 25 closed an instance, not a class
+
+Entry 25 was admitted as if it eliminated *"a historical record deriving from
+mutable state."* It did not. It eliminated one instance of that class, and a
+later sweep (2026-07-29) proved two siblings remain open:
+
+**Status of the siblings (updated 2026-07-29, after AR-001 was decided):**
+
+- **Instance 3 is now CLOSED** — a delivery records `signed_ts`, the timestamp it
+  actually signed, and `DeliveryView` renders historical headers from it rather
+  than from `now`. An unattempted delivery reports no headers
+  (`ErrNotAttempted`) instead of minting a signature that never crossed the wire.
+  Enforced by `arch.TestDeliveryView_DoesNotMintATimestamp` and the extended
+  destination guards; mutation-verified.
+- **Instance 2 remains OPEN** — it is scheduled under AR-001's decision as its own
+  investigation (versioned policy revisions), and must not be closed by
+  snapshotting an unredacted `action_config`.
+
+Original finding:
+
+- **`policy_execution` does not record what it did.** The action is
+  `policy.action_type`/`action_config`, wholesale-replaceable by `PATCH`. Proven
+  live: an execution that ran `webhook → /approved-action` reads as
+  `http → /attacker-action` after one PATCH returned 200, with 0 audit events.
+  Worse than the delivery case, because a policy action actively POSTs governance
+  data outbound.
+- **A delivery's headers are re-minted at read time.**
+  `DeliveryView(d, wh.Secret, time.Now())` builds the timestamp from *now* and
+  signs with the *current* secret, so the headers shown for a past delivery were
+  never the headers sent.
+
+Both are held under **AR-001**, which must decide how the platform records a
+historical fact before either is implemented. This note stands until AR-001 is
+decided; entry 25 claims the instance only.
 
 ## Guarantees stated, not overstated
 
