@@ -67,7 +67,7 @@ func enqueueDelivery(ctx context.Context, t *testing.T, s *WebhookStore, id, cha
 // transition makes the claim exclusive.
 func TestAtomicClaim_ConcurrentClaimsAreDisjoint(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 	seedWebhook(ctx, t, pool, "wh", 100)
 
@@ -112,7 +112,7 @@ func TestAtomicClaim_ConcurrentClaimsAreDisjoint(t *testing.T) {
 // single worker never re-delivers a row it is still working.
 func TestAtomicClaim_InflightNotReclaimedWithinLease(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 	seedWebhook(ctx, t, pool, "wh", 100)
 	enqueueDelivery(ctx, t, s, "d-lease", "chain-lease")
@@ -142,7 +142,7 @@ func TestAtomicClaim_InflightNotReclaimedWithinLease(t *testing.T) {
 // by the lease rather than replayed immediately.
 func TestAtomicClaim_StaleInflightIsReclaimed(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 	seedWebhook(ctx, t, pool, "wh", 100)
 	enqueueDelivery(ctx, t, s, "d-stale", "chain-stale")

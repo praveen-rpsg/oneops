@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -35,7 +34,7 @@ import (
 // workers claiming at once never receive the same unit of work.
 func TestReplayJobClaim_IsExclusive(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 
 	suffix := time.Now().UnixNano()
@@ -109,7 +108,7 @@ func TestReplayJobClaim_IsExclusive(t *testing.T) {
 // replayed became `failed` with 0.
 func TestReplayJobUpdate_IsFenced(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 
 	suffix := time.Now().UnixNano()
@@ -180,7 +179,7 @@ func TestReplayJobUpdate_IsFenced(t *testing.T) {
 // gap, not a correctness one. It is stated in the Trust Register as a residual.
 func TestReplayJob_StuckRunningIsNotReclaimed(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 
 	suffix := time.Now().UnixNano()

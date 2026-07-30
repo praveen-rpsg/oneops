@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -34,7 +33,7 @@ func craftEvent(chain string, seq int64, prev []byte) *domain.AuditEvent {
 
 func storeInsert(t *testing.T, s *AuditStore, e *domain.AuditEvent) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +49,7 @@ func storeInsert(t *testing.T, s *AuditStore, e *domain.AuditEvent) {
 
 func headSeq(t *testing.T, s *AuditStore, chain string) int64 {
 	t.Helper()
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tx, _ := s.pool.Begin(ctx)
 	defer func() { _ = tx.Rollback(ctx) }()
 	seq, _, _, err := s.ReadChainHead(ctx, tx, chain)
@@ -65,7 +64,7 @@ func TestVerifierHappyPathAndZeroWrites(t *testing.T) {
 	store := NewAuditStore(pool)
 	app := NewAuditAppender(pool, store)
 	ver := audit.NewVerifier(store)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	chain := uniqueChain(t)
 
 	for i := int64(1); i <= 3; i++ {
@@ -101,7 +100,7 @@ func TestVerifierDetectsRealCorruption(t *testing.T) {
 	pool := graphPool(t)
 	store := NewAuditStore(pool)
 	ver := audit.NewVerifier(store)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	chain := uniqueChain(t)
 
 	e1 := craftEvent(chain, 1, audit.GenesisPrevHash())

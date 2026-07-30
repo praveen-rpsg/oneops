@@ -30,7 +30,7 @@ func tenantStore(t *testing.T) *TenantStore {
 
 func TestTenantStore_CreateGet(t *testing.T) {
 	s := tenantStore(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	in := newTenant("acme-create", "ext-acme-create")
 	created, err := s.Create(ctx, in)
@@ -76,7 +76,7 @@ func TestTenantStore_SystemTenantSeeded(t *testing.T) {
 
 func TestTenantStore_DuplicateSlugConflicts(t *testing.T) {
 	s := tenantStore(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	if _, err := s.Create(ctx, newTenant("dup-slug", "ext-dup-1")); err != nil {
 		t.Fatalf("first create: %v", err)
@@ -90,7 +90,7 @@ func TestTenantStore_DuplicateSlugConflicts(t *testing.T) {
 
 func TestTenantStore_DuplicateExternalIDConflicts(t *testing.T) {
 	s := tenantStore(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	if _, err := s.Create(ctx, newTenant("ext-dup-a", "ext-shared")); err != nil {
 		t.Fatalf("first create: %v", err)
@@ -106,7 +106,7 @@ func TestTenantStore_DuplicateExternalIDConflicts(t *testing.T) {
 // make the second one fail.
 func TestTenantStore_MultipleTenantsMayHaveNoExternalID(t *testing.T) {
 	s := tenantStore(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	if _, err := s.Create(ctx, newTenant("unbound-one", "")); err != nil {
 		t.Fatalf("first unbound tenant: %v", err)
@@ -118,7 +118,7 @@ func TestTenantStore_MultipleTenantsMayHaveNoExternalID(t *testing.T) {
 
 func TestTenantStore_GetByExternalID(t *testing.T) {
 	s := tenantStore(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	created, err := s.Create(ctx, newTenant("lookup-me", "ext-lookup"))
 	if err != nil {
@@ -143,7 +143,7 @@ func TestTenantStore_GetByExternalID(t *testing.T) {
 // land inside an arbitrary customer's boundary.
 func TestTenantStore_EmptyExternalIDNeverResolves(t *testing.T) {
 	s := tenantStore(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	if _, err := s.Create(ctx, newTenant("unbound-lookup", "")); err != nil {
 		t.Fatalf("create: %v", err)
@@ -155,7 +155,7 @@ func TestTenantStore_EmptyExternalIDNeverResolves(t *testing.T) {
 
 func TestTenantStore_SetStatusOptimistic(t *testing.T) {
 	s := tenantStore(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	created, err := s.Create(ctx, newTenant("suspend-me", "ext-suspend"))
 	if err != nil {
@@ -186,7 +186,7 @@ func TestTenantStore_SetStatusOptimistic(t *testing.T) {
 
 func TestTenantStore_List(t *testing.T) {
 	s := tenantStore(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	for _, slug := range []string{"list-charlie", "list-alpha", "list-bravo"} {
 		if _, err := s.Create(ctx, newTenant(slug, "ext-"+slug)); err != nil {

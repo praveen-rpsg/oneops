@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -25,7 +24,7 @@ import (
 // proves a single row survives with the id the receiver dedups on.
 func TestProducerIdempotency_DeliveryReenqueueCollapses(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 
 	const wh, chain = "wh_idem", "chain_idem"
@@ -67,7 +66,7 @@ func TestProducerIdempotency_DeliveryReenqueueCollapses(t *testing.T) {
 // action twice. The execution id is content-derived, so re-enqueue collides.
 func TestProducerIdempotency_ExecutionReenqueueCollapses(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewPolicyStore(pool)
 
 	const pol, chain = "pol_idem", "chain_idem_exec"

@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"os"
 	"testing"
 )
@@ -15,7 +14,7 @@ import (
 // (CMR-D04).
 func TestOrganization_IsOneToOneWithTenant(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -53,7 +52,7 @@ func TestOrganization_IsOneToOneWithTenant(t *testing.T) {
 // label, which is the distinction ADR-TENANCY-001 drew for every other table.
 func TestOrganization_RequiresAnExistingTenant(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -74,7 +73,7 @@ func TestOrganization_RequiresAnExistingTenant(t *testing.T) {
 // inside the lifecycle of ADR-IDENTITY-001 §8.3.
 func TestOrganization_ConstraintsBoundTheRow(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -118,7 +117,7 @@ func TestOrganization_ConstraintsBoundTheRow(t *testing.T) {
 // during a partial restore.
 func TestOrganizationBackfill_CoversEveryTenantAndIsIdempotent(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	backfill, err := os.ReadFile("../migrate/sql/20260804000002_organization_backfill.sql")
 	if err != nil {
@@ -178,7 +177,7 @@ func TestOrganizationBackfill_CoversEveryTenantAndIsIdempotent(t *testing.T) {
 // shared test schema never observes the table missing.
 func TestOrganizationMigration_AppliesAndRollsBackOnPopulatedDatabase(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	down, err := os.ReadFile("../migrate/rollback/20260804000001_organization.down.sql")
 	if err != nil {

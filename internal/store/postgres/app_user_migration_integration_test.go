@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"os"
 	"testing"
 )
@@ -18,7 +17,7 @@ import (
 // dropped app_user would break every test that ran after it in the same suite.
 func TestAppUserMigration_AppliesAndRollsBackOnPopulatedDatabase(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	down, err := os.ReadFile("../migrate/rollback/20260804000003_app_user.down.sql")
 	if err != nil {
@@ -124,7 +123,7 @@ func TestAppUserMigration_AppliesAndRollsBackOnPopulatedDatabase(t *testing.T) {
 // rather than in production.
 func TestAppUser_IsGlobalNotTenantOwned(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	var hasTenantID bool
 	if err := pool.QueryRow(ctx,

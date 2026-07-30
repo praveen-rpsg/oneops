@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -26,7 +25,7 @@ import (
 // reclaiming owner's terminal state.
 func TestLeaseFencing_WebhookEvictedWorkerIsFenced(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 	seedWebhook(ctx, t, pool, "wh", 100)
 	const lease = time.Minute
@@ -96,7 +95,7 @@ func TestLeaseFencing_WebhookEvictedWorkerIsFenced(t *testing.T) {
 // The same fence protects policy executions.
 func TestLeaseFencing_PolicyEvictedWorkerIsFenced(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewPolicyStore(pool)
 	seedPolicy(ctx, t, pool, "pol", 100)
 	const lease = time.Minute

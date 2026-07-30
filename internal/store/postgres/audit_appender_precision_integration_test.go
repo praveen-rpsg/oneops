@@ -4,7 +4,6 @@ package postgres
 
 import (
 	"bytes"
-	"context"
 	"testing"
 	"time"
 
@@ -33,7 +32,7 @@ func TestAppenderNormalizesSubMicrosecondTimestamp(t *testing.T) {
 	store := NewAuditStore(pool)
 	app := NewAuditAppender(pool, store)
 	ver := audit.NewVerifier(store)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	chain := uniqueChain(t)
 
 	in := appendInput(chain, 1)
@@ -84,7 +83,7 @@ func TestAppenderAlreadyMicrosecondUnchanged(t *testing.T) {
 	store := NewAuditStore(pool)
 	app := NewAuditAppender(pool, store)
 	ver := audit.NewVerifier(store)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	chain := uniqueChain(t)
 
 	in := appendInput(chain, 1)

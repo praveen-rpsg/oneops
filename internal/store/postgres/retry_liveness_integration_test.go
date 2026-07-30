@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -33,7 +32,7 @@ import (
 // never recorded, and then terminates in dead_letter.
 func TestRetryLiveness_WebhookReclaimIsBounded(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 
 	const (
@@ -107,7 +106,7 @@ func TestRetryLiveness_WebhookReclaimIsBounded(t *testing.T) {
 // orphan can never become an unbounded loop (ADR-CONCURRENCY-006).
 func TestRetryLiveness_OrphanedDeliveryTerminates(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 
 	suffix := time.Now().UnixNano()
@@ -160,7 +159,7 @@ func TestRetryLiveness_OrphanedDeliveryTerminates(t *testing.T) {
 // deliveries that were never actually sent.
 func TestRetryLiveness_ReleasedClaimRefundsTheAttempt(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 
 	suffix := time.Now().UnixNano()
@@ -215,7 +214,7 @@ func TestRetryLiveness_ReleasedClaimRefundsTheAttempt(t *testing.T) {
 // applied to the release path.
 func TestRetryLiveness_ReleaseIsFencedOnTheClaim(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 
 	suffix := time.Now().UnixNano()
@@ -273,7 +272,7 @@ func TestRetryLiveness_ReleaseIsFencedOnTheClaim(t *testing.T) {
 // for unrecoverable data loss.
 func TestRetryLiveness_RequeuedDeadLetterIsDeliverableAgain(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 
 	const (
@@ -342,7 +341,7 @@ func TestRetryLiveness_RequeuedDeadLetterIsDeliverableAgain(t *testing.T) {
 // the identical liveness hole: a crash-looping action is re-executed forever.
 func TestRetryLiveness_PolicyReclaimIsBounded(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewPolicyStore(pool)
 
 	const (

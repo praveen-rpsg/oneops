@@ -40,7 +40,7 @@ func seedIdentity(ctx context.Context, t *testing.T, tx pgx.Tx, suffix string) (
 // relationship rather than a pair of strings that happen to look like ids.
 func TestMembership_RequiresAllThreeReferences(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -87,7 +87,7 @@ func TestMembership_RequiresAllThreeReferences(t *testing.T) {
 // "is this user a member" would have two answers.
 func TestMembership_IsSingularPerUserPerOrganisation(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -121,7 +121,7 @@ func TestMembership_IsSingularPerUserPerOrganisation(t *testing.T) {
 // Lifecycle states are bounded by ADR-IDENTITY-001 §8.3 on both tables.
 func TestMembershipAndInvitation_LifecyclesAreBounded(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -159,7 +159,7 @@ func TestMembershipAndInvitation_LifecyclesAreBounded(t *testing.T) {
 // token cannot be issued twice, and the email is case-insensitive like app_user's.
 func TestInvitation_TokenIsSingularAndEmailIsCaseInsensitive(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -220,7 +220,7 @@ func TestInvitation_TokenIsSingularAndEmailIsCaseInsensitive(t *testing.T) {
 // migration that registers a table without protecting it fails here.
 func TestMembershipAndInvitation_AreUnderForcedRLS(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	for _, table := range []string{"membership", "invitation"} {
 		var enabled, forced bool
@@ -251,7 +251,7 @@ func TestMembershipAndInvitation_AreUnderForcedRLS(t *testing.T) {
 // schema never observes the tables missing.
 func TestMembershipMigration_AppliesAndRollsBackOnPopulatedDatabase(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	down, err := os.ReadFile("../migrate/rollback/20260804000004_membership.down.sql")
 	if err != nil {
@@ -320,7 +320,7 @@ func TestMembershipMigration_AppliesAndRollsBackOnPopulatedDatabase(t *testing.T
 // operator rolling back organization and silently taking memberships with it.
 func TestMembership_BlocksTheOrganizationRollbackUntilItIsGone(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	orgDown, err := os.ReadFile("../migrate/rollback/20260804000001_organization.down.sql")
 	if err != nil {

@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"testing"
 
 	"github.com/rpsg/oneops/internal/domain"
@@ -53,7 +52,7 @@ var serverGeneratedIdentifiers = map[string]string{
 // unique constraint that neither includes tenant_id nor is justified above.
 func TestUniquenessIsScopedToTenant(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	rows, err := pool.Query(ctx, `
 		SELECT c.relname, con.conname,
@@ -105,7 +104,7 @@ func TestUniquenessIsScopedToTenant(t *testing.T) {
 // Idempotency-Key must not interfere, in either direction.
 func TestIdempotencyKeysDoNotCollideAcrossTenants(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tenants := NewTenantStore(priv)
 	victim, err := tenants.Create(ctx, newTenant("idem-victim", "ext-idem-victim"))

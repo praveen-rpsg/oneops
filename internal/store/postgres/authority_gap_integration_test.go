@@ -37,7 +37,7 @@ func TestAuthorityGapIntegration(t *testing.T) {
 	res := authority.NewResolver(NewAuthorityStore(pool))
 	gapEval := authority.NewGapEvaluator(
 		authority.NewResolver(NewAuthorityStore(pool)), NewAuthorityStore(pool))
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	// An ACTIVE (current_baseline) provider covers CAP1 and CAP3.
 	provider := mkCoverObj(t, co, "gap-provider.md", domain.RetentionCurrentBaseline, "CAP1,CAP3")

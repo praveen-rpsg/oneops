@@ -35,7 +35,7 @@ import (
 // consumer does not act on rows it cannot prove belong to the work it was given.
 func TestReplayRequeue_CannotTouchAnotherOwnersDeliveries(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 
 	tenants := NewTenantStore(pool)

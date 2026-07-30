@@ -49,7 +49,7 @@ func itestDSN(tb testing.TB) string {
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := itestDSN(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	pool, err := NewPool(ctx, dsn, 5)
 	if err != nil {
 		t.Fatalf("pool: %v", err)
@@ -111,7 +111,7 @@ func truncateAll(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
 // fixtures without weakening the immutability guarantee on real audit data.
 func TestMain(m *testing.M) {
 	if dsn := os.Getenv("TEST_DATABASE_URL"); dsn != "" {
-		ctx := context.Background()
+		ctx := adminTestCtx()
 		pool, err := NewPool(ctx, dsn, 2)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "integration setup: pool: %v\n", err)
@@ -138,7 +138,7 @@ func sample(artifact, version string) *domain.ConfigObject {
 
 func TestRepoCreateGet(t *testing.T) {
 	repo := NewConfigObjectRepo(testPool(t))
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	created, err := repo.Create(ctx, sample("A.md", "1.0.0"))
 	if err != nil {
@@ -165,7 +165,7 @@ func TestRepoCreateGet(t *testing.T) {
 
 func TestRepoUpdateOptimistic(t *testing.T) {
 	repo := NewConfigObjectRepo(testPool(t))
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	created, _ := repo.Create(ctx, sample("B.md", "1.0.0"))
 
 	// Optimistic locking is exercised with a non-constitutional field: Patch no
@@ -205,7 +205,7 @@ func TestRepoUpdateOptimistic(t *testing.T) {
 
 func TestRepoBulkAndPagination(t *testing.T) {
 	repo := NewConfigObjectRepo(testPool(t))
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	var objs []*domain.ConfigObject
 	for i := 0; i < 5; i++ {
@@ -245,7 +245,7 @@ func TestRepoBulkAndPagination(t *testing.T) {
 
 func TestRepoSearchAndFilter(t *testing.T) {
 	repo := NewConfigObjectRepo(testPool(t))
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	_, _ = repo.Create(ctx, sample("Alpha.md", "1.0.0"))
 	beta := sample("Beta.md", "1.0.0")
 	beta.Role = domain.RoleEvidence

@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -24,7 +23,7 @@ import (
 // to the stale value. That failure is the live exploit; the pass is the fix.
 func TestCursor_WebhookWriteIsMonotonic(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 	chain := fmt.Sprintf("mono-wh-%d", time.Now().UnixNano())
 
@@ -53,7 +52,7 @@ func TestCursor_WebhookWriteIsMonotonic(t *testing.T) {
 
 func TestCursor_PolicyWriteIsMonotonic(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewPolicyStore(pool)
 	chain := fmt.Sprintf("mono-pol-%d", time.Now().UnixNano())
 

@@ -37,7 +37,7 @@ func TestAuthorityCitationIntegration(t *testing.T) {
 	res := authority.NewResolver(NewAuthorityStore(pool))
 	citeEval := authority.NewArtifactCitationEvaluator(
 		authority.NewResolver(NewAuthorityStore(pool)), NewAuthorityStore(pool))
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	// Cited case: New supersedes Old; an ACTIVE baseline artifact cites Old.
 	oldCited := mkCiteObj(t, co, "cite-old.md", domain.RetentionWorkingMaterial, "")

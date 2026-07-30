@@ -26,7 +26,7 @@ import (
 // history reading as the approved destination throughout (ADR-GOV-004).
 func TestDeliveryDestination_SurvivesWebhookRepointing(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 
 	suffix := time.Now().UnixNano()
@@ -93,7 +93,7 @@ func TestDeliveryDestination_SurvivesWebhookRepointing(t *testing.T) {
 // refused) never left the platform, so it has no destination fact to report.
 func TestDeliveryDestination_UnattemptedOutcomeRecordsNothing(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewWebhookStore(pool)
 
 	suffix := time.Now().UnixNano()

@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -15,7 +14,7 @@ func benchTraversal(b *testing.B, seed func(testing.TB, *pgxpool.Pool) (int, int
 	pool := graphPool(b)
 	seed(b, pool)
 	repo := NewGraphRepo(pool)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -53,7 +52,7 @@ func BenchmarkGraphScale10k(b *testing.B) {
 	pool := graphPool(b)
 	genBlocks(b, pool, 10000)
 	repo := NewGraphRepo(pool)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -68,7 +67,7 @@ func BenchmarkGraphScale50k(b *testing.B) {
 	pool := graphPool(b)
 	genBlocks(b, pool, 50000)
 	repo := NewGraphRepo(pool)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

@@ -48,7 +48,7 @@ func TestAppenderGenesisAndSecondAppend(t *testing.T) {
 	pool := graphPool(t)
 	store := NewAuditStore(pool)
 	app := NewAuditAppender(pool, store)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	chain := uniqueChain(t)
 
 	// Genesis (first) append: seq 1, prev = zero32, this = ChainHash over genesis.
@@ -124,7 +124,7 @@ func TestAppenderRollbackOnAppendFailure(t *testing.T) {
 	pool := graphPool(t)
 	real := NewAuditStore(pool)
 	app := NewAuditAppender(pool, &failingStore{AuditStore: real, failAppend: true})
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	chain := uniqueChain(t)
 
 	if _, err := app.Append(ctx, appendInput(chain, 1)); err == nil {
@@ -145,7 +145,7 @@ func TestAppenderRollbackOnHeadUpdateFailure(t *testing.T) {
 	pool := graphPool(t)
 	real := NewAuditStore(pool)
 	app := NewAuditAppender(pool, &failingStore{AuditStore: real, failUpsert: true})
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	chain := uniqueChain(t)
 
 	if _, err := app.Append(ctx, appendInput(chain, 1)); err == nil {
@@ -161,7 +161,7 @@ func TestAppenderDuplicateEventConflict(t *testing.T) {
 	pool := graphPool(t)
 	store := NewAuditStore(pool)
 	app := NewAuditAppender(pool, store)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	chain := uniqueChain(t)
 
 	if _, err := app.Append(ctx, appendInput(chain, 1)); err != nil {
@@ -186,7 +186,7 @@ func TestAppenderConcurrentSerialization(t *testing.T) {
 	pool := graphPool(t)
 	store := NewAuditStore(pool)
 	app := NewAuditAppender(pool, store)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	chain := uniqueChain(t)
 
 	const n = 12

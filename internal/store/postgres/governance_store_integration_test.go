@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"errors"
 	"testing"
 
@@ -19,7 +18,7 @@ func TestGovernanceRatifyIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	cfg := mkObj(t, co, "gov-ratify.md", domain.RetentionWorkingMaterial) // draft, non_normative
 	res, err := eng.Execute(ctx, governance.Command{Operation: domain.OpRatification, CfgID: cfg, Actor: "council", OperationID: "op-ratify-" + cfg})
@@ -45,7 +44,7 @@ func TestGovernanceOptimisticConcurrencyIntegration(t *testing.T) {
 	pool := graphPool(t)
 	co := NewConfigObjectRepo(pool)
 	eng, _ := governance.NewEngine(NewGovernanceStore(pool), governance.AllowAllAuthorizer{}, NewAuditAppender(pool, NewAuditStore(pool)))
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	cfg := mkObj(t, co, "gov-optim.md", domain.RetentionWorkingMaterial)
 	// stale expected version → mismatch, no mutation
@@ -63,7 +62,7 @@ func TestGovernanceDeleteIntegration(t *testing.T) {
 	co := NewConfigObjectRepo(pool)
 	gr := NewGraphRepo(pool)
 	eng, _ := governance.NewEngine(NewGovernanceStore(pool), governance.AllowAllAuthorizer{}, NewAuditAppender(pool, NewAuditStore(pool)))
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	// deletable working-material object
 	del := mkObj(t, co, "gov-del.md", domain.RetentionWorkingMaterial)

@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -21,7 +20,7 @@ import (
 // constitutional verdict with an unaudited field.
 func TestConstitutionalMetadata_CannotBeWrittenOnCreate(t *testing.T) {
 	repo := NewConfigObjectRepo(testPool(t))
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	for _, key := range domain.ConstitutionalMetadataKeys() {
 		t.Run(key, func(t *testing.T) {
@@ -45,7 +44,7 @@ func TestConstitutionalMetadata_CannotBeWrittenOnCreate(t *testing.T) {
 func TestConstitutionalMetadata_SurvivesADescriptivePatch(t *testing.T) {
 	pool := testPool(t)
 	repo := NewConfigObjectRepo(pool)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	o := sample(fmt.Sprintf("cm-patch-%d.md", time.Now().UnixNano()), "1.0.0")
 	o.Role = domain.RoleReference
@@ -93,7 +92,7 @@ func TestConstitutionalMetadata_SurvivesADescriptivePatch(t *testing.T) {
 // the patch path too, not merely preserve the existing one.
 func TestConstitutionalMetadata_CannotBeSetOnPatch(t *testing.T) {
 	repo := NewConfigObjectRepo(testPool(t))
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	o := sample(fmt.Sprintf("cm-patchset-%d.md", time.Now().UnixNano()), "1.0.0")
 	o.Role = domain.RoleReference

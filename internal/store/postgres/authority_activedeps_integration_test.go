@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"testing"
 
 	"github.com/rpsg/oneops/internal/authority"
@@ -19,7 +18,7 @@ func TestAuthorityActiveDependencyIntegration(t *testing.T) {
 	gr := NewGraphRepo(pool)
 	res := authority.NewResolver(NewAuthorityStore(pool))
 	eval := authority.NewActiveDependencyEvaluator(res)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	base := mkObj(t, co, "b2-baseline.md", domain.RetentionCurrentBaseline)
 	required := mkObj(t, co, "b2-required.md", domain.RetentionWorkingMaterial)

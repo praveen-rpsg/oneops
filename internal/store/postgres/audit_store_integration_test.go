@@ -51,7 +51,7 @@ func mkEvent(chain string, seq int64) *domain.AuditEvent {
 // appendCommitted appends one event in its own committed transaction.
 func appendCommitted(t *testing.T, s *AuditStore, e *domain.AuditEvent) error {
 	t.Helper()
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
@@ -105,7 +105,7 @@ func TestAuditDuplicateKeyConflict(t *testing.T) {
 
 func TestAuditChainHeadLifecycle(t *testing.T) {
 	s := NewAuditStore(graphPool(t))
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	chain := uniqueChain(t)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -142,7 +142,7 @@ func TestAuditChainHeadLifecycle(t *testing.T) {
 
 func TestAuditTransactionAtomicityAndRollback(t *testing.T) {
 	s := NewAuditStore(graphPool(t))
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	chain := uniqueChain(t)
 
 	// committed: event + head advance persist together
@@ -183,7 +183,7 @@ func TestAuditTransactionAtomicityAndRollback(t *testing.T) {
 
 func TestAuditVerifyRangeReaderOrdered(t *testing.T) {
 	s := NewAuditStore(graphPool(t))
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	chain := uniqueChain(t)
 	for seq := int64(1); seq <= 3; seq++ {
 		if err := appendCommitted(t, s, mkEvent(chain, seq)); err != nil {

@@ -74,143 +74,189 @@ func (s *RedemptionStore) Redeem(ctx context.Context, token, displayName string)
 		return nil, domain.ErrTokenNotRedeemable
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin redemption: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	// 1. Consume. One conditional UPDATE, so the token is claimed exactly once
-	//    even under concurrent redemption: the second transaction blocks on the
-	//    row lock and then matches nothing, because status is no longer
-	//    'pending'. Expiry is compared against the database clock in the same
-	//    statement, leaving no window between a check and the write.
-	inv, err := scanInvitation(tx.QueryRow(ctx, `
-		UPDATE invitation
-		   SET status = 'redeemed', redeemed_at = now()
-		 WHERE token_hash = $1
-		   AND status = 'pending'
-		   AND expires_at > now()
-		RETURNING `+invitationColumns, domain.HashInvitationToken(token)))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, domain.ErrTokenNotRedeemable
-	}
-	if err != nil {
-		return nil, fmt.Errorf("consume invitation: %w", err)
-	}
-
-	// 2. Find or create the account. The address is the identity: app_user is
-	//    unique on it platform-wide, so an invitation to an address someone
-	//    already uses must attach to that account rather than mint a second one
-	//    (ADR-IDENTITY-001 §8.2).
+	// Redemption performs up to four in-scope mutations in one act: the
+	// invitation is consumed, the account is created or activated, and the
+	// membership is granted. Each is a separate administrative fact, and the
+	// acts are built after the work so they describe what actually happened —
+	// whether the user was created or reused, whether the membership was new.
 	//
-	//    The lookup folds case in the query rather than relying on citext's
-	//    equality operator, which resolves through search_path and silently
-	//    fails to match when `public` is absent — the defect found while
-	//    building the user registry.
-	user, err := scanUser(tx.QueryRow(ctx,
-		`SELECT `+userColumns+` FROM app_user WHERE lower(email::text) = $1`,
-		domain.NormalizeEmail(inv.Email)))
+	// Authorised by possession of the token, so there are no claims; the bearer
+	// is recorded as a synthetic principal, exactly as InvitationStore.Consume
+	// does.
+	var (
+		inv               *domain.Invitation
+		user              *domain.User
+		membership        *domain.Membership
+		userCreated       bool
+		membershipCreated bool
+	)
 
-	var userCreated bool
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		// Construction and validation are the aggregate's; repeating them here
-		// would be a second answer to what a valid user is.
-		fresh, nerr := domain.NewUser(inv.Email, displayName)
-		if nerr != nil {
-			return nil, nerr
-		}
-		// The account is created already active. It exists because someone
-		// accepted an invitation, which is precisely the evidence `invited`
-		// waits for — leaving it invited would create an account that is
-		// immediately correct to activate and that nothing would ever activate.
-		fresh.Status = domain.UserActive
-
-		user, err = scanUser(tx.QueryRow(ctx, `
-			INSERT INTO app_user (user_id, email, display_name, status)
-			VALUES ($1, $2, $3, $4)
-			RETURNING `+userColumns,
-			fresh.UserID, fresh.Email, fresh.DisplayName, string(fresh.Status)))
-		if err != nil {
-			if isUniqueViolation(err) {
-				// Another redemption for the same address committed between the
-				// SELECT and here. The token is genuinely unusable now, and
-				// rolling back leaves the winner's work intact.
-				return nil, domain.ErrTokenNotRedeemable
+	err := withAdminAudit(domain.WithActor(ctx, domain.InvitationBearerActor), s.pool,
+		func() []domain.AdminAct {
+			acts := []domain.AdminAct{{
+				Operation: domain.AdminInvitationRedeemed,
+				Subject:   domain.AdminSubject{OrgID: inv.OrgID, TenantID: inv.TenantID},
+				Detail:    map[string]any{"invitation_id": inv.InvitationID},
+			}}
+			if userCreated {
+				acts = append(acts, domain.AdminAct{
+					Operation: domain.AdminUserCreated,
+					Subject:   domain.AdminSubject{UserID: user.UserID},
+					Detail:    map[string]any{"via": "invitation", "invitation_id": inv.InvitationID},
+				})
+			} else {
+				acts = append(acts, domain.AdminAct{
+					Operation: domain.AdminUserStatusChanged,
+					Subject:   domain.AdminSubject{UserID: user.UserID},
+					Detail:    map[string]any{"to": string(user.Status), "via": "invitation"},
+				})
 			}
-			return nil, fmt.Errorf("create user for redemption: %w", err)
-		}
-		userCreated = true
-
-	case err != nil:
-		return nil, fmt.Errorf("resolve invitee: %w", err)
-
-	default:
-		// The account exists. Whether it may accept is the domain's rule, not a
-		// predicate repeated in SQL.
-		if !user.Status.MayAcceptInvitation() {
-			// Uniform with every other refusal: revealing that the address
-			// belongs to a suspended account would confirm the account exists.
-			return nil, domain.ErrTokenNotRedeemable
-		}
-		if user.Status == domain.UserInvited {
-			// invited -> active, the transition the lifecycle already defines.
-			// Checked rather than assumed, so this stays correct if the machine
-			// changes (ADR-IDENTITY-001 §8.3).
-			if !user.Status.CanTransitionTo(domain.UserActive) {
-				return nil, domain.NewTransitionError(user.Status, domain.UserActive)
+			if membershipCreated {
+				acts = append(acts, domain.AdminAct{
+					Operation: domain.AdminMembershipGranted,
+					Subject: domain.AdminSubject{
+						OrgID: inv.OrgID, TenantID: inv.TenantID, UserID: user.UserID,
+					},
+					Detail: map[string]any{"membership_id": membership.MembershipID},
+				})
 			}
-			user, err = scanUser(tx.QueryRow(ctx, `
-				UPDATE app_user
-				   SET status = 'active', row_version = row_version + 1, updated_at = now()
-				 WHERE user_id = $1
-				RETURNING `+userColumns, user.UserID))
+			return acts
+		},
+		func(tx pgx.Tx) error {
+			var err error
+
+			// 1. Consume. One conditional UPDATE, so the token is claimed exactly once
+			//    even under concurrent redemption: the second transaction blocks on the
+			//    row lock and then matches nothing, because status is no longer
+			//    'pending'. Expiry is compared against the database clock in the same
+			//    statement, leaving no window between a check and the write.
+			inv, err = scanInvitation(tx.QueryRow(ctx, `
+			UPDATE invitation
+			   SET status = 'redeemed', redeemed_at = now()
+			 WHERE token_hash = $1
+			   AND status = 'pending'
+			   AND expires_at > now()
+			RETURNING `+invitationColumns, domain.HashInvitationToken(token)))
+			if errors.Is(err, pgx.ErrNoRows) {
+				return domain.ErrTokenNotRedeemable
+			}
 			if err != nil {
-				return nil, fmt.Errorf("activate invitee: %w", err)
+				return fmt.Errorf("consume invitation: %w", err)
 			}
-		}
-	}
 
-	// 3. Grant membership. tenant_id comes from the invitation, which is the
-	//    only record that already knows which boundary this grant belongs to.
-	fresh, err := domain.NewMembership(inv.OrgID, inv.TenantID, user.UserID)
+			// 2. Find or create the account. The address is the identity: app_user is
+			//    unique on it platform-wide, so an invitation to an address someone
+			//    already uses must attach to that account rather than mint a second one
+			//    (ADR-IDENTITY-001 §8.2).
+			//
+			//    The lookup folds case in the query rather than relying on citext's
+			//    equality operator, which resolves through search_path and silently
+			//    fails to match when `public` is absent — the defect found while
+			//    building the user registry.
+			user, err = scanUser(tx.QueryRow(ctx,
+				`SELECT `+userColumns+` FROM app_user WHERE lower(email::text) = $1`,
+				domain.NormalizeEmail(inv.Email)))
+
+			switch {
+			case errors.Is(err, pgx.ErrNoRows):
+				// Construction and validation are the aggregate's; repeating them here
+				// would be a second answer to what a valid user is.
+				fresh, nerr := domain.NewUser(inv.Email, displayName)
+				if nerr != nil {
+					return nerr
+				}
+				// The account is created already active. It exists because someone
+				// accepted an invitation, which is precisely the evidence `invited`
+				// waits for — leaving it invited would create an account that is
+				// immediately correct to activate and that nothing would ever activate.
+				fresh.Status = domain.UserActive
+
+				user, err = scanUser(tx.QueryRow(ctx, `
+				INSERT INTO app_user (user_id, email, display_name, status)
+				VALUES ($1, $2, $3, $4)
+				RETURNING `+userColumns,
+					fresh.UserID, fresh.Email, fresh.DisplayName, string(fresh.Status)))
+				if err != nil {
+					if isUniqueViolation(err) {
+						// Another redemption for the same address committed between the
+						// SELECT and here. The token is genuinely unusable now, and
+						// rolling back leaves the winner's work intact.
+						return domain.ErrTokenNotRedeemable
+					}
+					return fmt.Errorf("create user for redemption: %w", err)
+				}
+				userCreated = true
+
+			case err != nil:
+				return fmt.Errorf("resolve invitee: %w", err)
+
+			default:
+				// The account exists. Whether it may accept is the domain's rule, not a
+				// predicate repeated in SQL.
+				if !user.Status.MayAcceptInvitation() {
+					// Uniform with every other refusal: revealing that the address
+					// belongs to a suspended account would confirm the account exists.
+					return domain.ErrTokenNotRedeemable
+				}
+				if user.Status == domain.UserInvited {
+					// invited -> active, the transition the lifecycle already defines.
+					// Checked rather than assumed, so this stays correct if the machine
+					// changes (ADR-IDENTITY-001 §8.3).
+					if !user.Status.CanTransitionTo(domain.UserActive) {
+						return domain.NewTransitionError(user.Status, domain.UserActive)
+					}
+					user, err = scanUser(tx.QueryRow(ctx, `
+					UPDATE app_user
+					   SET status = 'active', row_version = row_version + 1, updated_at = now()
+					 WHERE user_id = $1
+					RETURNING `+userColumns, user.UserID))
+					if err != nil {
+						return fmt.Errorf("activate invitee: %w", err)
+					}
+				}
+			}
+
+			// 3. Grant membership. tenant_id comes from the invitation, which is the
+			//    only record that already knows which boundary this grant belongs to.
+			freshM, err := domain.NewMembership(inv.OrgID, inv.TenantID, user.UserID)
+			if err != nil {
+				return err
+			}
+
+			// uq_membership_org_user makes a duplicate impossible rather than unlikely.
+			// A previously revoked membership is reactivated — that is what re-inviting
+			// someone means — and one already active is left exactly as it is, so a
+			// redemption does not consume a row version that a concurrent administrator
+			// is holding.
+			membership, err = scanMembership(tx.QueryRow(ctx, `
+			INSERT INTO membership (membership_id, tenant_id, org_id, user_id, status)
+			VALUES ($1, $2, $3, $4, 'active')
+			ON CONFLICT (org_id, user_id) DO UPDATE
+			   SET status = 'active',
+			       row_version = membership.row_version + 1,
+			       updated_at = now()
+			 WHERE membership.status <> 'active'
+			RETURNING `+membershipColumns,
+				freshM.MembershipID, freshM.TenantID, freshM.OrgID, freshM.UserID))
+
+			membershipCreated = true
+			if errors.Is(err, pgx.ErrNoRows) {
+				// The conflict target matched and the WHERE suppressed the update: the
+				// user is already an active member. The invitation is still consumed —
+				// it was used — and the existing row is what the caller gets.
+				membershipCreated = false
+				membership, err = scanMembership(tx.QueryRow(ctx,
+					`SELECT `+membershipColumns+` FROM membership WHERE org_id = $1 AND user_id = $2`,
+					inv.OrgID, user.UserID))
+			}
+			if err != nil {
+				return fmt.Errorf("grant membership: %w", err)
+			}
+
+			return nil
+		})
 	if err != nil {
 		return nil, err
-	}
-
-	// uq_membership_org_user makes a duplicate impossible rather than unlikely.
-	// A previously revoked membership is reactivated — that is what re-inviting
-	// someone means — and one already active is left exactly as it is, so a
-	// redemption does not consume a row version that a concurrent administrator
-	// is holding.
-	membership, err := scanMembership(tx.QueryRow(ctx, `
-		INSERT INTO membership (membership_id, tenant_id, org_id, user_id, status)
-		VALUES ($1, $2, $3, $4, 'active')
-		ON CONFLICT (org_id, user_id) DO UPDATE
-		   SET status = 'active',
-		       row_version = membership.row_version + 1,
-		       updated_at = now()
-		 WHERE membership.status <> 'active'
-		RETURNING `+membershipColumns,
-		fresh.MembershipID, fresh.TenantID, fresh.OrgID, fresh.UserID))
-
-	membershipCreated := true
-	if errors.Is(err, pgx.ErrNoRows) {
-		// The conflict target matched and the WHERE suppressed the update: the
-		// user is already an active member. The invitation is still consumed —
-		// it was used — and the existing row is what the caller gets.
-		membershipCreated = false
-		membership, err = scanMembership(tx.QueryRow(ctx,
-			`SELECT `+membershipColumns+` FROM membership WHERE org_id = $1 AND user_id = $2`,
-			inv.OrgID, user.UserID))
-	}
-	if err != nil {
-		return nil, fmt.Errorf("grant membership: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit redemption: %w", err)
 	}
 	return &domain.Redemption{
 		Invitation:        inv,

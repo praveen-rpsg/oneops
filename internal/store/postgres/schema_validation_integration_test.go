@@ -28,7 +28,7 @@ func setRLS(ctx context.Context, t *testing.T, priv poolExec, table, clause stri
 // depends entirely on the schema retaining RLS, and nothing at runtime noticed.
 func TestSchema_DisabledRLSLeaksCrossTenant(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tenants := NewTenantStore(priv)
 	a, _ := tenants.Create(ctx, newTenant("schema-alpha", "ext-schema-alpha"))
@@ -72,7 +72,7 @@ func TestSchema_DisabledRLSLeaksCrossTenant(t *testing.T) {
 // The schema validator refuses each way the ownership model can be weakened.
 func TestSchema_ValidatorDetectsWeakenedSchema(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	v := NewSchemaValidator(priv)
 
 	// A correct schema has no problems.
@@ -123,7 +123,7 @@ func TestSchema_ValidatorDetectsWeakenedSchema(t *testing.T) {
 // A nullable ownership column makes ownership optional; the validator refuses it.
 func TestSchema_ValidatorDetectsNullableOwnership(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	v := NewSchemaValidator(priv)
 
 	// policy_execution has no inbound FK to make DROP NOT NULL cheap to toggle.
@@ -156,7 +156,7 @@ var _ = ulid.Make
 // by editing a list alone.
 func TestSchema_EveryTenantIdTableIsCanonicalAndProtected(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	inList := map[string]bool{}
 	for _, tbl := range TenantOwnedTables {
@@ -254,7 +254,7 @@ func TestSchema_EveryTenantIdTableIsCanonicalAndProtected(t *testing.T) {
 // while it is dropped, audit history is mutable, which this test demonstrates.
 func TestSchema_DroppedAuditGuardIsDetected(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	v := NewSchemaValidator(priv)
 
 	if problems, err := v.Validate(ctx); err != nil {

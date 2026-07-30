@@ -182,19 +182,35 @@ func (s *UserStore) UpdateProfile(
 		return nil, domain.NewValidationError("display_name", "must be at most 200 characters")
 	}
 
-	row := s.pool.QueryRow(ctx, `
-		UPDATE app_user
-		   SET display_name = $3, row_version = row_version + 1, updated_at = now()
-		 WHERE user_id = $1 AND row_version = $2
-		RETURNING `+userColumns,
-		userID, rowVersion, displayName)
+	var u *domain.User
+	err := withAdminAudit(ctx, s.pool,
+		func() []domain.AdminAct {
+			return []domain.AdminAct{{
+				Operation: domain.AdminUserProfileUpdated,
+				Subject:   domain.AdminSubject{UserID: userID},
+				Detail:    map[string]any{"display_name": displayName},
+			}}
+		},
+		func(tx pgx.Tx) error {
+			row := tx.QueryRow(ctx, `
+				UPDATE app_user
+				   SET display_name = $3, row_version = row_version + 1, updated_at = now()
+				 WHERE user_id = $1 AND row_version = $2
+				RETURNING `+userColumns,
+				userID, rowVersion, displayName)
 
-	u, err := scanUser(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, s.explainMissedUpdate(ctx, userID)
-	}
+			var scanErr error
+			u, scanErr = scanUser(row)
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				return s.explainMissedUpdate(ctx, userID)
+			}
+			if scanErr != nil {
+				return fmt.Errorf("update user profile: %w", scanErr)
+			}
+			return nil
+		})
 	if err != nil {
-		return nil, fmt.Errorf("update user profile: %w", err)
+		return nil, err
 	}
 	return u, nil
 }
@@ -224,20 +240,39 @@ func (s *UserStore) SetStatus(
 		return nil, domain.NewTransitionError(current.Status, status)
 	}
 
-	row := s.pool.QueryRow(ctx, `
-		UPDATE app_user
-		   SET status = $3, row_version = row_version + 1, updated_at = now()
-		 WHERE user_id = $1 AND row_version = $2
-		RETURNING `+userColumns,
-		userID, rowVersion, string(status))
+	var u *domain.User
+	err = withAdminAudit(ctx, s.pool,
+		func() []domain.AdminAct {
+			return []domain.AdminAct{{
+				Operation: domain.AdminUserStatusChanged,
+				Subject:   domain.AdminSubject{UserID: userID},
+				Detail: map[string]any{
+					"from": string(current.Status),
+					"to":   string(status),
+				},
+			}}
+		},
+		func(tx pgx.Tx) error {
+			row := tx.QueryRow(ctx, `
+				UPDATE app_user
+				   SET status = $3, row_version = row_version + 1, updated_at = now()
+				 WHERE user_id = $1 AND row_version = $2
+				RETURNING `+userColumns,
+				userID, rowVersion, string(status))
 
-	u, err := scanUser(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Lost the race between the check above and this write.
-		return nil, s.explainMissedUpdate(ctx, userID)
-	}
+			var scanErr error
+			u, scanErr = scanUser(row)
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				// Lost the race between the check above and this write.
+				return s.explainMissedUpdate(ctx, userID)
+			}
+			if scanErr != nil {
+				return fmt.Errorf("set user status: %w", scanErr)
+			}
+			return nil
+		})
 	if err != nil {
-		return nil, fmt.Errorf("set user status: %w", err)
+		return nil, err
 	}
 	return u, nil
 }

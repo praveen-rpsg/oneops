@@ -74,18 +74,34 @@ func (s *InvitationStore) Create(ctx context.Context, i *domain.Invitation) (*do
 		return nil, err
 	}
 
-	row := s.pool.QueryRow(ctx, `
-		INSERT INTO invitation (invitation_id, tenant_id, org_id, email, token_hash, status, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		RETURNING `+invitationColumns,
-		i.InvitationID, i.TenantID, i.OrgID, i.Email, i.TokenHash, string(i.Status), i.ExpiresAt)
+	var created *domain.Invitation
+	err := withAdminAudit(ctx, s.pool,
+		func() []domain.AdminAct {
+			return []domain.AdminAct{{
+				Operation: domain.AdminInvitationCreated,
+				Subject:   domain.AdminSubject{OrgID: i.OrgID, TenantID: i.TenantID},
+				Detail:    map[string]any{"invitation_id": i.InvitationID, "email": string(i.Email)},
+			}}
+		},
+		func(tx pgx.Tx) error {
+			row := tx.QueryRow(ctx, `
+				INSERT INTO invitation (invitation_id, tenant_id, org_id, email, token_hash, status, expires_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)
+				RETURNING `+invitationColumns,
+				i.InvitationID, i.TenantID, i.OrgID, i.Email, i.TokenHash, string(i.Status), i.ExpiresAt)
 
-	created, err := scanInvitation(row)
+			var scanErr error
+			created, scanErr = scanInvitation(row)
+			if scanErr != nil {
+				if isUniqueViolation(scanErr) {
+					return domain.ErrConflict
+				}
+				return fmt.Errorf("insert invitation: %w", scanErr)
+			}
+			return nil
+		})
 	if err != nil {
-		if isUniqueViolation(err) {
-			return nil, domain.ErrConflict
-		}
-		return nil, fmt.Errorf("insert invitation: %w", err)
+		return nil, err
 	}
 	return created, nil
 }
@@ -171,20 +187,42 @@ func (s *InvitationStore) Consume(ctx context.Context, token string) (*domain.In
 		return nil, domain.ErrTokenNotRedeemable
 	}
 
-	row := s.pool.QueryRow(ctx, `
-		UPDATE invitation
-		   SET status = 'redeemed', redeemed_at = now()
-		 WHERE token_hash = $1
-		   AND status = 'pending'
-		   AND expires_at > now()
-		RETURNING `+invitationColumns, domain.HashInvitationToken(token))
+	// This path is authorised by possession of the token, not by a session, so
+	// there are no claims and ActorFrom would refuse the act. The bearer is
+	// recorded as a synthetic principal: the act is real and must be audited,
+	// and the subject columns carry which invitation and which organisation.
+	// Naming the bearer explicitly is honest — inventing a human actor here
+	// would attribute the redemption to someone who did not perform it.
+	var redeemed *domain.Invitation
+	err := withAdminAudit(domain.WithActor(ctx, domain.InvitationBearerActor), s.pool,
+		func() []domain.AdminAct {
+			return []domain.AdminAct{{
+				Operation: domain.AdminInvitationRedeemed,
+				Subject:   domain.AdminSubject{OrgID: redeemed.OrgID, TenantID: redeemed.TenantID},
+				Detail:    map[string]any{"invitation_id": redeemed.InvitationID},
+			}}
+		},
+		func(tx pgx.Tx) error {
+			row := tx.QueryRow(ctx, `
+				UPDATE invitation
+				   SET status = 'redeemed', redeemed_at = now()
+				 WHERE token_hash = $1
+				   AND status = 'pending'
+				   AND expires_at > now()
+				RETURNING `+invitationColumns, domain.HashInvitationToken(token))
 
-	redeemed, err := scanInvitation(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, domain.ErrTokenNotRedeemable
-	}
+			var scanErr error
+			redeemed, scanErr = scanInvitation(row)
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				return domain.ErrTokenNotRedeemable
+			}
+			if scanErr != nil {
+				return fmt.Errorf("consume invitation: %w", scanErr)
+			}
+			return nil
+		})
 	if err != nil {
-		return nil, fmt.Errorf("consume invitation: %w", err)
+		return nil, err
 	}
 	return redeemed, nil
 }
@@ -195,25 +233,42 @@ func (s *InvitationStore) Consume(ctx context.Context, token string) (*domain.In
 // already-redeemed invitation matches nothing, so revocation cannot silently
 // undo a redemption that has already happened.
 func (s *InvitationStore) Revoke(ctx context.Context, invitationID string) (*domain.Invitation, error) {
-	row := s.pool.QueryRow(ctx, `
-		UPDATE invitation
-		   SET status = 'revoked'
-		 WHERE invitation_id = $1
-		   AND status = 'pending'
-		RETURNING `+invitationColumns, invitationID)
+	var revoked *domain.Invitation
+	err := withAdminAudit(ctx, s.pool,
+		func() []domain.AdminAct {
+			return []domain.AdminAct{{
+				Operation: domain.AdminInvitationRevoked,
+				Subject:   domain.AdminSubject{OrgID: revoked.OrgID, TenantID: revoked.TenantID},
+				Detail:    map[string]any{"invitation_id": invitationID},
+			}}
+		},
+		func(tx pgx.Tx) error {
+			row := tx.QueryRow(ctx, `
+				UPDATE invitation
+				   SET status = 'revoked'
+				 WHERE invitation_id = $1
+				   AND status = 'pending'
+				RETURNING `+invitationColumns, invitationID)
 
-	revoked, err := scanInvitation(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Either it is gone or it is no longer pending. Probing distinguishes
-		// them so the caller gets 404 or 409 rather than one ambiguous failure,
-		// the same shape TenantStore and OrganizationStore use.
-		if _, getErr := s.Get(ctx, invitationID); getErr != nil {
-			return nil, getErr
-		}
-		return nil, domain.ErrConflict
-	}
+			var scanErr error
+			revoked, scanErr = scanInvitation(row)
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				// Either it is gone or it is no longer pending. Probing
+				// distinguishes them so the caller gets 404 or 409 rather than
+				// one ambiguous failure, the same shape TenantStore and
+				// OrganizationStore use.
+				if _, getErr := s.Get(ctx, invitationID); getErr != nil {
+					return getErr
+				}
+				return domain.ErrConflict
+			}
+			if scanErr != nil {
+				return fmt.Errorf("revoke invitation: %w", scanErr)
+			}
+			return nil
+		})
 	if err != nil {
-		return nil, fmt.Errorf("revoke invitation: %w", err)
+		return nil, err
 	}
 	return revoked, nil
 }

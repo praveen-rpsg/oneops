@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -16,7 +15,7 @@ import (
 // refuses startup on it.
 func TestMigration_PendingIsDetected(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	// Simulate an un-recorded migration by forgetting the latest applied
 	// version, as an interrupted run or a partial schema_migrations restore does.

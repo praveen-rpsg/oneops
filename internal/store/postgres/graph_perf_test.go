@@ -144,7 +144,7 @@ func (s stats) String() string {
 func measureBlocks(t *testing.T, pool *pgxpool.Pool, n int) stats {
 	nc, ec := genBlocks(t, pool, n)
 	repo := NewGraphRepo(pool)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	var durs []time.Duration
 	for i := 1; i <= n; i += 10 { // block-start roots
 		root := "n" + itoa(i)
@@ -191,7 +191,7 @@ func TestGraphPerfReachableSize(t *testing.T) {
 	pool := graphPool(t)
 	nc, ec := genWide(t, pool, 5000)
 	repo := NewGraphRepo(pool)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	var durs []time.Duration
 	for i := 0; i < 50; i++ {
 		start := time.Now()

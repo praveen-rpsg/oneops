@@ -54,7 +54,7 @@ func seedForTenant(ctx context.Context, t *testing.T, priv *pgxpool.Pool, tenant
 // the database, not by a predicate the query happened to include.
 func TestRLS_CrossTenantReadReturnsNothing(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tenants := NewTenantStore(priv)
 	a, err := tenants.Create(ctx, newTenant("rls-alpha", "ext-rls-alpha"))
@@ -108,7 +108,7 @@ func TestRLS_CrossTenantReadReturnsNothing(t *testing.T) {
 // be confined to the bound tenant.
 func TestRLS_UnqualifiedSelectIsStillConfined(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tenants := NewTenantStore(priv)
 	a, err := tenants.Create(ctx, newTenant("rls-scan-a", "ext-rls-scan-a"))
@@ -148,7 +148,7 @@ func TestRLS_UnqualifiedSelectIsStillConfined(t *testing.T) {
 // any forgotten assignment into total cross-tenant disclosure.
 func TestRLS_UnboundConnectionSeesNothing(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	seedForTenant(ctx, t, priv, domain.SystemTenantID, "unbound-probe.md")
 
 	scoped := tenantScopedPool(t)
@@ -179,7 +179,7 @@ func TestRLS_UnboundConnectionSeesNothing(t *testing.T) {
 // read from it.
 func TestRLS_CannotWriteIntoAnotherTenant(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tenants := NewTenantStore(priv)
 	a, err := tenants.Create(ctx, newTenant("rls-write-a", "ext-rls-write-a"))
@@ -205,7 +205,7 @@ func TestRLS_CannotWriteIntoAnotherTenant(t *testing.T) {
 // anything to check.
 func TestRLS_PrivilegedPoolStillSeesEveryTenant(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tenants := NewTenantStore(priv)
 	a, err := tenants.Create(ctx, newTenant("rls-worker-a", "ext-rls-worker-a"))
@@ -230,7 +230,7 @@ func TestRLS_PrivilegedPoolStillSeesEveryTenant(t *testing.T) {
 // everything; a table with neither is wide open. Both are caught here.
 func TestRLS_EveryOwnedTableIsProtected(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	for _, table := range tenantOwnedTables {
 		var enabled, forced bool
@@ -276,7 +276,7 @@ func TestRLS_EveryOwnedTableIsProtected(t *testing.T) {
 // changed to write ownership explicitly.
 func TestRLS_TenantCanWriteThroughRepository(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tenants := NewTenantStore(priv)
 	a, err := tenants.Create(ctx, newTenant("rls-repo-write", "ext-rls-repo-write"))
@@ -334,7 +334,7 @@ func TestRLS_TenantCanWriteThroughRepository(t *testing.T) {
 // and denial of service across the tenant boundary from one wiring mistake.
 func TestRLS_WebhooksAreTenantIsolated(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tenants := NewTenantStore(priv)
 	a, err := tenants.Create(ctx, newTenant("rls-wh-a", "ext-rls-wh-a"))
@@ -394,7 +394,7 @@ func TestRLS_WebhooksAreTenantIsolated(t *testing.T) {
 // endpoints and credentials. Same wiring, same exposure.
 func TestRLS_PoliciesAreTenantIsolated(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tenants := NewTenantStore(priv)
 	a, err := tenants.Create(ctx, newTenant("rls-pol-a", "ext-rls-pol-a"))
@@ -434,7 +434,7 @@ func TestRLS_PoliciesAreTenantIsolated(t *testing.T) {
 // the running service before the fix.
 func TestRLS_ReplayJobsAreTenantIsolated(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tenants := NewTenantStore(priv)
 	a, err := tenants.Create(ctx, newTenant("rls-replay-a", "ext-rls-replay-a"))

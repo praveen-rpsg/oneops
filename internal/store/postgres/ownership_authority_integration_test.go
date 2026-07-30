@@ -51,7 +51,7 @@ type poolExec interface {
 // consistent chain.
 func TestResolveEventOwner_ConsistentChain(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	store := NewAuditStore(priv)
 
 	tenants := NewTenantStore(priv)
@@ -76,7 +76,7 @@ func TestResolveEventOwner_ConsistentChain(t *testing.T) {
 // this split-brain row delivered a victim's event to an attacker.
 func TestResolveEventOwner_SplitBrainIsRefused(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	store := NewAuditStore(priv)
 
 	tenants := NewTenantStore(priv)
@@ -103,7 +103,7 @@ func TestResolveEventOwner_SplitBrainIsRefused(t *testing.T) {
 // not silently trusted.
 func TestResolveEventOwner_OrphanChainIsUnresolvable(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	store := NewAuditStore(priv)
 
 	// Audit row with no matching configuration_object.
@@ -120,7 +120,7 @@ func TestResolveEventOwner_OrphanChainIsUnresolvable(t *testing.T) {
 // platform can refuse to boot on a corrupted log.
 func TestValidateOwnershipConsistency(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	store := NewAuditStore(priv)
 
 	tenants := NewTenantStore(priv)

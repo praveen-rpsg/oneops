@@ -54,7 +54,7 @@ func TestAuthorityResponsibilityIntegration(t *testing.T) {
 	gr := NewGraphRepo(pool)
 	res := authority.NewResolver(NewAuthorityStore(pool))
 	respEval := authority.NewResponsibilityEvaluator(NewAuthorityStore(pool))
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	// Complete transfer: successor owns all of old's responsibilities -> Historical.
 	oldFull := mkRespObj(t, co, "resp-old-full.md", "R1,R2")

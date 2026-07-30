@@ -37,7 +37,7 @@ func TestAuthorityResolverIntegration(t *testing.T) {
 	co := NewConfigObjectRepo(pool)
 	gr := NewGraphRepo(pool)
 	res := authority.NewResolver(NewAuthorityStore(pool))
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	base := mkObj(t, co, "baseline.md", domain.RetentionCurrentBaseline)
 	dep := mkObj(t, co, "dependency.md", domain.RetentionWorkingMaterial)

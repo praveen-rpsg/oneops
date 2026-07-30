@@ -28,7 +28,7 @@ func newStoredOrg(ctx context.Context, t *testing.T, s *OrganizationStore, slug 
 // its tenant is an Identity scope with no isolation (ADR-IDENTITY-001 §7.1).
 func TestOrganizationStore_CreateMakesBothRows(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewOrganizationStore(pool)
 
 	o := newStoredOrg(ctx, t, s, "both-rows")
@@ -54,7 +54,7 @@ func TestOrganizationStore_CreateMakesBothRows(t *testing.T) {
 // at (ADR-IDENTITY-001 AC-2).
 func TestOrganizationStore_CreateIsAtomic(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewOrganizationStore(pool)
 
 	first := newStoredOrg(ctx, t, s, "atomic")
@@ -85,7 +85,7 @@ func TestOrganizationStore_CreateIsAtomic(t *testing.T) {
 
 func TestOrganizationStore_DuplicateSlugIsConflict(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewOrganizationStore(pool)
 
 	newStoredOrg(ctx, t, s, "taken-slug")
@@ -103,7 +103,7 @@ func TestOrganizationStore_DuplicateSlugIsConflict(t *testing.T) {
 // must be refused by the database, not merely discouraged by convention.
 func TestOrganizationStore_OneOrganisationPerTenant(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewOrganizationStore(pool)
 
 	first := newStoredOrg(ctx, t, s, "one-per-tenant")
@@ -122,7 +122,7 @@ func TestOrganizationStore_OneOrganisationPerTenant(t *testing.T) {
 
 func TestOrganizationStore_Lookups(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewOrganizationStore(pool)
 
 	o := newStoredOrg(ctx, t, s, "lookups")
@@ -169,7 +169,7 @@ func TestOrganizationStore_Lookups(t *testing.T) {
 // without its tenant would keep serving — a suspension that suspends nothing.
 func TestOrganizationStore_SuspensionCascadesToTenant(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewOrganizationStore(pool)
 
 	o := newStoredOrg(ctx, t, s, "cascade")
@@ -214,7 +214,7 @@ func TestOrganizationStore_SuspensionCascadesToTenant(t *testing.T) {
 
 func TestOrganizationStore_SetStatusGuards(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewOrganizationStore(pool)
 
 	o := newStoredOrg(ctx, t, s, "guards")
@@ -248,7 +248,7 @@ func TestOrganizationStore_SetStatusGuards(t *testing.T) {
 
 func TestOrganizationStore_ListPaginates(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewOrganizationStore(pool)
 
 	for i := 0; i < 4; i++ {
@@ -323,7 +323,7 @@ func TestOrganizationStore_ListPaginates(t *testing.T) {
 // any tenant context, because tenant_id is discovered BY reading it.
 func TestOrganizationStore_IsNotTenantScoped(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewOrganizationStore(pool)
 
 	o := newStoredOrg(ctx, t, s, "global-read")

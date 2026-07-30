@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"testing"
 
 	"github.com/rpsg/oneops/internal/domain"
@@ -44,7 +43,7 @@ var fixtureEdges = []struct {
 // seedGraphFixture creates the fixture's Configuration Objects and edges.
 func seedGraphFixture(t *testing.T, co *ConfigObjectRepo, g *GraphRepo) graphFixture {
 	t.Helper()
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	fx := graphFixture{cfgID: map[string]string{}}
 
 	for _, n := range fixtureNodes {

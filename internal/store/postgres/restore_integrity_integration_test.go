@@ -37,7 +37,7 @@ func dropTenantKeepingData(ctx context.Context, t *testing.T, priv poolExec, ten
 // looped forever on a foreign-key error and the platform served regardless.
 func TestRestore_MissingOwnerTenantIsUnresolvable(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	store := NewAuditStore(priv)
 
 	tenants := NewTenantStore(priv)
@@ -64,7 +64,7 @@ func TestRestore_MissingOwnerTenantIsUnresolvable(t *testing.T) {
 // naming every affected table.
 func TestRestore_StartupRefusesDanglingOwnership(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	validator := NewOwnershipValidator(priv)
 
 	tenants := NewTenantStore(priv)
@@ -102,7 +102,7 @@ func TestRestore_StartupRefusesDanglingOwnership(t *testing.T) {
 // a delivery whose event is not in the log).
 func TestRestore_AuditWithoutObjectIsUnresolvable(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	store := NewAuditStore(priv)
 
 	orphanChain := ulid.Make().String()

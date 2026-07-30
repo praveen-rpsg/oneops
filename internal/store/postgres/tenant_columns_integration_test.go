@@ -18,7 +18,7 @@ var tenantOwnedTables = TenantOwnedTables
 
 func TestTenantColumns_EveryOwnedTableCarriesTenant(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	for _, table := range tenantOwnedTables {
 		var nullable string
@@ -43,7 +43,7 @@ func TestTenantColumns_EveryOwnedTableCarriesTenant(t *testing.T) {
 // which is what makes the migration safe to apply to a live database.
 func TestTenantColumns_BackfillsToSystem(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	repo := NewConfigObjectRepo(pool)
 	created, err := repo.Create(ctx, sample("backfill-check.md", "1.0.0"))
@@ -66,7 +66,7 @@ func TestTenantColumns_BackfillsToSystem(t *testing.T) {
 // a tenant that does not exist.
 func TestTenantColumns_ForeignKeyRejectsUnknownTenant(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	_, err := pool.Exec(ctx, `
 		INSERT INTO configuration_object
@@ -84,7 +84,7 @@ func TestTenantColumns_ForeignKeyRejectsUnknownTenant(t *testing.T) {
 // other through conflicts.
 func TestTenantColumns_ArtifactUniquenessIsPerTenant(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	other := NewTenantStore(pool)
 	tn, err := other.Create(ctx, newTenant("uniq-tenant", "ext-uniq-tenant"))
@@ -118,7 +118,7 @@ func TestTenantColumns_ArtifactUniquenessIsPerTenant(t *testing.T) {
 // orphaned; the foreign key enforces that at the database level.
 func TestTenantColumns_TenantWithRowsCannotBeDeleted(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	store := NewTenantStore(pool)
 	tn, err := store.Create(ctx, newTenant("undeletable", "ext-undeletable"))
@@ -163,7 +163,7 @@ func seedAuditRow(ctx context.Context, t *testing.T, pool interface {
 // survive the column being added.
 func TestTenantColumns_AuditRemainsAppendOnly(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	seedAuditRow(ctx, t, pool, "append-only-check")
 
 	if _, err := pool.Exec(ctx, `TRUNCATE audit_event`); err == nil {
@@ -186,7 +186,7 @@ func TestTenantColumns_AuditRemainsAppendOnly(t *testing.T) {
 // trigger so partitions created later inherit it.
 func TestAuditPartitionsCannotBeTruncatedDirectly(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	seedAuditRow(ctx, t, pool, "partition-bypass-check")
 
 	rows, err := pool.Query(ctx, `

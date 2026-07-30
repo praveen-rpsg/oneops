@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"os"
 	"testing"
 
@@ -13,7 +12,7 @@ import (
 // twoNodes seeds two Configuration Objects and returns their cfg_ids.
 func twoNodes(t *testing.T, co *ConfigObjectRepo) (string, string) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	a, err := co.Create(ctx, sample("Edge-A.md", "1.0.0"))
 	if err != nil {
 		t.Fatalf("seed A: %v", err)
@@ -29,7 +28,7 @@ func TestGraphEdgeCRUD(t *testing.T) {
 	pool := testPool(t)
 	co := NewConfigObjectRepo(pool)
 	g := NewGraphRepo(pool)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	from, to := twoNodes(t, co)
 
 	created, err := g.CreateEdge(ctx, &domain.DependencyEdge{FromCfg: from, ToCfg: to, EdgeKind: domain.EdgeKindDepends})
@@ -88,7 +87,7 @@ func TestGraphEdgeCRUD(t *testing.T) {
 func TestGraphDuplicateRejected(t *testing.T) {
 	pool := testPool(t)
 	g := NewGraphRepo(pool)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	from, to := twoNodes(t, NewConfigObjectRepo(pool))
 
 	if _, err := g.CreateEdge(ctx, &domain.DependencyEdge{FromCfg: from, ToCfg: to, EdgeKind: domain.EdgeKindDepends}); err != nil {
@@ -107,7 +106,7 @@ func TestGraphDuplicateRejected(t *testing.T) {
 func TestGraphInvalidKindRejected(t *testing.T) {
 	pool := testPool(t)
 	g := NewGraphRepo(pool)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	from, to := twoNodes(t, NewConfigObjectRepo(pool))
 
 	// Domain validation rejects before the DB is touched.
@@ -128,7 +127,7 @@ func TestGraphInvalidKindRejected(t *testing.T) {
 func TestGraphForeignKeyEnforced(t *testing.T) {
 	pool := testPool(t)
 	g := NewGraphRepo(pool)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	from, _ := twoNodes(t, NewConfigObjectRepo(pool))
 
 	// to_cfg does not exist -> FK violation -> ErrNotFound.
@@ -145,7 +144,7 @@ func TestGraphCascadeOnConfigDelete(t *testing.T) {
 	pool := testPool(t)
 	co := NewConfigObjectRepo(pool)
 	g := NewGraphRepo(pool)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	// sample() defaults to a governance role, which §8 never permits to be
 	// deleted. This test needs a deletable endpoint to exercise the FK cascade.
@@ -184,7 +183,7 @@ func TestGraphCascadeOnConfigDelete(t *testing.T) {
 
 func TestGraphMigrationSchema(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	// The forward migration created the table.
 	var reg *string
@@ -221,7 +220,7 @@ func TestGraphMigrationSchema(t *testing.T) {
 
 func TestGraphRollback(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	down, err := os.ReadFile("../migrate/rollback/20260722000002_graph.down.sql")
 	if err != nil {
@@ -263,7 +262,7 @@ func TestGraphFixtureEdges(t *testing.T) {
 	pool := testPool(t)
 	co := NewConfigObjectRepo(pool)
 	g := NewGraphRepo(pool)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	fx := seedGraphFixture(t, co, g)
 
 	// Single-hop lookup on the realistic fixture (no traversal).

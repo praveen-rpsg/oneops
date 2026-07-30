@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -16,7 +15,7 @@ import (
 // PostgreSQL: text[] arrays, batch inserts, ANY() filters, and status transitions.
 func TestWebhookStore_Integration(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	if _, err := pool.Exec(ctx, `TRUNCATE webhook, webhook_delivery, webhook_cursor, webhook_replay_job CASCADE`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
@@ -151,7 +150,7 @@ func TestWebhookStore_Integration(t *testing.T) {
 // Every prior test supplied populated slices, so none of them caught it.
 func TestWebhookStore_NilSlicesPersist(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	if _, err := pool.Exec(ctx, `TRUNCATE webhook, webhook_delivery, webhook_cursor, webhook_replay_job CASCADE`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}

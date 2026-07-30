@@ -26,7 +26,7 @@ import (
 // between is never read.
 func TestCursorValidator_DetectsACursorAheadOfItsLog(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	v := NewCursorValidator(pool)
 
 	// Control: a consistent database reports nothing.

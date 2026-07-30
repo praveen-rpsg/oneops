@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -16,7 +15,7 @@ import (
 // due-claim ordering, and status transitions.
 func TestPolicyStore_Integration(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	if _, err := pool.Exec(ctx, `TRUNCATE policy, policy_execution, policy_cursor CASCADE`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}

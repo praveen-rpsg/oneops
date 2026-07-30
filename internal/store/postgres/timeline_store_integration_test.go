@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -20,7 +19,7 @@ import (
 // read-only timeline queries return them from PostgreSQL (SELECT-only; ANY() filters).
 func TestTimelineStore_Integration(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	// audit_event is append-only (a TRUNCATE trigger blocks it), so we isolate via
 	// a unique chain id and truncate only the non-audit tables.
 	if _, err := pool.Exec(ctx, `TRUNCATE webhook_delivery, policy_execution, webhook_replay_job CASCADE`); err != nil {

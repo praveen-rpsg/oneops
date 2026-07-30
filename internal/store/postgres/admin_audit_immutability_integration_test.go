@@ -39,7 +39,7 @@ func seedAdminAuditRow(ctx context.Context, t *testing.T, pool *pgxpool.Pool, ch
 // database itself, not by an application check a future caller could forget.
 func TestAdminAudit_IsAppendOnly(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	seedAdminAuditRow(ctx, t, pool, "admin-append-only-check")
 
 	if _, err := pool.Exec(ctx, `TRUNCATE admin_audit_event`); err == nil {
@@ -73,7 +73,7 @@ func TestAdminAudit_IsAppendOnly(t *testing.T) {
 // thing standing between that decision and a silent regression to the default.
 func TestAdminAudit_GuardsSurviveReplicationRoleBypass(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	seedAdminAuditRow(ctx, t, pool, "admin-replica-bypass-check")
 
 	// One connection, so the SET and the UPDATE share a session.
@@ -107,7 +107,7 @@ func TestAdminAudit_GuardsSurviveReplicationRoleBypass(t *testing.T) {
 func TestAdminAudit_RequestPathRoleHoldsOnlyWhatTheAppenderNeeds(t *testing.T) {
 	pool := testPool(t)
 	scoped := tenantScopedPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	// OPS-S035 grants the appender exactly what the append flow requires and
 	// nothing else. These four must still be refused: append-only is enforced by
@@ -157,7 +157,7 @@ func TestAdminAudit_RequestPathRoleHoldsOnlyWhatTheAppenderNeeds(t *testing.T) {
 // covers the predicate that closes it.
 func TestAdminAudit_DisabledGuardIsDetected(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	v := NewSchemaValidator(priv)
 
 	if problems, err := v.Validate(ctx); err != nil {
@@ -210,7 +210,7 @@ func TestAdminAudit_DisabledGuardIsDetected(t *testing.T) {
 // Each mode gets its own case here because each is a different repair.
 func TestAdminAudit_DowngradedGuardModesAreDetected(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	v := NewSchemaValidator(priv)
 
 	if problems, err := v.Validate(ctx); err != nil {
@@ -291,7 +291,7 @@ func TestAdminAudit_DowngradedGuardModesAreDetected(t *testing.T) {
 // rather than writing a second one is what makes this a two-line change.
 func TestAdminAudit_DroppedGuardIsDetected(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	v := NewSchemaValidator(priv)
 
 	// Both guards are covered. Dropping only one leaves the other's
@@ -355,7 +355,7 @@ func TestAdminAudit_DroppedGuardIsDetected(t *testing.T) {
 // cannot masquerade as sealed history. Each case below is a distinct forgery.
 func TestAdminAudit_SchemaRefusesUnsealedRows(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	insert := func(t *testing.T, seq int, operation, actor string, payload []byte, prev, this []byte) error {
 		t.Helper()
@@ -420,7 +420,7 @@ func TestAdminAudit_SchemaRefusesUnsealedRows(t *testing.T) {
 // tenant-owned table and inherit delivery and read paths with it.
 func TestAdminAudit_IsGlobalAndPlatformOwned(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	for _, table := range []string{"admin_audit_event", "admin_audit_chain_head"} {
 		var hasTenantID bool
@@ -482,7 +482,7 @@ func TestAdminAudit_IsGlobalAndPlatformOwned(t *testing.T) {
 // discovered in a subscriber's inbox.
 func TestAdminAudit_IsNotAnEventSource(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO admin_audit_chain_head (chain_id, last_seq, last_hash)

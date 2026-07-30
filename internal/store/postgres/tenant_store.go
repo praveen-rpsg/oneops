@@ -43,18 +43,34 @@ func scanTenant(s scanner) (*domain.Tenant, error) {
 // Create inserts a tenant. A duplicate slug or external id is a conflict, not a
 // server error: both are unique by index and both are caller-supplied.
 func (s *TenantStore) Create(ctx context.Context, t *domain.Tenant) (*domain.Tenant, error) {
-	row := s.pool.QueryRow(ctx, `
-		INSERT INTO tenant (tenant_id, slug, name, external_id, status)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING `+tenantColumns,
-		t.TenantID, t.Slug, t.Name, t.ExternalID, string(t.Status))
+	var created *domain.Tenant
+	err := withAdminAudit(ctx, s.pool,
+		func() []domain.AdminAct {
+			return []domain.AdminAct{{
+				Operation: domain.AdminTenantCreated,
+				Subject:   domain.AdminSubject{TenantID: t.TenantID},
+				Detail:    map[string]any{"slug": t.Slug, "external_id": t.ExternalID},
+			}}
+		},
+		func(tx pgx.Tx) error {
+			row := tx.QueryRow(ctx, `
+				INSERT INTO tenant (tenant_id, slug, name, external_id, status)
+				VALUES ($1, $2, $3, $4, $5)
+				RETURNING `+tenantColumns,
+				t.TenantID, t.Slug, t.Name, t.ExternalID, string(t.Status))
 
-	created, err := scanTenant(row)
+			var scanErr error
+			created, scanErr = scanTenant(row)
+			if scanErr != nil {
+				if isUniqueViolation(scanErr) {
+					return domain.ErrConflict
+				}
+				return fmt.Errorf("insert tenant: %w", scanErr)
+			}
+			return nil
+		})
 	if err != nil {
-		if isUniqueViolation(err) {
-			return nil, domain.ErrConflict
-		}
-		return nil, fmt.Errorf("insert tenant: %w", err)
+		return nil, err
 	}
 	return created, nil
 }
@@ -122,25 +138,41 @@ func (s *TenantStore) List(ctx context.Context) ([]*domain.Tenant, error) {
 func (s *TenantStore) SetStatus(
 	ctx context.Context, tenantID string, rowVersion int64, status domain.TenantStatus,
 ) (*domain.Tenant, error) {
-	row := s.pool.QueryRow(ctx, `
-		UPDATE tenant
-		   SET status = $3, row_version = row_version + 1, updated_at = now()
-		 WHERE tenant_id = $1 AND row_version = $2
-		RETURNING `+tenantColumns,
-		tenantID, rowVersion, string(status))
+	var t *domain.Tenant
+	err := withAdminAudit(ctx, s.pool,
+		func() []domain.AdminAct {
+			return []domain.AdminAct{{
+				Operation: domain.AdminTenantStatusChanged,
+				Subject:   domain.AdminSubject{TenantID: tenantID},
+				Detail:    map[string]any{"to": string(status)},
+			}}
+		},
+		func(tx pgx.Tx) error {
+			row := tx.QueryRow(ctx, `
+				UPDATE tenant
+				   SET status = $3, row_version = row_version + 1, updated_at = now()
+				 WHERE tenant_id = $1 AND row_version = $2
+				RETURNING `+tenantColumns,
+				tenantID, rowVersion, string(status))
 
-	t, err := scanTenant(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Either the tenant is gone or the caller held a stale version. Probing
-		// distinguishes them so the caller gets 404 or 409 rather than one
-		// ambiguous failure.
-		if _, getErr := s.Get(ctx, tenantID); getErr != nil {
-			return nil, getErr
-		}
-		return nil, domain.ErrVersionMismatch
-	}
+			var scanErr error
+			t, scanErr = scanTenant(row)
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				// Either the tenant is gone or the caller held a stale version.
+				// Probing distinguishes them so the caller gets 404 or 409
+				// rather than one ambiguous failure.
+				if _, getErr := s.Get(ctx, tenantID); getErr != nil {
+					return getErr
+				}
+				return domain.ErrVersionMismatch
+			}
+			if scanErr != nil {
+				return fmt.Errorf("set tenant status: %w", scanErr)
+			}
+			return nil
+		})
 	if err != nil {
-		return nil, fmt.Errorf("set tenant status: %w", err)
+		return nil, err
 	}
 	return t, nil
 }

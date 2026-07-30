@@ -39,7 +39,7 @@ func TestMigrationRace_ConcurrentBootsSerialise(t *testing.T) {
 	}
 	dsn := base + sep + "options=-c%20search_path%3D" + schema
 
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	admin, err := NewPool(ctx, base, 2)
 	if err != nil {
 		t.Fatalf("admin pool: %v", err)

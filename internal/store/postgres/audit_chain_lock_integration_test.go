@@ -32,7 +32,7 @@ import (
 // load-bearing by running the same concurrency with the lock omitted.
 func TestAuditChainLock_IsLoadBearing(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	store := NewAuditStore(pool)
 	appender := NewAuditAppender(pool, store)
 

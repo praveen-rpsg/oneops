@@ -136,3 +136,13 @@ func AdminChainIDs(acts []AdminAct) []string {
 	sort.Strings(ids)
 	return ids
 }
+
+// InvitationBearerActor is the principal recorded for acts authorised by
+// possession of an invitation token rather than by a session.
+//
+// Invitation redemption has no claims: the invitee holds no membership, so
+// there is no tenant to bind and no subject to read. The act is still
+// administrative and still creates users and memberships, so it must be
+// audited. Naming the bearer explicitly is the honest option — attributing the
+// redemption to a human would say someone performed an act they did not.
+const InvitationBearerActor = "invitation-bearer"

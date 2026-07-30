@@ -20,7 +20,7 @@ import (
 // benchmarks (testing.TB). TRUNCATE ... CASCADE also clears dependency_edge.
 func graphPool(tb testing.TB) *pgxpool.Pool {
 	tb.Helper()
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	pool, err := NewPool(ctx, itestDSN(tb), 8)
 	if err != nil {
 		tb.Fatalf("pool: %v", err)
@@ -49,7 +49,7 @@ func graphPool(tb testing.TB) *pgxpool.Pool {
 // and the reverse cfg_id->name (creation order makes cfg_ids sort by name).
 func nodes(tb testing.TB, co *ConfigObjectRepo, names ...string) (map[string]string, map[string]string) {
 	tb.Helper()
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	id := map[string]string{}
 	name := map[string]string{}
 	for _, n := range names {
@@ -333,7 +333,7 @@ func cycleNames(name map[string]string, c domain.Cycle) string {
 // 10-node DAG blocks, so any traversal reaches a bounded subgraph.
 func seedBigGraph(tb testing.TB, pool *pgxpool.Pool) (nodeCount, edgeCount int) {
 	tb.Helper()
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO configuration_object
 			(cfg_id, artifact, version, role, lifecycle, retention_class, authority, retention_policy)
@@ -363,7 +363,7 @@ func TestTraversalPerfP95(t *testing.T) {
 	nc, ec := seedBigGraph(t, pool)
 	t.Logf("dataset: %d nodes, %d edges", nc, ec)
 	g := NewGraphRepo(pool)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	var durs []time.Duration
 	for i := 1; i <= 10000; i += 10 { // 1000 block-start roots
@@ -387,7 +387,7 @@ func BenchmarkRecursiveDependencies(b *testing.B) {
 	pool := graphPool(b)
 	seedBigGraph(b, pool)
 	g := NewGraphRepo(pool)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

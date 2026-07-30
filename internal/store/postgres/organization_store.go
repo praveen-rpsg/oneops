@@ -65,40 +65,57 @@ func scanOrganization(s scanner) (*domain.Organization, error) {
 // A duplicate slug is a conflict, not a server error: it is caller-supplied and
 // unique by constraint on both tables.
 func (s *OrganizationStore) Create(ctx context.Context, o *domain.Organization) (*domain.Organization, error) {
-	tx, err := s.pool.Begin(ctx)
+	// Two in-scope tables in one act, so two audit records — and they land on
+	// two different chains: the tenant on the platform chain, the organisation
+	// on its own (§6.8). This is the multi-chain case the chokepoint's ascending
+	// chain-id lock ordering exists for.
+	var created *domain.Organization
+	err := withAdminAudit(ctx, s.pool,
+		func() []domain.AdminAct {
+			return []domain.AdminAct{
+				{
+					Operation: domain.AdminTenantCreated,
+					Subject:   domain.AdminSubject{TenantID: o.TenantID},
+					Detail:    map[string]any{"slug": o.Slug, "created_for_org": o.OrgID},
+				},
+				{
+					Operation: domain.AdminOrgCreated,
+					Subject:   domain.AdminSubject{OrgID: o.OrgID, TenantID: o.TenantID},
+					Detail:    map[string]any{"slug": o.Slug},
+				},
+			}
+		},
+		func(tx pgx.Tx) error {
+			// The tenant is created first: organization.tenant_id references it,
+			// so the other order fails on the foreign key.
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO tenant (tenant_id, slug, name, status)
+				VALUES ($1, $2, $3, 'active')`,
+				o.TenantID, o.Slug, o.Name); err != nil {
+				if isUniqueViolation(err) {
+					return domain.ErrConflict
+				}
+				return fmt.Errorf("insert tenant for organization: %w", err)
+			}
+
+			row := tx.QueryRow(ctx, `
+				INSERT INTO organization (org_id, tenant_id, slug, name, status)
+				VALUES ($1, $2, $3, $4, $5)
+				RETURNING `+organizationColumns,
+				o.OrgID, o.TenantID, o.Slug, o.Name, string(o.Status))
+
+			var scanErr error
+			created, scanErr = scanOrganization(row)
+			if scanErr != nil {
+				if isUniqueViolation(scanErr) {
+					return domain.ErrConflict
+				}
+				return fmt.Errorf("insert organization: %w", scanErr)
+			}
+			return nil
+		})
 	if err != nil {
-		return nil, fmt.Errorf("begin organization create: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	// The tenant is created first: organization.tenant_id references it, so the
-	// other order fails on the foreign key.
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO tenant (tenant_id, slug, name, status)
-		VALUES ($1, $2, $3, 'active')`,
-		o.TenantID, o.Slug, o.Name); err != nil {
-		if isUniqueViolation(err) {
-			return nil, domain.ErrConflict
-		}
-		return nil, fmt.Errorf("insert tenant for organization: %w", err)
-	}
-
-	row := tx.QueryRow(ctx, `
-		INSERT INTO organization (org_id, tenant_id, slug, name, status)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING `+organizationColumns,
-		o.OrgID, o.TenantID, o.Slug, o.Name, string(o.Status))
-
-	created, err := scanOrganization(row)
-	if err != nil {
-		if isUniqueViolation(err) {
-			return nil, domain.ErrConflict
-		}
-		return nil, fmt.Errorf("insert organization: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit organization create: %w", err)
+		return nil, err
 	}
 	return created, nil
 }
@@ -188,47 +205,68 @@ func (s *OrganizationStore) SetStatus(
 		return nil, domain.NewValidationError("status", "must be one of: active, suspended")
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin organization status change: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	row := tx.QueryRow(ctx, `
-		UPDATE organization
-		   SET status = $3, row_version = row_version + 1, updated_at = now()
-		 WHERE org_id = $1 AND row_version = $2
-		RETURNING `+organizationColumns,
-		orgID, rowVersion, string(status))
-
-	updated, err := scanOrganization(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Either it is gone or the caller held a stale version. Probing
-		// distinguishes them so the caller gets 404 or 409, not one ambiguous
-		// failure — the same shape TenantStore.SetStatus uses.
-		if _, getErr := s.Get(ctx, orgID); getErr != nil {
-			return nil, getErr
-		}
-		return nil, domain.ErrVersionMismatch
-	}
-	if err != nil {
-		return nil, fmt.Errorf("set organization status: %w", err)
-	}
-
+	// Suspending an organisation cascades to its tenant, so this is two facts
+	// on two chains, exactly as Create is.
+	var updated *domain.Organization
 	tenantStatus := domain.TenantActive
 	if status == domain.OrganizationSuspended {
 		tenantStatus = domain.TenantSuspended
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE tenant
-		   SET status = $2, row_version = row_version + 1, updated_at = now()
-		 WHERE tenant_id = $1`,
-		updated.TenantID, string(tenantStatus)); err != nil {
-		return nil, fmt.Errorf("cascade status to tenant: %w", err)
+
+	current, err := s.Get(ctx, orgID)
+	if err != nil {
+		return nil, err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit organization status change: %w", err)
+	err = withAdminAudit(ctx, s.pool,
+		func() []domain.AdminAct {
+			return []domain.AdminAct{
+				{
+					Operation: domain.AdminOrgStatusChanged,
+					Subject:   domain.AdminSubject{OrgID: orgID, TenantID: current.TenantID},
+					Detail:    map[string]any{"to": string(status)},
+				},
+				{
+					Operation: domain.AdminTenantStatusChanged,
+					Subject:   domain.AdminSubject{TenantID: current.TenantID},
+					Detail:    map[string]any{"to": string(tenantStatus), "cascaded_from_org": orgID},
+				},
+			}
+		},
+		func(tx pgx.Tx) error {
+			row := tx.QueryRow(ctx, `
+				UPDATE organization
+				   SET status = $3, row_version = row_version + 1, updated_at = now()
+				 WHERE org_id = $1 AND row_version = $2
+				RETURNING `+organizationColumns,
+				orgID, rowVersion, string(status))
+
+			var scanErr error
+			updated, scanErr = scanOrganization(row)
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				// Either it is gone or the caller held a stale version. Probing
+				// distinguishes them so the caller gets 404 or 409, not one
+				// ambiguous failure — the same shape TenantStore.SetStatus uses.
+				if _, getErr := s.Get(ctx, orgID); getErr != nil {
+					return getErr
+				}
+				return domain.ErrVersionMismatch
+			}
+			if scanErr != nil {
+				return fmt.Errorf("set organization status: %w", scanErr)
+			}
+
+			if _, err := tx.Exec(ctx, `
+				UPDATE tenant
+				   SET status = $2, row_version = row_version + 1, updated_at = now()
+				 WHERE tenant_id = $1`,
+				updated.TenantID, string(tenantStatus)); err != nil {
+				return fmt.Errorf("cascade status to tenant: %w", err)
+			}
+			return nil
+		})
+	if err != nil {
+		return nil, err
 	}
 	return updated, nil
 }

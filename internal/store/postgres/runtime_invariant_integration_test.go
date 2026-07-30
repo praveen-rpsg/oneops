@@ -31,7 +31,7 @@ import (
 // schema (the test database hosts several).
 func TestRuntimeInvariant_RLSDisabledAfterStartupIsDetectedContinuously(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tenants := NewTenantStore(priv)
 	a, err := tenants.Create(ctx, newTenant("rt-alpha", "ext-rt-alpha"))
@@ -155,7 +155,7 @@ func waitUntil(limit time.Duration, cond func() bool) bool {
 // once, at startup" the whole of the defect.
 func TestRuntimeInvariant_AuditImmutabilityDropIsDetectableButUnwatched(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	problems, err := NewSchemaValidator(priv).Validate(ctx)
 	if err != nil {

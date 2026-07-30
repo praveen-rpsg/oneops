@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -35,7 +34,7 @@ func TestGraphConcurrentReaders(t *testing.T) {
 	// Establish the expected (deterministic) result for each block root.
 	roots := make([]string, 0, n/10)
 	want := map[string]string{}
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	for i := 1; i <= n; i += 10 {
 		root := "n" + itoa(i)
 		roots = append(roots, root)

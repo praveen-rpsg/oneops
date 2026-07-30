@@ -3,7 +3,6 @@
 package postgres
 
 import (
-	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -76,7 +75,7 @@ var keyScopeJustifications = map[string]string{
 
 func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 
 	tables := make([]string, len(TenantOwnedTables))
 	copy(tables, TenantOwnedTables)
@@ -159,7 +158,7 @@ func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {
 // shared across tenants — exactly `idempotency_key` before it was fixed.
 func TestClientCannotSupplyEntityIdentity(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	repo := NewConfigObjectRepo(pool)
 
 	chosen := fmt.Sprintf("CLIENT-CHOSEN-%d", 12345)

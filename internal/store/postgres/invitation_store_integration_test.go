@@ -66,7 +66,7 @@ func issue(t *testing.T, ctx context.Context, store *InvitationStore, orgID, ten
 // some field other than token_hash — a name, a note added later — is caught too.
 func TestInvitationStore_TokenIsUnrecoverableFromTheTable(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tenantID, orgID := seedOrgForInvitations(ctx, t, priv, "unrecoverable")
 	store := NewInvitationStore(priv)
 
@@ -97,7 +97,7 @@ func TestInvitationStore_TokenIsUnrecoverableFromTheTable(t *testing.T) {
 // fail, and must fail the same way an unknown token does.
 func TestInvitationStore_ConsumeIsSingleUse(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tenantID, orgID := seedOrgForInvitations(ctx, t, priv, "single-use")
 	store := NewInvitationStore(priv)
 
@@ -138,7 +138,7 @@ func TestInvitationStore_ConsumeIsSingleUse(t *testing.T) {
 // observe `pending` before either writes.
 func TestInvitationStore_ConcurrentConsumeHasExactlyOneWinner(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tenantID, orgID := seedOrgForInvitations(ctx, t, priv, "race")
 	store := NewInvitationStore(priv)
 
@@ -185,7 +185,7 @@ func TestInvitationStore_ConcurrentConsumeHasExactlyOneWinner(t *testing.T) {
 // comparison rather than a Go-side check that could be skipped.
 func TestInvitationStore_ConsumeRefusesExpired(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tenantID, orgID := seedOrgForInvitations(ctx, t, priv, "expired")
 	store := NewInvitationStore(priv)
 
@@ -218,7 +218,7 @@ func TestInvitationStore_ConsumeRefusesExpired(t *testing.T) {
 
 func TestInvitationStore_ConsumeRefusesRevoked(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tenantID, orgID := seedOrgForInvitations(ctx, t, priv, "revoked")
 	store := NewInvitationStore(priv)
 
@@ -240,7 +240,7 @@ func TestInvitationStore_ConsumeRefusesRevoked(t *testing.T) {
 // rewrite history.
 func TestInvitationStore_RevokeIsConditionalOnPending(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tenantID, orgID := seedOrgForInvitations(ctx, t, priv, "revoke-twice")
 	store := NewInvitationStore(priv)
 
@@ -272,7 +272,7 @@ func TestInvitationStore_RevokeIsConditionalOnPending(t *testing.T) {
 
 func TestInvitationStore_RevokeUnknownIsNotFound(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	store := NewInvitationStore(priv)
 
 	if _, err := store.Revoke(ctx, domain.NewID()); !errors.Is(err, domain.ErrNotFound) {
@@ -285,7 +285,7 @@ func TestInvitationStore_RevokeUnknownIsNotFound(t *testing.T) {
 
 func TestInvitationStore_ListByOrgPagesAndScopes(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tenantA, orgA := seedOrgForInvitations(ctx, t, priv, "list-a")
 	tenantB, orgB := seedOrgForInvitations(ctx, t, priv, "list-b")
 	store := NewInvitationStore(priv)
@@ -334,7 +334,7 @@ func TestInvitationStore_ListByOrgPagesAndScopes(t *testing.T) {
 // outnumber the cap before the clamp is observable at all.
 func TestInvitationStore_ListByOrgCapsAnUnboundedRequest(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tenantID, orgID := seedOrgForInvitations(ctx, t, priv, "cap")
 
 	// Inserted directly and in one statement: this exercises the read cap, and
@@ -376,7 +376,7 @@ func TestInvitationStore_ListByOrgCapsAnUnboundedRequest(t *testing.T) {
 // had exercised that policy. Administrative reads must see one boundary only.
 func TestInvitationStore_AdministrativeReadsAreTenantScoped(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tenantA, orgA := seedOrgForInvitations(ctx, t, priv, "rls-a")
 	tenantB, orgB := seedOrgForInvitations(ctx, t, priv, "rls-b")
 
@@ -411,7 +411,7 @@ func TestInvitationStore_AdministrativeReadsAreTenantScoped(t *testing.T) {
 // as "every redemption is refused".
 func TestInvitationStore_ConsumeCannotRunOnTheScopedPool(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tenantID, orgID := seedOrgForInvitations(ctx, t, priv, "consume-scope")
 
 	privStore := NewInvitationStore(priv)
@@ -434,7 +434,7 @@ func TestInvitationStore_ConsumeCannotRunOnTheScopedPool(t *testing.T) {
 
 func TestInvitationStore_CreateRejectsInvalidAggregate(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tenantID, orgID := seedOrgForInvitations(ctx, t, priv, "invalid")
 	store := NewInvitationStore(priv)
 
@@ -461,7 +461,7 @@ func TestInvitationStore_CreateRejectsInvalidAggregate(t *testing.T) {
 // which is where the user registry's case-folding defect actually lived.
 func TestInvitationStore_EmailRoundTripsNormalised(t *testing.T) {
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tenantID, orgID := seedOrgForInvitations(ctx, t, priv, "email")
 	store := NewInvitationStore(priv)
 

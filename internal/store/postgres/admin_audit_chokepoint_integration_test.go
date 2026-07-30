@@ -5,9 +5,12 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
 
 	"github.com/rpsg/oneops/internal/audit"
@@ -230,5 +233,179 @@ func TestChokepoint_AppendsAsTheRequestPathRole(t *testing.T) {
 	}
 	if actor != "test-platform-admin" {
 		t.Errorf("actor = %q", actor)
+	}
+}
+
+// opsFor returns the administrative operations recorded against a subject.
+func opsFor(t *testing.T, pool *pgxpool.Pool, column, id string) []string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(),
+		`SELECT operation FROM admin_audit_event WHERE `+column+` = $1 ORDER BY seq`, id)
+	if err != nil {
+		t.Fatalf("read operations: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var op string
+		if err := rows.Scan(&op); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		out = append(out, op)
+	}
+	return out
+}
+
+func contains(hay []string, needle string) bool {
+	for _, h := range hay {
+		if h == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// Every administrative mutation routed through the chokepoint must record the
+// operation that actually happened. Without these assertions the routing is
+// only proven to write *something*: mislabelling a revocation as a creation, or
+// dropping one act of a two-act mutation, would pass every other test in the
+// package.
+func TestChokepoint_EveryRoutedMutationRecordsItsOperation(t *testing.T) {
+	pool := testPool(t)
+	ctx := adminTestCtx()
+
+	t.Run("user lifecycle", func(t *testing.T) {
+		users := NewUserStore(pool)
+		u, err := users.Create(ctx, newTestUser(t))
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if _, err := users.UpdateProfile(ctx, u.UserID, u.RowVersion, "Renamed"); err != nil {
+			t.Fatalf("update profile: %v", err)
+		}
+		reread, err := users.Get(ctx, u.UserID)
+		if err != nil {
+			t.Fatalf("reread: %v", err)
+		}
+		if _, err := users.SetStatus(ctx, u.UserID, reread.RowVersion, domain.UserActive); err != nil {
+			t.Fatalf("set status: %v", err)
+		}
+		got := opsFor(t, pool, "subject_user_id", u.UserID)
+		for _, want := range []string{"user.created", "user.profile_updated", "user.status_changed"} {
+			if !contains(got, want) {
+				t.Errorf("missing %q; recorded %v", want, got)
+			}
+		}
+	})
+
+	t.Run("organisation create writes both chains", func(t *testing.T) {
+		orgs := NewOrganizationStore(pool)
+		o, err := domain.NewOrganization("Chokepoint Org", strings.ToLower("cp-"+ulid.Make().String()[:12]))
+		if err != nil {
+			t.Fatalf("new org: %v", err)
+		}
+		created, err := orgs.Create(ctx, o)
+		if err != nil {
+			t.Fatalf("create org: %v", err)
+		}
+
+		// The organisation's own chain carries organization.created...
+		if got := opsFor(t, pool, "subject_org_id", created.OrgID); !contains(got, "organization.created") {
+			t.Errorf("org chain missing organization.created; recorded %v", got)
+		}
+		// ...and the tenant it created is a separate fact on the platform chain.
+		if got := opsFor(t, pool, "subject_tenant_id", created.TenantID); !contains(got, "tenant.created") {
+			t.Errorf("tenant.created not recorded for the tenant this act created; recorded %v", got)
+		}
+
+		// Suspension cascades, so it is two facts as well.
+		suspended, err := orgs.SetStatus(ctx, created.OrgID, created.RowVersion, domain.OrganizationSuspended)
+		if err != nil {
+			t.Fatalf("suspend: %v", err)
+		}
+		if got := opsFor(t, pool, "subject_org_id", suspended.OrgID); !contains(got, "organization.status_changed") {
+			t.Errorf("missing organization.status_changed; recorded %v", got)
+		}
+		if got := opsFor(t, pool, "subject_tenant_id", suspended.TenantID); !contains(got, "tenant.status_changed") {
+			t.Errorf("cascade to the tenant was not recorded; recorded %v", got)
+		}
+	})
+
+	t.Run("tenant registry", func(t *testing.T) {
+		tenants := NewTenantStore(pool)
+		id := ulid.Make().String()
+		created, err := tenants.Create(ctx, &domain.Tenant{
+			TenantID: id, Slug: strings.ToLower("cp-" + id[:12]), Name: "CP", Status: domain.TenantActive,
+		})
+		if err != nil {
+			t.Fatalf("create tenant: %v", err)
+		}
+		if _, err := tenants.SetStatus(ctx, created.TenantID, created.RowVersion, domain.TenantSuspended); err != nil {
+			t.Fatalf("suspend tenant: %v", err)
+		}
+		got := opsFor(t, pool, "subject_tenant_id", created.TenantID)
+		for _, want := range []string{"tenant.created", "tenant.status_changed"} {
+			if !contains(got, want) {
+				t.Errorf("missing %q; recorded %v", want, got)
+			}
+		}
+	})
+}
+
+// Invitation revocation and invitation-driven redemption are administrative
+// acts performed without a session, so they are the paths most likely to be
+// routed and then forgotten. These assert the operations they record.
+func TestChokepoint_InvitationAndRedemptionRecordTheirOperations(t *testing.T) {
+	priv, invitations, redemptions, tenantID, orgID := redemptionFixture(t, "cprec")
+	ctx := adminTestCtx()
+
+	// Revocation.
+	revokeMe, _, err := domain.NewInvitation(orgID, tenantID,
+		"revoke-"+ulid.Make().String()+"@example.com", time.Hour, time.Now())
+	if err != nil {
+		t.Fatalf("new invitation: %v", err)
+	}
+	if _, err := invitations.Create(ctx, revokeMe); err != nil {
+		t.Fatalf("create invitation: %v", err)
+	}
+	if _, err := invitations.Revoke(ctx, revokeMe.InvitationID); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	// Redemption: consumes the invitation, creates the user, grants membership.
+	inv, token, err := domain.NewInvitation(orgID, tenantID,
+		"redeem-"+ulid.Make().String()+"@example.com", time.Hour, time.Now())
+	if err != nil {
+		t.Fatalf("new invitation: %v", err)
+	}
+	if _, err := invitations.Create(ctx, inv); err != nil {
+		t.Fatalf("create invitation: %v", err)
+	}
+	red, err := redemptions.Redeem(ctx, token, "Redeemed User")
+	if err != nil {
+		t.Fatalf("redeem: %v", err)
+	}
+
+	got := opsFor(t, priv, "subject_org_id", orgID)
+	for _, want := range []string{
+		"invitation.created", "invitation.revoked", "invitation.redeemed", "membership.granted",
+	} {
+		if !contains(got, want) {
+			t.Errorf("missing %q on the organisation chain; recorded %v", want, got)
+		}
+	}
+	if ops := opsFor(t, priv, "subject_user_id", red.User.UserID); !contains(ops, "user.created") {
+		t.Errorf("redemption did not record user.created; recorded %v", ops)
+	}
+
+	// The bearer is named honestly: redemption has no session.
+	var actor string
+	if err := priv.QueryRow(context.Background(),
+		`SELECT actor FROM admin_audit_event WHERE operation = 'membership.granted' AND subject_org_id = $1`,
+		orgID).Scan(&actor); err != nil {
+		t.Fatalf("read actor: %v", err)
+	}
+	if actor != domain.InvitationBearerActor {
+		t.Errorf("membership.granted actor = %q, want %q", actor, domain.InvitationBearerActor)
 	}
 }
