@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
+
+	"github.com/rpsg/oneops/internal/domain"
 )
 
 // seedAdminAuditRow writes one sealed-looking administrative record using the
@@ -102,55 +104,47 @@ func TestAdminAudit_GuardsSurviveReplicationRoleBypass(t *testing.T) {
 // story's migration, the request path would arrive holding write access to the
 // administrative audit trail. Privilege is the second layer that audit_event's
 // header promises and does not have.
-func TestAdminAudit_RequestPathRoleHoldsNoAccess(t *testing.T) {
-	pool := testPool(t) // creates the schema and applies migrations
+func TestAdminAudit_RequestPathRoleHoldsOnlyWhatTheAppenderNeeds(t *testing.T) {
+	pool := testPool(t)
 	scoped := tenantScopedPool(t)
 	ctx := context.Background()
 
-	if _, err := scoped.Exec(ctx, `
-		INSERT INTO admin_audit_event
-			(chain_id, seq, event_id, operation_id, operation, actor,
-			 payload_canonical, payload, prev_hash, this_hash)
-		VALUES ('forged', 1, 'e', 'o', 'user.created', 'attacker',
-			'{}', '{}'::jsonb, $1, $2)`,
-		make([]byte, 32), append([]byte{0x02}, make([]byte, 31)...)); err == nil {
-		t.Error("the request-path role could INSERT into admin_audit_event; OPS-S034 ships no writer, so nothing should hold INSERT")
-	}
+	// OPS-S035 grants the appender exactly what the append flow requires and
+	// nothing else. These four must still be refused: append-only is enforced by
+	// privilege as well as by the ENABLE ALWAYS triggers, and reading the
+	// administrative trail is OPS-S038's, behind requirePlatformAdmin (§6.5).
 	if _, err := scoped.Exec(ctx, `UPDATE admin_audit_event SET actor = 'x'`); err == nil {
 		t.Error("the request-path role could UPDATE admin_audit_event")
 	}
 	if _, err := scoped.Exec(ctx, `DELETE FROM admin_audit_event`); err == nil {
 		t.Error("the request-path role could DELETE from admin_audit_event")
 	}
-	// §6.5 confines visibility to platform administrators. The tenant-scoped
-	// role is not one, and there is no RLS policy to fall back on.
 	if _, err := scoped.Exec(ctx, `SELECT 1 FROM admin_audit_event`); err == nil {
 		t.Error("the request-path role could SELECT from admin_audit_event; §6.5 confines it to platform administrators")
 	}
-	// The chain head is not mere bookkeeping. chain_id identifies the
-	// organisation, last_seq counts the administrative acts committed against
-	// it, and updated_at times the most recent one. Readable on a table with no
-	// row-level security, that is an enumeration oracle over every customer's
-	// administrative activity.
-	if _, err := scoped.Exec(ctx, `SELECT 1 FROM admin_audit_chain_head`); err == nil {
-		t.Error("the request-path role could SELECT from admin_audit_chain_head — " +
-			"organisation activity, act counts and timing are enumerable without row-level security")
+	if _, err := scoped.Exec(ctx, `TRUNCATE admin_audit_event`); err == nil {
+		t.Error("the request-path role could TRUNCATE admin_audit_event")
 	}
 
-	// Belt and braces: assert the privilege state directly, so a future
-	// ALTER DEFAULT PRIVILEGES or a restore that reinstates grants is caught
-	// even if no query happens to exercise it.
-	for _, table := range []string{"admin_audit_event", "admin_audit_chain_head"} {
-		for _, priv := range []string{"SELECT", "INSERT", "UPDATE", "DELETE"} {
+	// The exact grant set, asserted directly so a widening is caught even when
+	// no query happens to exercise it. INSERT on the events table and
+	// SELECT+INSERT+UPDATE on the chain head are what the appender needs:
+	// PostgreSQL requires UPDATE privilege to take the FOR UPDATE lock that
+	// ADR-AUDIT-006 serialises appends on.
+	want := map[string]map[string]bool{
+		"admin_audit_event":      {"SELECT": false, "INSERT": true, "UPDATE": false, "DELETE": false},
+		"admin_audit_chain_head": {"SELECT": true, "INSERT": true, "UPDATE": true, "DELETE": false},
+	}
+	for table, privs := range want {
+		for priv, expected := range privs {
 			var held bool
 			if err := pool.QueryRow(ctx,
 				`SELECT has_table_privilege('oneops_app', current_schema() || '.' || $1, $2)`,
 				table, priv).Scan(&held); err != nil {
 				t.Fatalf("check %s on %s: %v", priv, table, err)
 			}
-			if held {
-				t.Errorf("oneops_app holds %s on %s; OPS-S034 ships no writer and no reader, "+
-					"so the request-path role must hold nothing", priv, table)
+			if held != expected {
+				t.Errorf("oneops_app %s on %s = %v, want %v", priv, table, held, expected)
 			}
 		}
 	}
@@ -517,4 +511,15 @@ func anyContains(problems []string, substr string) bool {
 		}
 	}
 	return false
+}
+
+// adminTestCtx returns a context carrying an authenticated actor.
+//
+// Administrative mutations run through withAdminAudit, which refuses an act it
+// cannot attribute (ADR-AUDIT-007 §6.9). Production sets the actor at the
+// transport edge from the token subject; a store-level test has no transport,
+// so it supplies one here. A test that wants to prove the refusal uses a bare
+// context deliberately — see TestAdminAudit_RefusesAnUnattributableAct.
+func adminTestCtx() context.Context {
+	return domain.WithActor(context.Background(), "test-platform-admin")
 }

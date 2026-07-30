@@ -28,7 +28,7 @@ func newStoredUser(ctx context.Context, t *testing.T, s *UserStore, local string
 
 func TestUserStore_CreateAndGet(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewUserStore(pool)
 
 	created := newStoredUser(ctx, t, s, "createget")
@@ -53,7 +53,7 @@ func TestUserStore_CreateAndGet(t *testing.T) {
 
 func TestUserStore_GetUnknownIsNotFound(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewUserStore(pool)
 
 	if _, err := s.Get(ctx, "usr_does_not_exist"); !errors.Is(err, domain.ErrNotFound) {
@@ -66,7 +66,7 @@ func TestUserStore_GetUnknownIsNotFound(t *testing.T) {
 // and the same person must not end up with two accounts.
 func TestUserStore_DuplicateEmailIsConflict(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewUserStore(pool)
 
 	newStoredUser(ctx, t, s, "dupe")
@@ -97,7 +97,7 @@ func TestUserStore_DuplicateEmailIsConflict(t *testing.T) {
 // schema is not in the path.
 func TestUserStore_GetByEmailIsCaseInsensitive(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewUserStore(pool)
 
 	created := newStoredUser(ctx, t, s, "casefold")
@@ -145,7 +145,7 @@ func TestUserStore_GetByEmailIsCaseInsensitive(t *testing.T) {
 
 func TestUserStore_UpdateProfile(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewUserStore(pool)
 
 	created := newStoredUser(ctx, t, s, "profile")
@@ -178,7 +178,7 @@ func TestUserStore_UpdateProfile(t *testing.T) {
 
 func TestUserStore_UpdateProfileValidatesLength(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewUserStore(pool)
 
 	created := newStoredUser(ctx, t, s, "toolong")
@@ -198,7 +198,7 @@ func TestUserStore_UpdateProfileValidatesLength(t *testing.T) {
 // a transition the state machine forbids must not reach the table.
 func TestUserStore_SetStatusFollowsTheLifecycle(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewUserStore(pool)
 
 	u := newStoredUser(ctx, t, s, "lifecycle")
@@ -244,7 +244,7 @@ func TestUserStore_SetStatusFollowsTheLifecycle(t *testing.T) {
 
 func TestUserStore_SetStatusGuardsAndValidates(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewUserStore(pool)
 
 	u := newStoredUser(ctx, t, s, "guards")
@@ -285,7 +285,7 @@ func TestUserStore_SetStatusGuardsAndValidates(t *testing.T) {
 // Keyset pagination is used so a page does not shift under concurrent inserts.
 func TestUserStore_ListPaginates(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewUserStore(pool)
 
 	const n = 5
@@ -369,7 +369,7 @@ func TestUserStore_ListPaginates(t *testing.T) {
 // If this ever fails, app_user has acquired tenant semantics it must not have.
 func TestUserStore_IsNotTenantScoped(t *testing.T) {
 	pool := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	s := NewUserStore(pool)
 
 	created := newStoredUser(ctx, t, s, "global")

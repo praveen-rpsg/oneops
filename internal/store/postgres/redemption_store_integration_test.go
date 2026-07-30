@@ -19,7 +19,7 @@ import (
 func redemptionFixture(t *testing.T, suffix string) (*pgxpool.Pool, *InvitationStore, *RedemptionStore, string, string) {
 	t.Helper()
 	priv := testPool(t)
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tenantID, orgID := seedOrgForInvitations(ctx, t, priv, suffix)
 	t.Cleanup(func() {
 		c := context.Background()
@@ -44,7 +44,7 @@ func cleanupUser(t *testing.T, priv *pgxpool.Pool, email string) {
 // the membership, and consumes the invitation, all at once.
 func TestRedemption_NewUserGetsAccountAndMembership(t *testing.T) {
 	priv, invites, redeem, tenantID, orgID := redemptionFixture(t, "new-user")
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	const email = "brand-new@example.com"
 	cleanupUser(t, priv, email)
 
@@ -107,7 +107,7 @@ func TestRedemption_NewUserGetsAccountAndMembership(t *testing.T) {
 // app_user is unique on the address platform-wide (ADR-IDENTITY-001 §8.2).
 func TestRedemption_ExistingUserIsReusedNotDuplicated(t *testing.T) {
 	priv, invites, redeem, tenantID, orgID := redemptionFixture(t, "existing-user")
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	const email = "already-here@example.com"
 	cleanupUser(t, priv, email)
 
@@ -154,7 +154,7 @@ func TestRedemption_ExistingUserIsReusedNotDuplicated(t *testing.T) {
 // the lifecycle already defines.
 func TestRedemption_InvitedUserIsActivated(t *testing.T) {
 	priv, invites, redeem, tenantID, orgID := redemptionFixture(t, "activate")
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	const email = "still-invited@example.com"
 	cleanupUser(t, priv, email)
 
@@ -193,7 +193,7 @@ func TestRedemption_RefusesSuspendedAndDeactivatedAccounts(t *testing.T) {
 	for _, st := range []domain.UserStatus{domain.UserSuspended, domain.UserDeactivated} {
 		t.Run(string(st), func(t *testing.T) {
 			priv, invites, redeem, tenantID, orgID := redemptionFixture(t, "refuse-"+string(st))
-			ctx := context.Background()
+			ctx := adminTestCtx()
 			email := string(st) + "-user@example.com"
 			cleanupUser(t, priv, email)
 
@@ -240,7 +240,7 @@ func TestRedemption_RefusesSuspendedAndDeactivatedAccounts(t *testing.T) {
 // way an unknown token does.
 func TestRedemption_ReplayIsRefused(t *testing.T) {
 	priv, invites, redeem, tenantID, orgID := redemptionFixture(t, "replay")
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	const email = "replay@example.com"
 	cleanupUser(t, priv, email)
 
@@ -273,7 +273,7 @@ func TestRedemption_ReplayIsRefused(t *testing.T) {
 // passes the replay test and fails here.
 func TestRedemption_ConcurrentRedemptionHasExactlyOneWinner(t *testing.T) {
 	priv, invites, redeem, tenantID, orgID := redemptionFixture(t, "race")
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	const email = "race@example.com"
 	cleanupUser(t, priv, email)
 
@@ -334,7 +334,7 @@ func TestRedemption_ConcurrentRedemptionHasExactlyOneWinner(t *testing.T) {
 // proves the store handles the conflict rather than failing.
 func TestRedemption_SecondInvitationDoesNotDuplicateMembership(t *testing.T) {
 	priv, invites, redeem, tenantID, orgID := redemptionFixture(t, "dup-membership")
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	const email = "twice@example.com"
 	cleanupUser(t, priv, email)
 
@@ -381,7 +381,7 @@ func TestRedemption_SecondInvitationDoesNotDuplicateMembership(t *testing.T) {
 // the conflict update is for.
 func TestRedemption_RevokedMembershipIsReactivated(t *testing.T) {
 	priv, invites, redeem, tenantID, orgID := redemptionFixture(t, "reactivate")
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	const email = "returning@example.com"
 	cleanupUser(t, priv, email)
 
@@ -418,7 +418,7 @@ func TestRedemption_RevokedMembershipIsReactivated(t *testing.T) {
 func TestRedemption_RefusesExpiredAndRevokedInvitations(t *testing.T) {
 	t.Run("expired", func(t *testing.T) {
 		priv, invites, redeem, tenantID, orgID := redemptionFixture(t, "exp")
-		ctx := context.Background()
+		ctx := adminTestCtx()
 		const email = "expired-redeem@example.com"
 		cleanupUser(t, priv, email)
 
@@ -436,7 +436,7 @@ func TestRedemption_RefusesExpiredAndRevokedInvitations(t *testing.T) {
 
 	t.Run("revoked", func(t *testing.T) {
 		priv, invites, redeem, tenantID, orgID := redemptionFixture(t, "rev")
-		ctx := context.Background()
+		ctx := adminTestCtx()
 		const email = "revoked-redeem@example.com"
 		cleanupUser(t, priv, email)
 
@@ -452,7 +452,7 @@ func TestRedemption_RefusesExpiredAndRevokedInvitations(t *testing.T) {
 
 	t.Run("unknown", func(t *testing.T) {
 		priv, invites, redeem, tenantID, orgID := redemptionFixture(t, "unknown")
-		ctx := context.Background()
+		ctx := adminTestCtx()
 		const email = "unknown-redeem@example.com"
 		cleanupUser(t, priv, email)
 
@@ -478,7 +478,7 @@ func TestRedemption_RefusesExpiredAndRevokedInvitations(t *testing.T) {
 // assertNothingHappened proves a refused redemption wrote nothing at all.
 func assertNothingHappened(t *testing.T, priv *pgxpool.Pool, orgID, email string) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	var memberships, users, redeemed int
 	if err := priv.QueryRow(ctx, `
 		SELECT (SELECT count(*) FROM membership WHERE org_id = $1),
@@ -501,7 +501,7 @@ func assertNothingHappened(t *testing.T, priv *pgxpool.Pool, orgID, email string
 // what makes "the token is consumed" and "the membership exists" the same fact.
 func TestRedemption_IsAtomicWhenTheLastStepFails(t *testing.T) {
 	priv, invites, redeem, tenantID, orgID := redemptionFixture(t, "atomic")
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	const email = "atomic@example.com"
 	cleanupUser(t, priv, email)
 
@@ -566,7 +566,7 @@ func TestRedemption_IsAtomicWhenTheLastStepFails(t *testing.T) {
 // "every redemption is refused".
 func TestRedemption_CannotRunOnTheScopedPool(t *testing.T) {
 	priv, invites, _, tenantID, orgID := redemptionFixture(t, "scoped")
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	const email = "scoped-redeem@example.com"
 	cleanupUser(t, priv, email)
 
@@ -593,7 +593,7 @@ func TestRedemption_CannotRunOnTheScopedPool(t *testing.T) {
 // the row this story creates.
 func TestRedemption_MembershipIsConfinedByRowLevelSecurity(t *testing.T) {
 	priv, invites, redeem, tenantA, orgA := redemptionFixture(t, "rls-a")
-	ctx := context.Background()
+	ctx := adminTestCtx()
 	tenantB, _ := seedOrgForInvitations(ctx, t, priv, "rls-b")
 	const email = "rls-member@example.com"
 	cleanupUser(t, priv, email)

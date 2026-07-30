@@ -56,19 +56,38 @@ func scanUser(s scanner) (*domain.User, error) {
 // the address is caller-supplied and unique platform-wide, and uq_user_email is
 // case-insensitive because the column is citext — so 'A@b.com' collides with
 // 'a@b.com' and the caller is told so rather than getting a second account.
+// The write runs inside withAdminAudit: the row and its administrative audit
+// record commit together or neither does (ADR-AUDIT-007 §6.9). app_user is
+// global and has no organisation, so the act lands on the platform chain.
 func (s *UserStore) Create(ctx context.Context, u *domain.User) (*domain.User, error) {
-	row := s.pool.QueryRow(ctx, `
-		INSERT INTO app_user (user_id, email, display_name, status)
-		VALUES ($1, $2, $3, $4)
-		RETURNING `+userColumns,
-		u.UserID, domain.NormalizeEmail(u.Email), u.DisplayName, string(u.Status))
+	var created *domain.User
+	err := withAdminAudit(ctx, s.pool,
+		func() []domain.AdminAct {
+			return []domain.AdminAct{{
+				Operation: domain.AdminUserCreated,
+				Subject:   domain.AdminSubject{UserID: u.UserID},
+				Detail:    map[string]any{"email": string(domain.NormalizeEmail(u.Email))},
+			}}
+		},
+		func(tx pgx.Tx) error {
+			row := tx.QueryRow(ctx, `
+				INSERT INTO app_user (user_id, email, display_name, status)
+				VALUES ($1, $2, $3, $4)
+				RETURNING `+userColumns,
+				u.UserID, domain.NormalizeEmail(u.Email), u.DisplayName, string(u.Status))
 
-	created, err := scanUser(row)
+			var scanErr error
+			created, scanErr = scanUser(row)
+			if scanErr != nil {
+				if isUniqueViolation(scanErr) {
+					return domain.ErrConflict
+				}
+				return fmt.Errorf("insert user: %w", scanErr)
+			}
+			return nil
+		})
 	if err != nil {
-		if isUniqueViolation(err) {
-			return nil, domain.ErrConflict
-		}
-		return nil, fmt.Errorf("insert user: %w", err)
+		return nil, err
 	}
 	return created, nil
 }
