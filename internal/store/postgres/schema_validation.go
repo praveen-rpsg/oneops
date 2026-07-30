@@ -116,9 +116,16 @@ var immutableAuditTables = []struct {
 	parent      string
 	mutateTrg   string
 	truncateTrg string
+	// alwaysRequired is true when the guards must be ENABLE ALWAYS
+	// (pg_trigger.tgenabled = 'A'). Origin-mode guards are suppressed by
+	// session_replication_role = 'replica', so for a table that has been
+	// hardened, a silent downgrade to 'O' re-opens that bypass and must be
+	// reported. audit_event is 'O' today and is hardened by its own change;
+	// until then, demanding 'A' of it would report a false problem at boot.
+	alwaysRequired bool
 }{
-	{"audit_event", "trg_audit_event_no_row_mutate", "trg_audit_event_no_truncate"},
-	{"admin_audit_event", "trg_admin_audit_event_no_row_mutate", "trg_admin_audit_event_no_truncate"},
+	{"audit_event", "trg_audit_event_no_row_mutate", "trg_audit_event_no_truncate", false},
+	{"admin_audit_event", "trg_admin_audit_event_no_row_mutate", "trg_admin_audit_event_no_truncate", true},
 }
 
 // validateAuditImmutability verifies that every append-only audit table, and
@@ -139,12 +146,20 @@ func (v *SchemaValidator) validateAuditImmutability(ctx context.Context) ([]stri
 	var problems []string
 
 	for _, subject := range immutableAuditTables {
-		// Two counters per guard, and both are load-bearing: "armed" excludes a
-		// disabled trigger, "present" does not, and the difference between them
-		// is exactly what distinguishes a guard someone dropped from one
-		// someone switched off. Counting only armed triggers would report a
-		// disabled guard as absent — true, but it sends the operator looking
-		// for a missing migration instead of an ALTER TABLE.
+		// Three counters per guard, each load-bearing, because pg_trigger.tgenabled
+		// has four values and only one of them is a missing trigger:
+		//
+		//   'O' origin  — fires normally; suppressed by session_replication_role
+		//   'A' always  — fires regardless of replication role
+		//   'R' replica — fires ONLY in replica mode, i.e. NEVER during application
+		//                 traffic. A plain UPDATE succeeds with no session setting.
+		//   'D' disabled— never fires
+		//
+		// Counting merely "not disabled" reported 'R' as healthy, which was
+		// measured live: one ALTER TABLE ... ENABLE REPLICA TRIGGER left the
+		// counter at 1 while an ordinary UPDATE rewrote audit rows. So "armed"
+		// means IN ('O','A'); "alwaysArmed" means 'A'; and "present" ignores mode
+		// so a dropped guard can be told apart from a switched-off one.
 		rows, err := v.pool.Query(ctx, `
 			WITH rels AS (
 				SELECT to_regclass(current_schema() || '.' || $1) AS oid
@@ -153,8 +168,10 @@ func (v *SchemaValidator) validateAuditImmutability(ctx context.Context) ([]stri
 				 WHERE inhparent = to_regclass(current_schema() || '.' || $1)
 			)
 			SELECT r.oid::regclass::text,
-			       count(*) FILTER (WHERE t.tgname = $2 AND t.tgenabled <> 'D'),
-			       count(*) FILTER (WHERE t.tgname = $3 AND t.tgenabled <> 'D'),
+			       count(*) FILTER (WHERE t.tgname = $2 AND t.tgenabled IN ('O','A')),
+			       count(*) FILTER (WHERE t.tgname = $3 AND t.tgenabled IN ('O','A')),
+			       count(*) FILTER (WHERE t.tgname = $2 AND t.tgenabled = 'A'),
+			       count(*) FILTER (WHERE t.tgname = $3 AND t.tgenabled = 'A'),
 			       count(*) FILTER (WHERE t.tgname = $2),
 			       count(*) FILTER (WHERE t.tgname = $3)
 			  FROM rels r
@@ -168,28 +185,21 @@ func (v *SchemaValidator) validateAuditImmutability(ctx context.Context) ([]stri
 		seen := 0
 		for rows.Next() {
 			var rel string
-			var mutateArmed, truncateArmed, mutatePresent, truncatePresent int
-			if err := rows.Scan(&rel, &mutateArmed, &truncateArmed, &mutatePresent, &truncatePresent); err != nil {
+			var mutateArmed, truncateArmed int
+			var mutateAlways, truncateAlways int
+			var mutatePresent, truncatePresent int
+			if err := rows.Scan(&rel, &mutateArmed, &truncateArmed,
+				&mutateAlways, &truncateAlways, &mutatePresent, &truncatePresent); err != nil {
 				rows.Close()
 				return nil, fmt.Errorf("scan audit trigger row (%s): %w", subject.parent, err)
 			}
 			seen++
-			switch {
-			case mutateArmed == 0 && mutatePresent > 0:
-				problems = append(problems, fmt.Sprintf(
-					"%s has a DISABLED append-only guard against UPDATE/DELETE (%s) — audit history could be rewritten", rel, subject.mutateTrg))
-			case mutateArmed == 0:
-				problems = append(problems, fmt.Sprintf(
-					"%s has no append-only guard against UPDATE/DELETE — audit ownership could be rewritten", rel))
-			}
-			switch {
-			case truncateArmed == 0 && truncatePresent > 0:
-				problems = append(problems, fmt.Sprintf(
-					"%s has a DISABLED append-only guard against TRUNCATE (%s) — audit history could be erased", rel, subject.truncateTrg))
-			case truncateArmed == 0:
-				problems = append(problems, fmt.Sprintf(
-					"%s has no append-only guard against TRUNCATE — audit history could be erased", rel))
-			}
+			problems = append(problems, guardProblems(rel, subject.mutateTrg,
+				"UPDATE/DELETE", "audit history could be rewritten",
+				mutateArmed, mutateAlways, mutatePresent, subject.alwaysRequired)...)
+			problems = append(problems, guardProblems(rel, subject.truncateTrg,
+				"TRUNCATE", "audit history could be erased",
+				truncateArmed, truncateAlways, truncatePresent, subject.alwaysRequired)...)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -204,4 +214,28 @@ func (v *SchemaValidator) validateAuditImmutability(ctx context.Context) ([]stri
 	}
 
 	return problems, nil
+}
+
+// guardProblems classifies one append-only guard on one relation. The four
+// outcomes are distinct operator errors with distinct repairs, and conflating
+// them sends the operator to the wrong place: absent means a missing migration,
+// disabled and replica-mode mean an ALTER TABLE someone ran, and origin-mode on
+// a hardened table means the ENABLE ALWAYS was undone.
+func guardProblems(rel, trigger, verbs, consequence string, armed, always, present int, alwaysRequired bool) []string {
+	switch {
+	case present == 0:
+		return []string{fmt.Sprintf(
+			"%s has no append-only guard against %s — %s", rel, verbs, consequence)}
+	case armed == 0:
+		// Present but not armed: either 'D' (never fires) or 'R' (fires only
+		// under replica mode, so never during application traffic). Both leave
+		// the table writable in an ordinary session.
+		return []string{fmt.Sprintf(
+			"%s has a DISABLED append-only guard against %s (%s) — %s", rel, trigger, verbs, consequence)}
+	case alwaysRequired && always == 0:
+		return []string{fmt.Sprintf(
+			"%s has a DOWNGRADED append-only guard against %s (%s): it is armed but not ENABLE ALWAYS, "+
+				"so session_replication_role='replica' suppresses it — %s", rel, trigger, verbs, consequence)}
+	}
+	return nil
 }

@@ -30,12 +30,26 @@
 -- and that is precisely why migration 20260728000002 had to exist: PostgreSQL
 -- does not propagate a statement-level TRUNCATE trigger from a partitioned
 -- parent to its partitions, so `TRUNCATE audit_event` was refused while
--- `TRUNCATE audit_event_default` erased the same rows. ADR-AUDIT-007 §7 lists
--- partitioning as a mitigation that is *available* should per-organisation
--- chains proliferate -- not as a requirement today. Declining it now removes
--- that entire failure class rather than re-mitigating it. A future migration
--- that partitions this table MUST also attach the truncate guard to every
--- partition by catalogue lookup, exactly as 20260728000002 does.
+-- `TRUNCATE audit_event_default` erased the same rows. Declining partitioning
+-- removes that entire failure class rather than re-mitigating it.
+--
+-- A CORRECTION TO ADR-AUDIT-007 SS7, WHICH THIS TABLE CANNOT HONOUR AS WRITTEN.
+-- SS7 offers partitioning as a mitigation "available exactly as for
+-- audit_event" should per-organisation chains proliferate. For TIME-based
+-- partitioning that is false, and PostgreSQL refuses it outright: a unique
+-- constraint on a partitioned table must contain every partitioning column, and
+-- all three unique constraints below (pk_admin_audit_event,
+-- uq_admin_audit_event_id, uq_admin_audit_this_hash) are chain_id-prefixed and
+-- carry no occurred_at. Measured: "PRIMARY KEY ... lacks column occurred_at".
+-- So only LIST/HASH on chain_id is legal -- which does not divide the hot data,
+-- because the platform chain is a single chain_id and holds every act that has
+-- no organisation. Partitioning this table by time would require rewriting the
+-- primary key of an append-only table. That is a real constraint on the growth
+-- story, and it is recorded here rather than discovered later.
+--
+-- A future migration that does partition by chain_id MUST also attach the
+-- truncate guard to every partition by catalogue lookup, exactly as
+-- 20260728000002 does, and must arm each one with ENABLE ALWAYS.
 --
 -- NO FOREIGN KEYS ON THE SUBJECT COLUMNS. An administrative record must outlive
 -- its subject and must never be blocked, cascaded, or nulled by the subject's
@@ -103,9 +117,27 @@ CREATE TABLE IF NOT EXISTS admin_audit_event (
         'membership.granted', 'membership.revoked'))
 );
 
--- Query paths this store is expected to serve (§6.1 "who did what, to whom,
--- when"). The admin audit query API is OPS-S038; these indexes exist so that
--- story adds no schema change.
+-- Query paths this store is expected to serve (SS6.1 "who did what, to whom,
+-- when"). The admin audit query API is OPS-S038.
+--
+-- These indexes cover "who" (actor), "what" (operation) and "when"
+-- (occurred_at), and one of the three "to whom" columns (subject_org_id).
+-- They do NOT cover subject_user_id or subject_tenant_id, and OPS-S038 WILL
+-- need a schema change if its "target" filter accepts either. Measured against
+-- 1.025M rows: subject_user_id = 172 ms parallel seq scan (65,053 buffers),
+-- subject_tenant_id = 235 ms (191,500 buffers, 710,399 rows discarded);
+-- with matching partial indexes, 0.14 ms and 0.06 ms. Those indexes are not
+-- created here because they cost append latency inside the chain-head lock for
+-- a reader that does not exist yet -- OPS-S038 should add exactly the ones its
+-- filter set needs.
+--
+-- Also unresolved for OPS-S038: occurred_at is not unique, and SS6.8's
+-- multi-chain shape guarantees ties, so a keyset cursor over occurred_at alone
+-- silently skips rows at a page boundary while a row-value cursor against the
+-- single-column index below degrades quadratically within a tie block
+-- (measured: 17.1 ms / 20,014 buffers through a 20k tie, versus 0.07 ms with a
+-- matching (occurred_at, chain_id, seq) index). A stable global ordering needs
+-- that composite index; it is OPS-S038's to add with its cursor design.
 CREATE INDEX IF NOT EXISTS ix_admin_audit_occurred_at ON admin_audit_event (occurred_at);
 CREATE INDEX IF NOT EXISTS ix_admin_audit_actor       ON admin_audit_event (actor, occurred_at);
 CREATE INDEX IF NOT EXISTS ix_admin_audit_operation   ON admin_audit_event (operation, occurred_at);
@@ -125,12 +157,20 @@ CREATE INDEX IF NOT EXISTS ix_admin_audit_subject_org ON admin_audit_event (subj
 --
 --   1. ENABLE ALWAYS. audit_event's triggers are created with the default
 --      "origin" firing mode (pg_trigger.tgenabled = 'O'). A session that sets
---      session_replication_role = 'replica' -- which the application's own
---      database credential is able to do, and which the repository's own
---      restore-integrity test does -- suppresses them entirely. Measured: a
---      single SET followed by one UPDATE rewrote every row of audit_event with
---      no error raised. ENABLE ALWAYS (tgenabled = 'A') fires regardless of
---      replication role; the same attempt is then refused.
+--      session_replication_role = 'replica' suppresses them entirely.
+--      Measured: a single SET followed by one UPDATE rewrote every row of
+--      audit_event with no error raised. ENABLE ALWAYS (tgenabled = 'A') fires
+--      regardless of replication role; the same attempt is then refused.
+--
+--      Precisely who can do this, because the distinction matters: the
+--      parameter's context is "superuser". The PRIVILEGED pool's role can set
+--      it (in the dev compose stack that role is the cluster superuser, and the
+--      repository's own restore-integrity test relies on the capability). The
+--      REQUEST-PATH role cannot -- measured: oneops_app gets "permission denied
+--      to set parameter". So this hardening defends against the owning pool,
+--      operators and DBA sessions, not against a tenant request. It is
+--      defence-in-depth against insiders, and should not be described as
+--      closing a tenant-reachable hole.
 --
 --   2. Privilege, not only trigger. See the REVOKE block below.
 --
@@ -173,13 +213,31 @@ ALTER TABLE admin_audit_event ENABLE ALWAYS TRIGGER trg_admin_audit_event_no_tru
 -- otherwise confine it. Without the block below, the request path would arrive
 -- holding write access to the administrative audit trail on day one.
 --
--- UPDATE/DELETE/TRUNCATE are revoked permanently: nothing may ever hold them.
--- INSERT is revoked because OPS-S034 ships no writer. The write chokepoint is
--- OPS-S035, and it -- not this migration -- must grant INSERT to the role its
--- appender runs as, in its own migration, at the point where a writer actually
--- exists. Until then the table is unwritable by the request path, which closes
--- the interval in which a forged row could pre-seed a chain and wedge every
--- subsequent administrative act against the primary key.
+-- On admin_audit_event, UPDATE/DELETE/TRUNCATE are revoked permanently: the
+-- table is append-only, so nothing may ever hold them.
+--
+-- On admin_audit_chain_head the rule is DIFFERENT, and saying otherwise would
+-- be false: the chain head is the MUTABLE tip. Its whole purpose is to be
+-- advanced by UpsertChainHead, and PostgreSQL requires UPDATE privilege even to
+-- take the SELECT ... FOR UPDATE lock that ADR-AUDIT-006 serialises appends on.
+-- OPS-S035 MUST therefore grant SELECT, INSERT, UPDATE on this table to
+-- whichever role its appender runs as. Revoking here is a "no writer exists
+-- yet" measure, not a permanent prohibition.
+--
+-- INSERT on the event table is revoked for the same reason. OPS-S034 ships no
+-- writer; OPS-S035 grants what its appender needs, at the point where a writer
+-- actually exists. Until then the store is unwritable by the request path,
+-- which closes the interval in which a forged row could pre-seed a chain and
+-- wedge every subsequent administrative act against the primary key. That wedge
+-- is not hypothetical: a forged (chain_id, seq) is unrecoverable here, because
+-- the append-only triggers refuse the DELETE that would clear it.
+--
+-- SELECT is revoked on BOTH tables. The chain head is not merely bookkeeping:
+-- chain_id identifies the organisation (SS6.8), last_seq counts the
+-- administrative acts committed against it, and updated_at times the most
+-- recent one. Left readable on a table with no row-level security, it is an
+-- enumeration oracle over every customer's administrative activity -- precisely
+-- what SS6.5 confines to platform administrators.
 --
 -- This migration is therefore NOT role-agnostic, departing from
 -- 20260723000001's header. That header defers privilege separation to an
@@ -194,10 +252,12 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oneops_app') THEN
         EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON admin_audit_event      FROM oneops_app';
         EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON admin_audit_chain_head FROM oneops_app';
-        -- SELECT is revoked too: §6.5 confines visibility to platform
-        -- administrators, and OPS-S038's reader is the only thing that should
-        -- ever hold it. Granting it back is that story's decision to record.
-        EXECUTE 'REVOKE SELECT ON admin_audit_event FROM oneops_app';
+        -- SS6.5 confines visibility to platform administrators, and OPS-S038's
+        -- reader is the only thing that should ever hold SELECT. Granting it
+        -- back is that story's decision to record. Both tables: see the note
+        -- above on the chain head as an enumeration oracle.
+        EXECUTE 'REVOKE SELECT ON admin_audit_event      FROM oneops_app';
+        EXECUTE 'REVOKE SELECT ON admin_audit_chain_head FROM oneops_app';
     END IF;
 END;
 $$;

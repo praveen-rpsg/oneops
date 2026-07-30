@@ -103,7 +103,7 @@ func TestAdminAudit_GuardsSurviveReplicationRoleBypass(t *testing.T) {
 // administrative audit trail. Privilege is the second layer that audit_event's
 // header promises and does not have.
 func TestAdminAudit_RequestPathRoleHoldsNoAccess(t *testing.T) {
-	testPool(t) // creates the schema and applies migrations
+	pool := testPool(t) // creates the schema and applies migrations
 	scoped := tenantScopedPool(t)
 	ctx := context.Background()
 
@@ -126,6 +126,33 @@ func TestAdminAudit_RequestPathRoleHoldsNoAccess(t *testing.T) {
 	// role is not one, and there is no RLS policy to fall back on.
 	if _, err := scoped.Exec(ctx, `SELECT 1 FROM admin_audit_event`); err == nil {
 		t.Error("the request-path role could SELECT from admin_audit_event; §6.5 confines it to platform administrators")
+	}
+	// The chain head is not mere bookkeeping. chain_id identifies the
+	// organisation, last_seq counts the administrative acts committed against
+	// it, and updated_at times the most recent one. Readable on a table with no
+	// row-level security, that is an enumeration oracle over every customer's
+	// administrative activity.
+	if _, err := scoped.Exec(ctx, `SELECT 1 FROM admin_audit_chain_head`); err == nil {
+		t.Error("the request-path role could SELECT from admin_audit_chain_head — " +
+			"organisation activity, act counts and timing are enumerable without row-level security")
+	}
+
+	// Belt and braces: assert the privilege state directly, so a future
+	// ALTER DEFAULT PRIVILEGES or a restore that reinstates grants is caught
+	// even if no query happens to exercise it.
+	for _, table := range []string{"admin_audit_event", "admin_audit_chain_head"} {
+		for _, priv := range []string{"SELECT", "INSERT", "UPDATE", "DELETE"} {
+			var held bool
+			if err := pool.QueryRow(ctx,
+				`SELECT has_table_privilege('oneops_app', current_schema() || '.' || $1, $2)`,
+				table, priv).Scan(&held); err != nil {
+				t.Fatalf("check %s on %s: %v", priv, table, err)
+			}
+			if held {
+				t.Errorf("oneops_app holds %s on %s; OPS-S034 ships no writer and no reader, "+
+					"so the request-path role must hold nothing", priv, table)
+			}
+		}
 	}
 }
 
@@ -175,6 +202,93 @@ func TestAdminAudit_DisabledGuardIsDetected(t *testing.T) {
 	// looking for a missing migration.
 	if anyContains(problems, "has no append-only guard against UPDATE/DELETE") {
 		t.Errorf("a DISABLED guard was reported as absent; problems = %v", problems)
+	}
+}
+
+// pg_trigger.tgenabled has four values and only 'D' is a switched-off trigger.
+// 'R' (replica) fires ONLY under session_replication_role='replica' — that is,
+// never during application traffic — so a plain UPDATE succeeds with no session
+// setting at all. 'O' (origin) fires normally but is suppressed by that same
+// setting, which is the bypass ENABLE ALWAYS exists to close.
+//
+// A predicate of "not disabled" reported both as healthy. Measured live: after
+// ENABLE REPLICA the counter read 1 while an ordinary UPDATE rewrote the row.
+// Each mode gets its own case here because each is a different repair.
+func TestAdminAudit_DowngradedGuardModesAreDetected(t *testing.T) {
+	priv := testPool(t)
+	ctx := context.Background()
+	v := NewSchemaValidator(priv)
+
+	if problems, err := v.Validate(ctx); err != nil {
+		t.Fatalf("validate clean: %v", err)
+	} else if len(problems) != 0 {
+		t.Fatalf("clean schema reported problems: %v", problems)
+	}
+
+	cases := []struct {
+		name     string
+		alter    string
+		expected string
+		// bypass describes how the guard is defeated once downgraded, so the
+		// test proves the mode is genuinely unsafe rather than merely unusual.
+		replicaModeNeeded bool
+	}{
+		{
+			name:              "replica mode is inert during normal traffic",
+			alter:             "ENABLE REPLICA TRIGGER",
+			expected:          "DISABLED",
+			replicaModeNeeded: false,
+		},
+		{
+			name:              "origin mode reopens the session_replication_role bypass",
+			alter:             "ENABLE TRIGGER",
+			expected:          "DOWNGRADED",
+			replicaModeNeeded: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := priv.Exec(ctx,
+				`ALTER TABLE admin_audit_event `+tc.alter+` trg_admin_audit_event_no_row_mutate`); err != nil {
+				t.Fatalf("downgrade guard: %v", err)
+			}
+			t.Cleanup(func() {
+				if _, err := priv.Exec(context.Background(),
+					`ALTER TABLE admin_audit_event ENABLE ALWAYS TRIGGER trg_admin_audit_event_no_row_mutate`); err != nil {
+					t.Fatalf("re-arm guard: %v", err)
+				}
+			})
+
+			// Prove the downgrade is exploitable, not merely cosmetic.
+			chain := "admin-downgrade-" + tc.alter
+			seedAdminAuditRow(ctx, t, priv, chain)
+			conn, err := priv.Acquire(ctx)
+			if err != nil {
+				t.Fatalf("acquire: %v", err)
+			}
+			defer conn.Release()
+			if tc.replicaModeNeeded {
+				if _, err := conn.Exec(ctx, `SET session_replication_role = 'replica'`); err != nil {
+					t.Fatalf("set replication role: %v", err)
+				}
+				defer func() {
+					_, _ = conn.Exec(context.Background(), `SET session_replication_role = 'origin'`)
+				}()
+			}
+			if _, err := conn.Exec(ctx,
+				`UPDATE admin_audit_event SET actor = 'attacker' WHERE chain_id = $1`, chain); err != nil {
+				t.Fatalf("expected the downgraded guard to permit the rewrite, got: %v", err)
+			}
+
+			problems, err := v.Validate(ctx)
+			if err != nil {
+				t.Fatalf("validate downgraded: %v", err)
+			}
+			if !anyContains(problems, tc.expected) || !anyContains(problems, "admin_audit_event") {
+				t.Errorf("a %s guard was not reported as %s; problems = %v", tc.alter, tc.expected, problems)
+			}
+		})
 	}
 }
 
