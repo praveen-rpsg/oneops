@@ -77,6 +77,10 @@ type Server struct {
 	compliance       complianceService
 	complianceExport func()
 
+	// User registry; nil until SetUsers. app_user is global (ADR-IDENTITY-002
+	// §3), so nothing here is tenant-scoped.
+	users domain.UserRepository
+
 	// Tenant registry; nil until SetTenants. While nil the platform resolves
 	// every request to the system tenant, which is the pre-tenancy behaviour.
 	tenants domain.TenantRepository
@@ -242,6 +246,14 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePlatformAdmin).Get("/admin/tenants", s.listTenants)
 		rt.With(s.requirePlatformAdmin).Post("/admin/tenants", s.createTenant)
 		rt.With(s.requirePlatformAdmin).Patch("/admin/tenants/{id}", s.patchTenant)
+
+		// The user registry is a platform operation like the tenant registry:
+		// app_user is global, so administering it is not an act inside any one
+		// tenant's boundary (ADR-AUTHZ-001, ADR-IDENTITY-002 §3.1).
+		rt.With(s.requirePlatformAdmin).Get("/admin/users", s.listUsers)
+		rt.With(s.requirePlatformAdmin).Post("/admin/users", s.createUser)
+		rt.With(s.requirePlatformAdmin).Get("/admin/users/{id}", s.getUser)
+		rt.With(s.requirePlatformAdmin).Patch("/admin/users/{id}", s.patchUser)
 
 		// Event delivery — webhook administration (admin permission).
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/webhooks", s.listWebhooks)

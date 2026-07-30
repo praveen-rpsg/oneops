@@ -751,6 +751,121 @@ paths:
 
   # Policy automation (admin). Policies react to committed governance events; they
   # never participate in governance execution.
+  /v1/admin/users:
+    get:
+      summary: List users, or resolve one by email address
+      description: >-
+        Users are global to the platform: a person exists before, and
+        independently of, any membership (ADR-IDENTITY-001 §8.2), so this
+        collection is not scoped to a tenant and administering it is a platform
+        operation. Supplying `email` resolves a single address and returns a
+        list of zero or one — the collection exists whether or not anything in
+        it matched, so a filter that finds nothing is an empty page, not a 404.
+        Paging is keyset over `user_id`, which is a ULID and therefore ordered
+        by creation; `limit` is clamped so an unbounded request cannot hand the
+        whole table to one caller.
+      operationId: listUsers
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: email
+          in: query
+          description: Resolve a single user by address, case-insensitively.
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last user_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of users
+          content: { application/json: { schema: { $ref: '#/components/schemas/UserList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Register a user
+      description: >-
+        The user starts `invited` and holds no access until a membership grants
+        it. The identifier is minted server-side and is not accepted from the
+        caller. The address is unique platform-wide and compared
+        case-insensitively, so a differently cased duplicate is a conflict
+        rather than a second account for the same person.
+      operationId: createUser
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateUserRequest' } } }
+      responses:
+        '201':
+          description: Created user
+          content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/users/{id}:
+    get:
+      summary: Get a user
+      operationId: getUser
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The user
+          content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Change a display name, or perform a lifecycle transition
+      description: >-
+        Exactly one of `display_name` or `status` per call. The two follow
+        different paths — a status change is checked against the lifecycle, a
+        rename is not — and a request doing both would consume two row versions
+        and leave the outcome of one of them unreported.
+
+
+        `row_version` is required and is the version last read for this user. A
+        stale value is a 409: the record changed underneath the caller, who must
+        re-read before deciding again.
+
+
+        A refused transition is also a 409, not a 422: the target state is
+        well-formed, it is the move that is not allowed. Deactivation is
+        terminal — the row is retained so audit events keep an attributable
+        author (ADR-IDENTITY-001 §8.3).
+      operationId: patchUser
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PatchUserRequest' } } }
+      responses:
+        '200':
+          description: Updated user
+          content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
   /v1/admin/tenants:
     get:
       summary: List tenants
@@ -1142,6 +1257,42 @@ components:
         external_id:
           type: string
           description: Optional. Must be unique across tenants when non-empty.
+    User:
+      type: object
+      required: [user_id, email, display_name, status, row_version, created_at, updated_at]
+      properties:
+        user_id:     { type: string }
+        email:       { type: string, format: email }
+        display_name: { type: string }
+        status:
+          type: string
+          enum: [invited, active, suspended, deactivated]
+        row_version: { type: integer, format: int64 }
+        created_at:  { type: string, format: date-time }
+        updated_at:  { type: string, format: date-time }
+    UserList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/User' }
+    CreateUserRequest:
+      type: object
+      required: [email]
+      properties:
+        email:        { type: string, format: email, maxLength: 254 }
+        display_name: { type: string, maxLength: 200 }
+    PatchUserRequest:
+      type: object
+      required: [row_version]
+      description: Supply exactly one of display_name or status.
+      properties:
+        row_version:  { type: integer, format: int64, minimum: 1 }
+        display_name: { type: string, maxLength: 200 }
+        status:
+          type: string
+          enum: [invited, active, suspended, deactivated]
     PatchTenantRequest:
       type: object
       required: [status]

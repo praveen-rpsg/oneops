@@ -54,6 +54,12 @@ func (s *Server) mapError(w http.ResponseWriter, r *http.Request, err error) {
 		writeProblem(w, r, http.StatusConflict, "conflict", "artifact/version already exists")
 	case errors.Is(err, domain.ErrVersionMismatch):
 		writeProblem(w, r, http.StatusPreconditionFailed, "precondition failed", "row version mismatch")
+	case errors.Is(err, domain.ErrInvalidTransition):
+		// The target state is well-formed; it is the move that is refused. That
+		// is a conflict with the record's current state, not a malformed request
+		// — and without this case it would fall through to the 500 branch and be
+		// logged as an unhandled server fault.
+		writeProblem(w, r, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, domain.ErrDeletionForbidden):
 		// §8: the role may never be deleted. A refusal on constitutional grounds,
 		// not a client error in the request itself.
