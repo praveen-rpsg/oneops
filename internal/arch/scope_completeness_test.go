@@ -61,6 +61,20 @@ func TestEveryGlobalRegistryRoute_RequiresPlatformAdmin(t *testing.T) {
 		// these names would make this justification false.
 		"webhook_cursor": "",
 		"policy_cursor":  "",
+		// Administrative audit is platform-owned and global by ADR-AUDIT-007
+		// §6.3/§6.4, so no row-level security confines it and this map is where
+		// that is justified. Empty because OPS-S034 creates the schema only and
+		// mounts no route; the reader is OPS-S038, which must set the real
+		// prefix and register every route with requirePlatformAdmin (§6.5,
+		// §6.7). The chain head is never exposed and stays empty permanently.
+		//
+		// Note for S038: the empty-prefix branch below only looks for routes
+		// beginning "/admin/"+table, so a reader mounted at e.g. /admin/audit
+		// would NOT be caught by this justification going stale. Changing the
+		// prefix here is therefore a required part of that story, not an
+		// optional tidy-up.
+		"admin_audit_event":      "",
+		"admin_audit_chain_head": "",
 	}
 
 	for _, table := range globalTables(t) {

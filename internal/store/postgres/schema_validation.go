@@ -106,55 +106,102 @@ func (v *SchemaValidator) Validate(ctx context.Context) ([]string, error) {
 	return problems, nil
 }
 
-// validateAuditImmutability verifies that audit_event and every one of its
-// partitions carries both append-only guards: the row-level guard against
+// immutableAuditTables are the append-only tables whose guards this validator
+// enforces, with the trigger names each one carries. audit_event holds the
+// constitutional chain; admin_audit_event holds the administrative chain
+// (ADR-AUDIT-007 §6.8). They are separate stores by decision, but there is one
+// registry of what "append-only" means, so a table added here is checked at
+// boot and by the sentinel without a second validator being written.
+var immutableAuditTables = []struct {
+	parent      string
+	mutateTrg   string
+	truncateTrg string
+}{
+	{"audit_event", "trg_audit_event_no_row_mutate", "trg_audit_event_no_truncate"},
+	{"admin_audit_event", "trg_admin_audit_event_no_row_mutate", "trg_admin_audit_event_no_truncate"},
+}
+
+// validateAuditImmutability verifies that every append-only audit table, and
+// every one of its partitions, carries both guards: the row-level guard against
 // UPDATE/DELETE and the statement-level guard against TRUNCATE. Partitions are
 // checked individually because PostgreSQL does not propagate a statement-level
 // TRUNCATE trigger from the parent — the same reason migration 20260728000002
 // attaches the truncate guard partition by partition.
+//
+// A trigger is counted only when it is actually armed. pg_trigger.tgenabled is
+// 'D' for a disabled trigger, and the catalogue row survives disabling — so a
+// check that merely counted rows by name reported a tampered table as healthy.
+// Measured against a live database: ALTER TABLE audit_event DISABLE TRIGGER
+// trg_audit_event_no_row_mutate left both counts at 1, and both the boot gate
+// and the 30-second sentinel saw nothing. Disabled and absent are reported
+// separately because they are different operator errors with the same effect.
 func (v *SchemaValidator) validateAuditImmutability(ctx context.Context) ([]string, error) {
-	rows, err := v.pool.Query(ctx, `
-		WITH rels AS (
-			SELECT to_regclass(current_schema() || '.audit_event') AS oid
-			UNION ALL
-			SELECT inhrelid FROM pg_inherits
-			 WHERE inhparent = to_regclass(current_schema() || '.audit_event')
-		)
-		SELECT r.oid::regclass::text,
-		       count(*) FILTER (WHERE t.tgname = 'trg_audit_event_no_row_mutate'),
-		       count(*) FILTER (WHERE t.tgname = 'trg_audit_event_no_truncate')
-		  FROM rels r
-		  LEFT JOIN pg_trigger t ON t.tgrelid = r.oid AND NOT t.tgisinternal
-		 WHERE r.oid IS NOT NULL
-		 GROUP BY r.oid`)
-	if err != nil {
-		return nil, fmt.Errorf("audit immutability check: %w", err)
-	}
-	defer rows.Close()
-
 	var problems []string
-	seen := 0
-	for rows.Next() {
-		var rel string
-		var mutate, truncate int
-		if err := rows.Scan(&rel, &mutate, &truncate); err != nil {
-			return nil, fmt.Errorf("scan audit trigger row: %w", err)
+
+	for _, subject := range immutableAuditTables {
+		// Two counters per guard, and both are load-bearing: "armed" excludes a
+		// disabled trigger, "present" does not, and the difference between them
+		// is exactly what distinguishes a guard someone dropped from one
+		// someone switched off. Counting only armed triggers would report a
+		// disabled guard as absent — true, but it sends the operator looking
+		// for a missing migration instead of an ALTER TABLE.
+		rows, err := v.pool.Query(ctx, `
+			WITH rels AS (
+				SELECT to_regclass(current_schema() || '.' || $1) AS oid
+				UNION ALL
+				SELECT inhrelid FROM pg_inherits
+				 WHERE inhparent = to_regclass(current_schema() || '.' || $1)
+			)
+			SELECT r.oid::regclass::text,
+			       count(*) FILTER (WHERE t.tgname = $2 AND t.tgenabled <> 'D'),
+			       count(*) FILTER (WHERE t.tgname = $3 AND t.tgenabled <> 'D'),
+			       count(*) FILTER (WHERE t.tgname = $2),
+			       count(*) FILTER (WHERE t.tgname = $3)
+			  FROM rels r
+			  LEFT JOIN pg_trigger t ON t.tgrelid = r.oid AND NOT t.tgisinternal
+			 WHERE r.oid IS NOT NULL
+			 GROUP BY r.oid`, subject.parent, subject.mutateTrg, subject.truncateTrg)
+		if err != nil {
+			return nil, fmt.Errorf("audit immutability check (%s): %w", subject.parent, err)
 		}
-		seen++
-		if mutate == 0 {
+
+		seen := 0
+		for rows.Next() {
+			var rel string
+			var mutateArmed, truncateArmed, mutatePresent, truncatePresent int
+			if err := rows.Scan(&rel, &mutateArmed, &truncateArmed, &mutatePresent, &truncatePresent); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan audit trigger row (%s): %w", subject.parent, err)
+			}
+			seen++
+			switch {
+			case mutateArmed == 0 && mutatePresent > 0:
+				problems = append(problems, fmt.Sprintf(
+					"%s has a DISABLED append-only guard against UPDATE/DELETE (%s) — audit history could be rewritten", rel, subject.mutateTrg))
+			case mutateArmed == 0:
+				problems = append(problems, fmt.Sprintf(
+					"%s has no append-only guard against UPDATE/DELETE — audit ownership could be rewritten", rel))
+			}
+			switch {
+			case truncateArmed == 0 && truncatePresent > 0:
+				problems = append(problems, fmt.Sprintf(
+					"%s has a DISABLED append-only guard against TRUNCATE (%s) — audit history could be erased", rel, subject.truncateTrg))
+			case truncateArmed == 0:
+				problems = append(problems, fmt.Sprintf(
+					"%s has no append-only guard against TRUNCATE — audit history could be erased", rel))
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("iterate audit triggers (%s): %w", subject.parent, err)
+		}
+		rows.Close()
+
+		if seen == 0 {
 			problems = append(problems, fmt.Sprintf(
-				"%s has no append-only guard against UPDATE/DELETE — audit ownership could be rewritten", rel))
-		}
-		if truncate == 0 {
-			problems = append(problems, fmt.Sprintf(
-				"%s has no append-only guard against TRUNCATE — audit history could be erased", rel))
+				"%s is absent — an append-only audit table the platform depends on does not exist", subject.parent))
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate audit triggers: %w", err)
-	}
-	if seen == 0 {
-		problems = append(problems, "audit_event is absent — the audit log the ownership model depends on does not exist")
-	}
+
 	return problems, nil
 }
