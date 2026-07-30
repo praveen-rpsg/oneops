@@ -33,12 +33,25 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 FILE="$OUT_DIR/oneops-$STAMP.dump"
 
 echo "Backing up to $FILE"
+# --no-owner is kept: ownership is a property of the cluster the dump lands in,
+# and the restoring role takes it.
+#
+# --no-privileges is deliberately NOT used. Privileges are not cosmetic here:
+# oneops_app is the role every request-scoped connection assumes
+# (NewTenantScopedPool does SET ROLE oneops_app), so a dump without ACLs
+# restores to a database the application cannot read at all. Measured against
+# this schema: 84 grants live, 0 emitted with --no-privileges, 22 without.
+# Migrations do not repair it — schema_migrations restores as already-applied,
+# so migrate.Up re-applies nothing.
+#
+# Revocations survive by absence, which is the property that matters for
+# admin_audit_event and admin_audit_chain_head: they carry no grant to
+# oneops_app, so no GRANT is emitted, and the restored table is owner-only.
 pg_dump \
   --dbname="$ONEOPS_DB_URL" \
   --format=custom \
   --compress=9 \
   --no-owner \
-  --no-privileges \
   --file="$FILE"
 
 # A dump that cannot be listed cannot be restored. Verifying here turns a silent

@@ -41,19 +41,37 @@ echo "Restoring $DUMP into the target database (existing objects are dropped)"
 # object that does not yet exist in an empty target is an expected, harmless
 # error. Success is asserted by the verification step below, not by pg_restore's
 # exit code.
+# Roles are cluster-scoped, so a database dump does not carry them. Restoring
+# into a fresh cluster would fail every GRANT without this. Idempotent, and it
+# mirrors migration 20260729000001 exactly — NOLOGIN, no privileges of its own
+# beyond what the dump grants.
+psql "$TARGET" -q -c "DO \$\$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'oneops_app') THEN
+        CREATE ROLE oneops_app NOLOGIN;
+    END IF;
+END
+\$\$;"
+
+# --no-privileges is deliberately NOT used; see db-backup.sh. A restore that
+# drops the ACLs produces a database the request path cannot read, and nothing
+# downstream repairs it.
 pg_restore \
   --dbname="$TARGET" \
   --clean \
   --if-exists \
   --no-owner \
-  --no-privileges \
   --jobs=4 \
   "$DUMP" 2>&1 | grep -v "does not exist, skipping" || true
 
-# Prove the restore produced a queryable schema rather than a partial one.
-if ! psql "$TARGET" -tAc "SELECT 1 FROM configuration_object LIMIT 1" >/dev/null 2>&1; then
-  echo "error: restore verification failed — configuration_object is not queryable" >&2
+# Prove the restore produced a queryable schema rather than a partial one — and
+# prove it AS THE ROLE THAT SERVES TRAFFIC. Verifying as the connecting
+# superuser is what let a privilege-stripped restore report success: the owner
+# is exempt from the ACLs whose absence breaks every request.
+if ! psql "$TARGET" -tAc "SET ROLE oneops_app; SELECT 1 FROM configuration_object LIMIT 1" >/dev/null 2>&1; then
+  echo "error: restore verification failed — configuration_object is not readable by oneops_app," >&2
+  echo "       the role every request-scoped connection assumes. The restore is not serveable." >&2
   exit 1
 fi
 
-echo "OK: restore verified"
+echo "OK: restore verified (as oneops_app)"
