@@ -81,6 +81,11 @@ type Server struct {
 	// §3), so nothing here is tenant-scoped.
 	users domain.UserRepository
 
+	// Organisation registry; nil until SetOrganizations. organization is global
+	// for the same reason (ADR-IDENTITY-002 §3.1): tenant_id is discovered BY
+	// reading this mapping, so the mapping cannot be scoped by it.
+	organizations domain.OrganizationRepository
+
 	// Tenant registry; nil until SetTenants. While nil the platform resolves
 	// every request to the system tenant, which is the pre-tenancy behaviour.
 	tenants domain.TenantRepository
@@ -254,6 +259,18 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePlatformAdmin).Post("/admin/users", s.createUser)
 		rt.With(s.requirePlatformAdmin).Get("/admin/users/{id}", s.getUser)
 		rt.With(s.requirePlatformAdmin).Patch("/admin/users/{id}", s.patchUser)
+
+		// The organisation registry is the most privileged of the three.
+		// Creating an organisation creates the Tenant realising it, and
+		// suspending one cascades to that tenant (ADR-IDENTITY-001 §7.1, §8.3)
+		// — so a caller who reached these routes could mint isolation
+		// boundaries and lock any customer out of the platform. organization is
+		// global and outside row-level security, which makes this middleware
+		// the only control in front of them (ADR-IDENTITY-002 §3.1).
+		rt.With(s.requirePlatformAdmin).Get("/admin/organizations", s.listOrganizations)
+		rt.With(s.requirePlatformAdmin).Post("/admin/organizations", s.createOrganization)
+		rt.With(s.requirePlatformAdmin).Get("/admin/organizations/{id}", s.getOrganization)
+		rt.With(s.requirePlatformAdmin).Patch("/admin/organizations/{id}", s.patchOrganization)
 
 		// Event delivery — webhook administration (admin permission).
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/webhooks", s.listWebhooks)

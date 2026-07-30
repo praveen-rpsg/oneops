@@ -1,6 +1,6 @@
 # Architecture guards
 
-The build-failing structural tier in `internal/arch/`. **50 guards across 15 files.**
+The build-failing structural tier in `internal/arch/`. **51 guards across 15 files.**
 
 A guard's strength is not what it asserts but **how it decides what to assert it over** — its
 subject set. A guard whose subjects are a written list pins only the instances someone
@@ -42,7 +42,8 @@ instance, and insufficient as the *only* enforcement of a class.
 | `invariant_registration_test.go` | `TestCheckAll_ShortCircuitsInOrder` | Invariant ordering | `platformInvariants` registry | **L4** |
 | `wiring_test.go` | `TestOperationalBinariesAreRegistered` | Unregistered privileged binary | `os.ReadDir("../../cmd")` | **L4** |
 | `wiring_test.go` | `TestOperationalScriptsAreRegistered` | Unregistered privileged script | `os.ReadDir("../../scripts")` | **L4** |
-| `scope_completeness_test.go` | `TestEveryTenantRegistryRoute_RequiresPlatformAdmin` | Platform operation under tenant scope | Whole-tree walk + justification map | **L3** |
+| `scope_completeness_test.go` | `TestEveryGlobalRegistryRoute_RequiresPlatformAdmin` | Global registry route under tenant scope | Schema minus `TenantOwnedTables`, cross-checked against the router + justification map | **L4** |
+| `wiring_test.go` | `TestEveryServerCapability_IsWiredAtTheCompositionRoot` | Declared server capability never wired in `main.go` | AST of the `httpapi` package + the composition root | **L4** |
 | `scope_completeness_test.go` | `TestEveryQueuedRowProducer_UsesDerivedIdentity` | Non-deterministic row identity | Whole-tree walk | **L3** |
 | `scope_completeness_test.go` | `TestEveryWorkerOutcomeWrite_UsesADetachedContext` | Outcome lost when the worker is stopped | Whole-tree walk | **L3** |
 | `scope_completeness_test.go` | `TestEveryWorkerRunLoop_ObservesCancellation` | Demoted leader keeps running workers | Whole-tree walk | **L3** |
@@ -151,5 +152,5 @@ It is written by hand and will drift. When adding a guard, add its row; when a g
 set moves from a list to the schema, the tree or a registry, move its row and delete its
 *Backed by* note.
 
-**Counts to check against the code:** 15 files in `internal/arch/`, 50 guards there, plus 2 in
+**Counts to check against the code:** 15 files in `internal/arch/`, 51 guards there, plus 2 in
 `internal/httpapi/contract_test.go`.

@@ -866,6 +866,127 @@ paths:
         '409': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/organizations:
+    get:
+      summary: List organizations, or resolve one by slug
+      description: >-
+        An Organization is a scope of Identity to which Policy attaches, realised
+        as an isolation boundary by exactly one Tenant (ADR-IDENTITY-001 §4).
+        The registry is global rather than tenant-scoped: `tenant_id` is
+        discovered BY reading this mapping, so scoping the mapping on it would be
+        circular (ADR-IDENTITY-002 §3.1). Supplying `slug` resolves a single
+        organization and returns a list of zero or one — the collection exists
+        whether or not anything in it matched, so a filter that finds nothing is
+        an empty page, not a 404. Paging is keyset over `org_id`, which is a ULID
+        and therefore ordered by creation.
+      operationId: listOrganizations
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: slug
+          in: query
+          description: Resolve a single organization by its addressable name.
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last org_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of organizations
+          content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Register an organization and the tenant realising it
+      description: >-
+        Creates the Identity scope AND its isolation boundary in one
+        transaction: both rows or neither (ADR-IDENTITY-001 §7.1). An
+        organization whose tenant was not created would be an Identity scope
+        with no isolation, and a tenant with no organization would be a boundary
+        nothing points at.
+
+
+        Neither identifier is accepted from the caller. Both are minted
+        server-side, so a caller cannot choose a tenant_id colliding with the
+        system tenant. The slug is unique across organizations and tenants
+        alike, so a slug already held by either is a conflict.
+      operationId: createOrganization
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateOrganizationRequest' } } }
+      responses:
+        '201':
+          description: Created organization
+          content: { application/json: { schema: { $ref: '#/components/schemas/Organization' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/organizations/{id}:
+    get:
+      summary: Get an organization
+      operationId: getOrganization
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The organization
+          content: { application/json: { schema: { $ref: '#/components/schemas/Organization' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Suspend or reactivate an organization
+      description: >-
+        Suspension is the only mutation the registry exposes, and it cascades to
+        the realising tenant in the same transaction (ADR-IDENTITY-001 §8.3).
+        The cascade is the point: the authentication boundary reads tenant
+        status, so suspending the organization alone would leave its tenant
+        serving requests for a scope nobody may enter.
+
+
+        An organization is never deleted. Governed objects are anchored to its
+        tenant by an append-only audit chain, so removing it would orphan
+        records that cannot themselves be removed.
+
+
+        `row_version` is required and is the version last read for this
+        organization. A stale value is a 409: the record changed underneath the
+        caller, who must re-read before deciding again.
+      operationId: patchOrganization
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PatchOrganizationRequest' } } }
+      responses:
+        '200':
+          description: Updated organization
+          content: { application/json: { schema: { $ref: '#/components/schemas/Organization' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
   /v1/admin/tenants:
     get:
       summary: List tenants
@@ -1293,6 +1414,53 @@ components:
         status:
           type: string
           enum: [invited, active, suspended, deactivated]
+    Organization:
+      type: object
+      required: [org_id, tenant_id, slug, name, status, row_version, created_at, updated_at]
+      properties:
+        org_id:
+          type: string
+          description: Platform-minted identifier. Never supplied by the caller.
+        tenant_id:
+          type: string
+          description: >-
+            The tenant realising this organization's isolation boundary, 1:1 and
+            enforced by constraint. It points AT the boundary rather than naming
+            this row's owner. Minted server-side alongside org_id.
+        slug:
+          type: string
+          description: Lowercase DNS-style label, 2-63 characters. Unique across organizations and tenants.
+          pattern: '^[a-z0-9][a-z0-9-]{1,62}$'
+        name: { type: string }
+        status:
+          type: string
+          enum: [active, suspended]
+        row_version: { type: integer, format: int64 }
+        created_at:  { type: string, format: date-time }
+        updated_at:  { type: string, format: date-time }
+    OrganizationList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Organization' }
+    CreateOrganizationRequest:
+      type: object
+      required: [slug, name]
+      properties:
+        slug:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9-]{1,62}$'
+        name: { type: string }
+    PatchOrganizationRequest:
+      type: object
+      required: [row_version, status]
+      properties:
+        row_version: { type: integer, format: int64, minimum: 1 }
+        status:
+          type: string
+          enum: [active, suspended]
     PatchTenantRequest:
       type: object
       required: [status]

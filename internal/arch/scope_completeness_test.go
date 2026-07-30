@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -19,11 +21,17 @@ import (
 // three routes someone remembered are gated, and says nothing about a fourth.
 // Every audit so far has found sibling instances behind exactly that shape.
 //
-// The subject set is derived from the router instead: the tenant registry lives
-// under /admin/tenants, so *every* route on that prefix must be registered
-// through requirePlatformAdmin. A new tenant route is covered the moment it is
-// added, without anyone remembering to update a list.
-func TestEveryTenantRegistryRoute_RequiresPlatformAdmin(t *testing.T) {
+// The subject set is derived twice over. Which tables are global comes from the
+// schema minus the tenant-ownership registry; which routes administer them
+// comes from the router. So a new global table fails this test until someone
+// says where it is administered, and a new route under an existing registry is
+// covered the moment it is added — neither depends on anyone updating a list.
+//
+// The rule generalises the original: row-level security is what confines an
+// /admin route to one customer's rows, and a global table has no policy at all.
+// For those tables requirePlatformAdmin is not one control among several, it is
+// the only one.
+func TestEveryGlobalRegistryRoute_RequiresPlatformAdmin(t *testing.T) {
 	const routerPath = "../httpapi/server.go"
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, routerPath, nil, 0)
@@ -31,12 +39,47 @@ func TestEveryTenantRegistryRoute_RequiresPlatformAdmin(t *testing.T) {
 		t.Fatalf("parse router: %v", err)
 	}
 
-	// The registry's route prefix. Anything mounted here administers tenants
-	// themselves, which is a platform operation regardless of which handler it
-	// happens to call.
-	const registryPrefix = "/admin/tenants"
+	// Where each global table is administered. A table mapped to "" exposes no
+	// admin route at all, which is a stronger claim than gating one and so is
+	// checked below rather than assumed.
+	//
+	// This map is the justified residue, not the subject set: the subject set is
+	// computed from the schema, and a global table missing from here fails.
+	globalRegistryPrefix := map[string]string{
+		// Resolving a token to a tenant precedes binding one, so the registry
+		// cannot be tenant-scoped (ADR-TENANCY-001 §4).
+		"tenant": "/admin/tenants",
+		// A person exists before, and independently of, any membership, so
+		// app_user carries no owner (ADR-IDENTITY-002 §3.1).
+		"app_user": "/admin/users",
+		// tenant_id is discovered BY reading this mapping; gating the mapping on
+		// it would be circular. Creating a row here creates a tenant, and
+		// suspending one cascades to that tenant (ADR-IDENTITY-001 §7.1, §8.3).
+		"organization": "/admin/organizations",
+		// Worker processing state, not customer data, and never exposed over
+		// HTTP. The empty prefix is checked: a route appearing under any of
+		// these names would make this justification false.
+		"webhook_cursor": "",
+		"policy_cursor":  "",
+	}
 
-	found := 0
+	for _, table := range globalTables(t) {
+		if _, ok := globalRegistryPrefix[table]; !ok {
+			t.Errorf("table %q is global — it is in the schema but not in TenantOwnedTables, so no "+
+				"row-level security policy confines it. Record where it is administered in "+
+				"globalRegistryPrefix, or \"\" if it is never exposed over HTTP", table)
+		}
+	}
+	for table := range globalRegistryPrefix {
+		if !slices.Contains(globalTables(t), table) {
+			t.Errorf("globalRegistryPrefix names %q, which is no longer a global table; a "+
+				"justification outliving its subject is how the map stops being read", table)
+		}
+	}
+
+	// Every route the router registers, with whatever it was registered With.
+	type route struct{ path, guard string }
+	var routes []route
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok || len(call.Args) == 0 {
@@ -55,7 +98,7 @@ func TestEveryTenantRegistryRoute_RequiresPlatformAdmin(t *testing.T) {
 		path := ""
 		for _, a := range call.Args {
 			if lit, ok := a.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-				if v := strings.Trim(lit.Value, `"`); strings.HasPrefix(v, registryPrefix) {
+				if v := strings.Trim(lit.Value, `"`); strings.HasPrefix(v, "/admin/") {
 					path = v
 				}
 			}
@@ -63,29 +106,111 @@ func TestEveryTenantRegistryRoute_RequiresPlatformAdmin(t *testing.T) {
 		if path == "" {
 			return true
 		}
-		found++
-
-		// The guard is whatever this route was registered With(...).
 		guard := ""
 		if with, ok := verb.X.(*ast.CallExpr); ok {
 			if withSel, ok := with.Fun.(*ast.SelectorExpr); ok && withSel.Sel.Name == "With" && len(with.Args) > 0 {
 				guard = exprTextOf(with.Args[0])
 			}
 		}
-		if !strings.Contains(guard, "requirePlatformAdmin") {
-			t.Errorf("route %s is registered with %q — every tenant-registry route must go "+
-				"through requirePlatformAdmin, because the registry is exempt from row-level "+
-				"security and that middleware is the only control between a caller and every "+
-				"customer's record (ADR-AUTHZ-001)", path, guard)
-		}
+		routes = append(routes, route{path, guard})
 		return true
 	})
-
-	if found == 0 {
-		t.Fatal("no tenant-registry routes found; the sweep would be vacuous — if the prefix " +
-			"moved, this guard must move with it")
+	if len(routes) == 0 {
+		t.Fatal("no /admin routes found; the sweep would be vacuous — if the router moved, this " +
+			"guard must move with it")
 	}
-	t.Logf("tenant-registry routes swept: %d", found)
+
+	swept := 0
+	for table, prefix := range globalRegistryPrefix {
+		if prefix == "" {
+			for _, r := range routes {
+				if strings.HasPrefix(r.path, "/admin/"+table) {
+					t.Errorf("route %s administers global table %q, which globalRegistryPrefix "+
+						"claims is never exposed over HTTP; the justification is now false",
+						r.path, table)
+				}
+			}
+			continue
+		}
+		found := 0
+		for _, r := range routes {
+			if !strings.HasPrefix(r.path, prefix) {
+				continue
+			}
+			found++
+			swept++
+			if !strings.Contains(r.guard, "requirePlatformAdmin") {
+				t.Errorf("route %s administers global table %q and is registered with %q — every "+
+					"route on a global registry must go through requirePlatformAdmin, because "+
+					"the table is outside row-level security and that middleware is the only "+
+					"control between a caller and every customer's record (ADR-AUTHZ-001)",
+					r.path, table, r.guard)
+			}
+		}
+		if found == 0 {
+			t.Errorf("globalRegistryPrefix maps %q to %q but no route is mounted there; either "+
+				"the prefix moved and this guard must move with it, or the registry is "+
+				"unexposed and the prefix should be \"\"", table, prefix)
+		}
+	}
+	t.Logf("global-registry routes swept: %d across %d tables", swept, len(globalRegistryPrefix))
+}
+
+// globalTables returns the schema's tables that TenantOwnedTables does not
+// claim: those with no row-level security policy confining them to one tenant.
+//
+// Both halves are read from source rather than restated. A table added to a
+// migration without being added to the ownership registry appears here
+// automatically, which is the whole point — that combination is exactly how a
+// table escapes isolation unnoticed.
+func globalTables(t *testing.T) []string {
+	t.Helper()
+	owned := tenantOwnedTables(t)
+
+	dir := "../store/migrate/sql"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read migrations: %v", err)
+	}
+	// CREATE TABLE [IF NOT EXISTS] <name>, capturing the name only.
+	create := regexp.MustCompile(`(?i)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)(.*)$`)
+
+	var out []string
+	seen := map[string]bool{}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		for _, line := range strings.Split(readFile(t, filepath.Join(dir, e.Name())), "\n") {
+			// Comments describe tables as often as statements create them, and a
+			// prose mention must not enter the subject set.
+			if strings.HasPrefix(strings.TrimSpace(line), "--") {
+				continue
+			}
+			m := create.FindStringSubmatch(line)
+			if m == nil {
+				continue
+			}
+			// A partition is not a table in its own right; its parent carries
+			// the policy, and sweeping both would demand a justification for a
+			// name no one administers.
+			if strings.Contains(strings.ToUpper(m[2]), "PARTITION OF") {
+				continue
+			}
+			name := m[1]
+			if seen[name] || slices.Contains(owned, name) {
+				continue
+			}
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("no global tables derived; the sweep would be vacuous — if the migration " +
+			"directory moved, this helper must move with it")
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Completeness sweep for producer identity (entry 15).

@@ -28,6 +28,11 @@ type fakeUsers struct {
 	// forwarded the caller's paging rather than substituting its own.
 	lastLimit int
 	lastAfter string
+	// setStatusCalls counts what reached the repository. The handler rejects an
+	// undefined status before the round trip; without this counter the
+	// repository's own validation returns the same 422 and the handler's check
+	// is unobservable — the test passed with the check deleted.
+	setStatusCalls int
 }
 
 func newFakeUsers(us ...*domain.User) *fakeUsers {
@@ -106,6 +111,7 @@ func (f *fakeUsers) UpdateProfile(_ context.Context, id string, rv int64, name s
 }
 
 func (f *fakeUsers) SetStatus(_ context.Context, id string, rv int64, st domain.UserStatus) (*domain.User, error) {
+	f.setStatusCalls++
 	// Mirrors UserStore.SetStatus: an undefined status is a validation failure,
 	// not a refused transition. A fake that skips this reports 409 where the
 	// real store reports 422, and the handler test then pins the wrong contract.
@@ -490,6 +496,34 @@ func TestUsers_PatchValidation(t *testing.T) {
 	if rec := userReq(t, h, http.MethodPatch, "/v1/admin/users/usr_missing", padmin,
 		`{"row_version":1,"status":"active"}`); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown user: got %d, want 404", rec.Code)
+	}
+}
+
+// The 422 above does not prove the handler checked the status: the repository
+// validates too and answers 422 for the same input, so the assertion held with
+// the handler's check deleted. What the transport rule asserts is that an
+// undefined status never reaches the repository at all.
+func TestUsers_PatchUndefinedStatusNeverReachesTheRepository(t *testing.T) {
+	u, err := domain.NewUser("prefilter@example.com", "Prefilter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.RowVersion = 1
+	repo := newFakeUsers(u)
+	h := newUserAPI(t, repo)
+	path := "/v1/admin/users/" + u.UserID
+
+	for _, st := range []string{"banned", "ACTIVE", "", "archived", "unknown"} {
+		rec := userReq(t, h, http.MethodPatch, path, padmin,
+			`{"row_version":1,"status":"`+st+`"}`)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("status=%q: got %d, want 422 (body %s)", st, rec.Code, rec.Body.String())
+		}
+	}
+	if repo.setStatusCalls != 0 {
+		t.Errorf("the repository was called %d times for undefined statuses; the handler must "+
+			"reject them before the round trip, not rely on the store to repeat the check",
+			repo.setStatusCalls)
 	}
 }
 

@@ -700,3 +700,104 @@ func TestWorkersStartOnlyUnderLeadership(t *testing.T) {
 		return true
 	})
 }
+
+// wiringOptional lists Server setters that main.go deliberately never calls.
+//
+// It is empty, and that is the point: every capability the server exposes is
+// wired at the composition root. An entry here is a claim that a set of routes
+// is meant to answer 501 in production, which needs a reason as specific as the
+// exemptions above.
+var wiringOptional = map[string]string{}
+
+// TestEveryServerCapability_IsWiredAtTheCompositionRoot fails when the server
+// declares a Set* dependency that main.go never supplies.
+//
+// The failure this catches is silent by construction. Each Set* guards its
+// routes with a nil check that answers 501, so an unwired registry compiles,
+// passes every handler test against a fake, serves a well-formed response, and
+// is simply absent from the running service. The user registry shipped that way
+// and was found only by comparing the two files by hand — no test could fail,
+// because no test looked at main.go.
+//
+// Both sides are derived: the setters from the httpapi package's declarations,
+// the calls from the composition root's AST. A new capability is covered the
+// moment its setter is declared.
+func TestEveryServerCapability_IsWiredAtTheCompositionRoot(t *testing.T) {
+	declared := map[string]token.Position{}
+	fset := token.NewFileSet()
+
+	entries, err := os.ReadDir("../httpapi")
+	if err != nil {
+		t.Fatalf("read httpapi package: %v", err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join("../httpapi", name), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || !strings.HasPrefix(fn.Name.Name, "Set") || !fn.Name.IsExported() {
+				continue
+			}
+			// The receiver must be *Server; a Set* on any other type is not a
+			// server capability.
+			star, ok := fn.Recv.List[0].Type.(*ast.StarExpr)
+			if !ok {
+				continue
+			}
+			if id, ok := star.X.(*ast.Ident); !ok || id.Name != "Server" {
+				continue
+			}
+			declared[fn.Name.Name] = fset.Position(fn.Pos())
+		}
+	}
+	if len(declared) == 0 {
+		t.Fatal("no Server setters found; the sweep would be vacuous — if the server moved, " +
+			"this guard must move with it")
+	}
+
+	main, err := parser.ParseFile(fset, mainFile, nil, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	called := map[string]bool{}
+	ast.Inspect(main, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && strings.HasPrefix(sel.Sel.Name, "Set") {
+			called[sel.Sel.Name] = true
+		}
+		return true
+	})
+
+	for name, pos := range declared {
+		if called[name] {
+			if _, optional := wiringOptional[name]; optional {
+				t.Errorf("%s is listed in wiringOptional but main.go does call it; a stale "+
+					"exemption hides the next capability that is genuinely unwired", name)
+			}
+			continue
+		}
+		if _, optional := wiringOptional[name]; optional {
+			continue
+		}
+		t.Errorf("Server.%s is declared at %s but main.go never calls it: the routes it guards "+
+			"answer 501 in production while every test passes against a fake. Wire it at the "+
+			"composition root, or record in wiringOptional why it must stay unwired", name, pos)
+	}
+
+	for name := range wiringOptional {
+		if _, ok := declared[name]; !ok {
+			t.Errorf("wiringOptional names %s, which the server no longer declares; a "+
+				"justification outliving its subject is how the list stops being read", name)
+		}
+	}
+	t.Logf("server capabilities swept: %d declared, %d wired", len(declared), len(called))
+}

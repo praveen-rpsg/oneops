@@ -417,6 +417,18 @@ func run(logger *slog.Logger) error {
 	// from row-level security for the same reason (ADR-TENANCY-001 §4).
 	srv.SetTenants(postgres.NewTenantStore(pool))
 
+	// Identity registries. Both are global (ADR-IDENTITY-002 §3.1) and outside
+	// row-level security, so — unlike the tenant registry above — they need no
+	// exemption from the tenant-scoped pool: no policy applies to app_user or
+	// organization, and oneops_app holds the grants for both. Binding them to
+	// the scoped pool keeps the privileged pool's surface as small as it was.
+	//
+	// The organisation registry writes the `tenant` row too, inside one
+	// transaction (ADR-IDENTITY-001 §7.1); `tenant` is likewise outside RLS and
+	// grantable, so the scoped role can complete that write.
+	srv.SetUsers(postgres.NewUserStore(appPool))
+	srv.SetOrganizations(postgres.NewOrganizationStore(appPool))
+
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.
 	diagBuilder := buildDiagnostics(cfg, startedAt, pool, scheduler)
