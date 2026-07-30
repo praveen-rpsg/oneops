@@ -73,7 +73,12 @@ func TestEveryGlobalRegistryRoute_RequiresPlatformAdmin(t *testing.T) {
 		// would NOT be caught by this justification going stale. Changing the
 		// prefix here is therefore a required part of that story, not an
 		// optional tidy-up.
-		"admin_audit_event":      "",
+		// OPS-S038 mounted the constitutional read boundary here. Every route
+		// under this prefix must go through requirePlatformAdmin, which the
+		// sweep below now enforces for real — while the prefix was "" it
+		// enforced nothing, because that branch only looks for routes named
+		// after the table itself.
+		"admin_audit_event":      "/admin/audit",
 		"admin_audit_chain_head": "",
 	}
 

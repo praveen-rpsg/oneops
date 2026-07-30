@@ -79,7 +79,8 @@ type Server struct {
 
 	// User registry; nil until SetUsers. app_user is global (ADR-IDENTITY-002
 	// §3), so nothing here is tenant-scoped.
-	users domain.UserRepository
+	users      domain.UserRepository
+	adminAudit domain.AdminAuditReader
 
 	// Organisation registry; nil until SetOrganizations. organization is global
 	// for the same reason (ADR-IDENTITY-002 §3.1): tenant_id is discovered BY
@@ -271,6 +272,13 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePlatformAdmin).Post("/admin/organizations", s.createOrganization)
 		rt.With(s.requirePlatformAdmin).Get("/admin/organizations/{id}", s.getOrganization)
 		rt.With(s.requirePlatformAdmin).Patch("/admin/organizations/{id}", s.patchOrganization)
+
+		// Administrative audit — the constitutional read boundary
+		// (ADR-AUDIT-007 §6.5). Platform administrators only: the table is
+		// outside row-level security by §6.4, and the store behind this route
+		// is built from the privileged pool so the request-path database role
+		// holds no read access of its own. There is exactly one read path.
+		rt.With(s.requirePlatformAdmin).Get("/admin/audit/events", s.listAdminAudit)
 
 		// Event delivery — webhook administration (admin permission).
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/webhooks", s.listWebhooks)

@@ -866,6 +866,71 @@ paths:
         '409': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/audit/events:
+    get:
+      summary: Query administrative audit history
+      description: >-
+        The constitutional read boundary for administrative audit
+        (ADR-AUDIT-007 §6.5). Administrative acts — user, organization,
+        membership, invitation and tenant mutations — are recorded on a store
+        separate from the constitutional audit chain, are never delivered to
+        webhook subscribers, and are readable only here and only by platform
+        administrators. The store is deliberately outside row-level security
+        (§6.4), so this middleware and the privileged database role behind it
+        are the isolation.
+        Ordering is newest first over (occurred_at, chain_id, seq). That tuple
+        is a total order — occurred_at alone is not unique, because one
+        administrative act can write sibling records on the same timestamp — so
+        the keyset cursor can neither skip a row nor repeat one. `payload_canonical`
+        is the exact byte sequence the chain hash was computed over, so a caller
+        can verify a record rather than trust this rendering of it.
+      operationId: listAdminAuditEvents
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: actor
+          in: query
+          description: Who performed the act.
+          schema: { type: string }
+        - name: operation
+          in: query
+          description: What was done, e.g. `user.created`.
+          schema: { type: string }
+        - name: subject_org_id
+          in: query
+          description: The organization acted upon.
+          schema: { type: string }
+        - name: subject_tenant_id
+          in: query
+          description: The tenant acted upon.
+          schema: { type: string }
+        - name: subject_user_id
+          in: query
+          description: The user acted upon.
+          schema: { type: string }
+        - name: from
+          in: query
+          description: Inclusive lower bound on occurred_at, RFC 3339.
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          description: Inclusive upper bound on occurred_at, RFC 3339.
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Opaque keyset cursor returned as next_cursor by the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of administrative audit records
+          content: { application/json: { schema: { $ref: '#/components/schemas/AdminAuditList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/organizations:
     get:
       summary: List organizations, or resolve one by slug
@@ -1332,6 +1397,32 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/GovernanceResponse' }
   schemas:
+    AdminAuditRecord:
+      type: object
+      properties:
+        chain_id: { type: string }
+        seq: { type: integer, format: int64 }
+        event_id: { type: string }
+        operation: { type: string }
+        actor: { type: string }
+        subject_org_id: { type: string }
+        subject_tenant_id: { type: string }
+        subject_user_id: { type: string }
+        payload_canonical:
+          type: string
+          format: byte
+          description: The canonical bytes the chain hash was computed over.
+        this_hash: { type: string, format: byte }
+        occurred_at: { type: string, format: date-time }
+    AdminAuditList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AdminAuditRecord' }
+        next_cursor:
+          type: string
+          description: Present only when a further page exists.
     Tenant:
       type: object
       required: [tenant_id, slug, name, status, row_version, created_at, updated_at]

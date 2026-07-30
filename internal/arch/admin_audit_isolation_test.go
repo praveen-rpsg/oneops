@@ -187,6 +187,54 @@ func administrativeTables(t *testing.T, funcs []funcBody) (tables map[string]boo
 // is defined by.
 var chokepointName = strings.TrimSuffix(chokepointCall, "(")
 
+// portMethods returns the method names declared by interfaces in packages the
+// predicate accepts. Ports are how a consumer reaches an implementation, so the
+// package an interface is declared in says who it serves: this codebase puts an
+// aggregate's own repository port in the domain package and a consumer-specific
+// port beside its consumer.
+func portMethods(t *testing.T, accept func(dir string) bool) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	for _, gf := range goFilesUnder(t, "..") {
+		dir := gf.path[:strings.LastIndex(gf.path, "/")]
+		if !accept(dir) {
+			continue
+		}
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, gf.path, gf.src, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", gf.path, err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			it, ok := n.(*ast.InterfaceType)
+			if !ok || it.Methods == nil {
+				return true
+			}
+			for _, m := range it.Methods.List {
+				for _, nm := range m.Names {
+					out[nm.Name] = true
+				}
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// domainPkgDir is the package that declares aggregate ports, found as the
+// package declaring the administrative operation vocabulary rather than named.
+func domainPkgDir(t *testing.T) string {
+	t.Helper()
+	for _, gf := range goFilesUnder(t, "..") {
+		if strings.Contains(gf.src, "type AdminAuditReader interface") {
+			return gf.path[:strings.LastIndex(gf.path, "/")]
+		}
+	}
+	t.Fatal("no package declares the administrative audit read port — the constitutional read " +
+		"boundary has been removed or renamed and this guard can no longer locate it")
+	return ""
+}
+
 // HALF ONE — nothing outside the administrative write path may read an
 // administrative table.
 //
@@ -207,7 +255,15 @@ func TestAdministrativeTables_AreUnreadableOutsideTheWritePath(t *testing.T) {
 	}
 	sort.Strings(names)
 
+	// The constitutional read boundary: methods declared by a port in the
+	// package that owns aggregate ports. Exactly one function may read
+	// administrative history through it — "no alternative read path may exist"
+	// is the story's invariant, so the count is asserted, not the name.
+	domainDir := domainPkgDir(t)
+	readPort := portMethods(t, func(dir string) bool { return dir == domainDir })
+
 	readers := 0
+	constitutionalReaders := []string{}
 	for _, f := range funcs {
 		touched := tablesIn(f.src)
 		var hit []string
@@ -233,6 +289,10 @@ func TestAdministrativeTables_AreUnreadableOutsideTheWritePath(t *testing.T) {
 		if inWritePath || catalogue {
 			continue
 		}
+		if readPort[f.name] {
+			constitutionalReaders = append(constitutionalReaders, f.pkgDir+"."+f.name)
+			continue
+		}
 		sort.Strings(hit)
 		t.Errorf("%s.%s references %s but is neither part of the administrative write path nor a "+
 			"catalogue validator. Administrative audit is not an event source: anything that can "+
@@ -243,7 +303,15 @@ func TestAdministrativeTables_AreUnreadableOutsideTheWritePath(t *testing.T) {
 		t.Fatalf("no function anywhere references %v — the derivation found tables nothing uses, "+
 			"so this sweep proves nothing", names)
 	}
-	t.Logf("administrative tables derived: %v; functions referencing them: %d", names, readers)
+	// Exactly one read path, derived rather than named. Two implementations of
+	// the port would be two answers to who may see this data.
+	if len(constitutionalReaders) != 1 {
+		t.Errorf("administrative history has %d constitutional read paths %v, want exactly 1 — "+
+			"ADR-AUDIT-007 §6.5 admits one query surface and no alternative",
+			len(constitutionalReaders), constitutionalReaders)
+	}
+	t.Logf("administrative tables derived: %v; functions referencing them: %d; "+
+		"constitutional read paths: %v", names, readers, constitutionalReaders)
 }
 
 // HALF TWO — the tables the delivery path reads must not be tables the
@@ -261,31 +329,15 @@ func TestAdministrativeWritePath_AndDeliveryPath_AreDisjoint(t *testing.T) {
 	funcs := allFuncs(t)
 	adminTables, _, writePathDir := administrativeTables(t, funcs)
 
-	portMethods := map[string]bool{}
-	for _, gf := range goFilesUnder(t, "..") {
-		dir := gf.path[:strings.LastIndex(gf.path, "/")]
-		if dir == writePathDir {
-			continue // a port is declared by the consumer, not the implementation
-		}
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, gf.path, gf.src, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", gf.path, err)
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			it, ok := n.(*ast.InterfaceType)
-			if !ok || it.Methods == nil {
-				return true
-			}
-			for _, m := range it.Methods.List {
-				for _, nm := range m.Names {
-					portMethods[nm.Name] = true
-				}
-			}
-			return true
-		})
-	}
-	if len(portMethods) == 0 {
+	// A DELIVERY port is one a consumer declares for itself, beside its own
+	// worker — as distinct from an aggregate's repository port, which this
+	// codebase declares in the domain package. The administrative read port is
+	// the latter, so it is correctly not part of the delivery surface.
+	domainDir := domainPkgDir(t)
+	ports := portMethods(t, func(dir string) bool {
+		return dir != writePathDir && dir != domainDir
+	})
+	if len(ports) == 0 {
 		t.Fatal("derived no port method — no interface was found outside the store package, so " +
 			"the delivery surface is unknown and this assertion would be vacuous")
 	}
@@ -293,7 +345,7 @@ func TestAdministrativeWritePath_AndDeliveryPath_AreDisjoint(t *testing.T) {
 	observable := map[string]bool{}
 	served := 0
 	for _, f := range funcs {
-		if f.pkgDir != writePathDir || !portMethods[f.name] {
+		if f.pkgDir != writePathDir || !ports[f.name] {
 			continue
 		}
 		served++

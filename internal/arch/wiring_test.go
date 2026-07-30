@@ -54,6 +54,15 @@ var wiringExemptions = map[string]string{
 
 	// Diagnostics and administration snapshots describe the process and its
 	// dependencies, not tenant rows.
+	// Administrative audit is global and outside row-level security by
+	// ADR-AUDIT-007 §6.4. Binding the reader to the tenant pool would require
+	// granting its role SELECT on the administrative trail, which is the one
+	// grant the store exists to withhold: with no policy to confine it, every
+	// request connection would hold read access to every customer's
+	// administrative history. The exemption buys least privilege at the
+	// database, where it cannot be forgotten.
+	"SetAdminAudit": "administrative audit must stay unreadable by the tenant role",
+
 	"SetAdmin":       "process diagnostics, not tenant data",
 	"SetDiagnostics": "process diagnostics, not tenant data",
 }

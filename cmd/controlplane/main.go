@@ -428,6 +428,13 @@ func run(logger *slog.Logger) error {
 	// grantable, so the scoped role can complete that write.
 	srv.SetUsers(postgres.NewUserStore(appPool))
 	srv.SetOrganizations(postgres.NewOrganizationStore(appPool))
+	// The administrative audit reader is built from the PRIVILEGED pool, and
+	// that is the least-privilege choice rather than a shortcut: the tenant
+	// pool's role holds no read access to administrative history, and granting
+	// it any would put every customer's trail one statement away from the
+	// request path on a table that has no row-level security by design
+	// (ADR-AUDIT-007 §6.4, §6.5).
+	srv.SetAdminAudit(postgres.NewAdminAuditQueryStore(pool))
 
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.
