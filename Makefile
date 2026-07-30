@@ -6,7 +6,7 @@ LDFLAGS := -s -w -X $(PKG)/pkg/version.Version=$(VERSION) -X $(PKG)/pkg/version.
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down build run test test-integration cover lint fmt vet tidy docker gen migrate-hash migrate-validate clean db-backup db-restore dr-drill db-reset web web-test contract-breaking
+.PHONY: help up down build run test test-integration cover lint fmt vet tidy docker migrate-hash migrate-validate clean db-backup db-restore dr-drill db-reset web web-test contract-breaking
 
 MIGRATIONS_DIR := internal/store/migrate/sql
 ATLAS := docker run --rm -v "$(PWD)":/src -w /src arigaio/atlas:latest
@@ -96,11 +96,6 @@ test-integration: ## Run integration tests (TEST_DATABASE_URL, from .env if pres
 
 docker: ## Build the container image
 	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t oneops/controlplane:$(VERSION) .
-
-gen: ## Generate the Go SDK from the OpenAPI contract
-	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.4.1 \
-		-generate types,client -package oneops \
-		-o sdk/go/client.gen.go internal/httpapi/openapi.yaml
 
 migrate-hash: ## Recompute the Atlas migration checksum (atlas.sum)
 	$(ATLAS) migrate hash --dir "file://$(MIGRATIONS_DIR)"
