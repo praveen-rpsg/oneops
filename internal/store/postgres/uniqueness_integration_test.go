@@ -41,6 +41,12 @@ var serverGeneratedIdentifiers = map[string]string{
 	"webhook_replay_job_pkey":     "id is server-minted",
 	"policy_pkey":                 "id is server-minted",
 	"policy_execution_pkey":       "id is server-minted",
+
+	// Identity (ADR-IDENTITY-002 §2.3, §2.4).
+	"membership_pkey":        "membership_id is server-minted",
+	"invitation_pkey":        "invitation_id is server-minted",
+	"uq_invitation_token":    "token_hash is the hash of a server-generated token; the client never chooses it",
+	"uq_membership_org_user": "org_id stands 1:1 with a tenant so the pair cannot span tenants; user_id is server-minted",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

@@ -64,6 +64,14 @@ var keyScopeJustifications = map[string]string{
 	"audit_event.pk_audit_event":                         "keyed by chain_id (a cfg_id); seq is assigned under the chain-head lock (ADR-AUDIT-006)",
 	"audit_event.uq_audit_event_id":                      "keyed by chain_id; event_id derives from the client's Idempotency-Key but is confined to that chain, so two tenants cannot collide",
 	"audit_event.uq_audit_this_hash":                     "keyed by chain_id; this_hash is computed by the platform",
+
+	// Identity (ADR-IDENTITY-002 §2.3, §2.4). Every column below is server-minted
+	// or already tenant-determining, so no client can occupy a value that denies
+	// or absorbs another tenant's write.
+	"membership.membership_pkey":        "membership_id is platform-generated; clients never supply it",
+	"invitation.invitation_pkey":        "invitation_id is platform-generated; clients never supply it",
+	"invitation.uq_invitation_token":    "token_hash is the hash of a server-generated token — a client cannot choose the value (ADR-IDENTITY-002 §2.4)",
+	"membership.uq_membership_org_user": "keyed by org_id, which stands 1:1 with a tenant (ADR-IDENTITY-001 §4), so the pair is confined to one tenant by construction; user_id is platform-generated",
 }
 
 func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {

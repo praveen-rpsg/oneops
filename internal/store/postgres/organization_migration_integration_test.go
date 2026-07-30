@@ -208,6 +208,17 @@ func TestOrganizationMigration_AppliesAndRollsBackOnPopulatedDatabase(t *testing
 			"would be exercised against no data")
 	}
 
+	// membership and invitation reference organization, so their rollback runs
+	// first. TestMembership_BlocksTheOrganizationRollbackUntilItIsGone asserts
+	// the refusal that makes this ordering mandatory.
+	mDown, err := os.ReadFile("../migrate/rollback/20260804000004_membership.down.sql")
+	if err != nil {
+		t.Fatalf("read membership rollback: %v", err)
+	}
+	if _, err := tx.Exec(ctx, string(mDown)); err != nil {
+		t.Fatalf("roll back membership before organization: %v", err)
+	}
+
 	if _, err := tx.Exec(ctx, string(down)); err != nil {
 		t.Fatalf("apply rollback on a populated table: %v", err)
 	}

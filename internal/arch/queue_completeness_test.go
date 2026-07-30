@@ -23,17 +23,44 @@ import (
 func TestEveryWorkQueue_HasAFencingToken(t *testing.T) {
 	sql := readMigrations(t)
 
+	// A pending-defaulted status column is the signature of claimed work, but it
+	// is not proof of it: a table can model a lifecycle that merely starts at
+	// 'pending' without anything ever leasing a row. Those are justified here,
+	// with the reason, rather than renamed to evade the sweep — the pattern
+	// EVR-005 established, where a derived subject set carries a justified
+	// residue and a stale justification also fails.
+	notAWorkQueue := map[string]string{
+		"invitation": "an invitation is not claimed work: no worker competes for it, " +
+			"nothing leases it, and it has no outcome to fence. Its status is a " +
+			"lifecycle that begins at 'pending' (ADR-IDENTITY-002 §2.4, §7 C-4)",
+	}
+
 	// A work queue: a table whose status column defaults to 'pending'.
 	tableRe := regexp.MustCompile(`(?s)CREATE TABLE IF NOT EXISTS (\w+) \((.*?)\n\);`)
 	queues := map[string]bool{}
+	detected := map[string]bool{}
 	for _, m := range tableRe.FindAllStringSubmatch(sql, -1) {
 		name, body := m[1], m[2]
 		if strings.Contains(body, "status") && strings.Contains(body, "'pending'") {
-			queues[name] = true
+			detected[name] = true
+			if _, justified := notAWorkQueue[name]; !justified {
+				queues[name] = true
+			}
 		}
 	}
 	if len(queues) == 0 {
 		t.Fatal("no work-queue tables detected; the sweep would be vacuous")
+	}
+
+	// A justification must still describe reality. One naming a table the sweep
+	// no longer detects is stale, and a stale exemption is how a real queue
+	// eventually slips through under a name someone once excused.
+	for name, why := range notAWorkQueue {
+		if !detected[name] {
+			t.Errorf("%q is excused from the work-queue sweep (%s) but no table of that "+
+				"name has a pending-defaulted status column — the justification is stale "+
+				"and must be removed", name, why)
+		}
 	}
 
 	for q := range queues {

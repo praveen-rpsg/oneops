@@ -81,6 +81,18 @@ func TestAppUserMigration_AppliesAndRollsBackOnPopulatedDatabase(t *testing.T) {
 		t.Error("ck_user_status accepted a state outside the ratified lifecycle")
 	}
 
+	// membership and invitation reference app_user, so their rollback must run
+	// first — PostgreSQL refuses to drop a referenced table, which is the
+	// ordering protection documented in 20260804000004's rollback, not an
+	// obstacle to work around.
+	mDown, err := os.ReadFile("../migrate/rollback/20260804000004_membership.down.sql")
+	if err != nil {
+		t.Fatalf("read membership rollback: %v", err)
+	}
+	if _, err := tx.Exec(ctx, string(mDown)); err != nil {
+		t.Fatalf("roll back membership before app_user: %v", err)
+	}
+
 	// Roll back.
 	if _, err := tx.Exec(ctx, string(down)); err != nil {
 		t.Fatalf("apply rollback on a populated table: %v", err)
