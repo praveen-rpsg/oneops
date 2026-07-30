@@ -343,6 +343,15 @@ func TestUserStore_ListPaginates(t *testing.T) {
 		ON CONFLICT DO NOTHING`, maxUserPageSize+5); err != nil {
 		t.Fatalf("bulk seed: %v", err)
 	}
+	// These rows exist only to make the cap observable. Left behind they slow
+	// every later query in this package and, because packages run in parallel,
+	// add contention to the timing-sensitive leader-election tests in
+	// internal/ops — which is how a correctness test starts failing for reasons
+	// that have nothing to do with correctness.
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM app_user WHERE user_id LIKE 'usr_bulk_%'`)
+	})
 
 	over, err := s.List(ctx, maxUserPageSize*10, "")
 	if err != nil {
