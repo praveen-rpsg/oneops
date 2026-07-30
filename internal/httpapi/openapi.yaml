@@ -931,6 +931,91 @@ paths:
         '422': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/memberships:
+    get:
+      summary: List an organization's memberships
+      description: >-
+        Membership is tenant-owned and under row-level security, so the result
+        is confined to the caller's tenant by the database rather than by a
+        predicate. An org_id belonging to another tenant returns an empty page,
+        not a refusal: the rows are invisible, and invisible is deliberately
+        indistinguishable from absent. Paging is keyset over `membership_id`,
+        which is a ULID and therefore ordered by creation.
+      operationId: listMemberships
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: org_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last membership_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of memberships
+          content: { application/json: { schema: { $ref: '#/components/schemas/MembershipList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Grant a membership
+      description: >-
+        Binds a user to an organization. The tenant is taken from the bound
+        connection and never from the request, so a caller cannot plant a
+        membership inside another boundary. Re-granting a revoked membership
+        reactivates it rather than creating a second row; an already-active
+        membership is returned unchanged. Every grant writes an administrative
+        audit record in the same transaction (ADR-AUDIT-007 §6.9).
+      operationId: grantMembership
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GrantMembershipRequest' }
+      responses:
+        '201':
+          description: The membership
+          content: { application/json: { schema: { $ref: '#/components/schemas/Membership' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/memberships/{id}:
+    delete:
+      summary: Revoke a membership
+      description: >-
+        Withdraws a membership. The row is NOT deleted — revocation is a state
+        change, so the administrative record of the grant keeps a subject to
+        point at (ADR-IDENTITY-001 §8.3) — and the revoked membership is
+        returned rather than an empty response so the caller can see that. Safe
+        to call twice: an already-revoked membership is a conflict, not a second
+        revocation. Writes an administrative audit record in the same
+        transaction.
+      operationId: revokeMembership
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The revoked membership
+          content: { application/json: { schema: { $ref: '#/components/schemas/Membership' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/organizations:
     get:
       summary: List organizations, or resolve one by slug
@@ -1397,6 +1482,28 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/GovernanceResponse' }
   schemas:
+    Membership:
+      type: object
+      properties:
+        membership_id: { type: string }
+        org_id: { type: string }
+        user_id: { type: string }
+        status: { type: string, enum: [active, revoked] }
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    MembershipList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Membership' }
+    GrantMembershipRequest:
+      type: object
+      required: [org_id, user_id]
+      properties:
+        org_id: { type: string }
+        user_id: { type: string }
     AdminAuditRecord:
       type: object
       properties:

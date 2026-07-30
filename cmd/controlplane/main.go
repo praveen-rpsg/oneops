@@ -435,6 +435,9 @@ func run(logger *slog.Logger) error {
 	// request path on a table that has no row-level security by design
 	// (ADR-AUDIT-007 §6.4, §6.5).
 	srv.SetAdminAudit(postgres.NewAdminAuditQueryStore(pool))
+	// Tenant-owned and under row-level security, so the tenant-scoped pool is
+	// correct and no exemption is needed.
+	srv.SetMemberships(postgres.NewMembershipStore(appPool))
 
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.

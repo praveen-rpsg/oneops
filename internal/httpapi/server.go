@@ -79,8 +79,9 @@ type Server struct {
 
 	// User registry; nil until SetUsers. app_user is global (ADR-IDENTITY-002
 	// §3), so nothing here is tenant-scoped.
-	users      domain.UserRepository
-	adminAudit domain.AdminAuditReader
+	users       domain.UserRepository
+	adminAudit  domain.AdminAuditReader
+	memberships domain.MembershipRepository
 
 	// Organisation registry; nil until SetOrganizations. organization is global
 	// for the same reason (ADR-IDENTITY-002 §3.1): tenant_id is discovered BY
@@ -279,6 +280,21 @@ func (s *Server) routes() *chi.Mux {
 		// is built from the privileged pool so the request-path database role
 		// holds no read access of its own. There is exactly one read path.
 		rt.With(s.requirePlatformAdmin).Get("/admin/audit/events", s.listAdminAudit)
+
+		// Membership administration. Unlike users and organizations, membership
+		// is TENANT-OWNED: it is in TenantOwnedTables and carries row-level
+		// security, so the isolation is the database policy and the permission
+		// is the tenant-administration tier, as it is for webhooks and policies.
+		// requirePlatformAdmin would be wrong twice over — it is not a platform
+		// registry, and that middleware requires the system tenant, whose
+		// connection the policy would confine to system rows.
+		//
+		// Mounted here rather than under /admin/organizations deliberately: that
+		// prefix is a global registry, and every route beneath it must be
+		// platform-admin.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/memberships", s.listMemberships)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/memberships", s.grantMembership)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/memberships/{id}", s.revokeMembership)
 
 		// Event delivery — webhook administration (admin permission).
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/webhooks", s.listWebhooks)

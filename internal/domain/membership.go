@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"strings"
 	"time"
 )
@@ -86,4 +87,21 @@ func NewMembership(orgID, tenantID, userID string) (*Membership, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// MembershipRepository is the port for administering memberships.
+//
+// Membership is TENANT-OWNED: it is in TenantOwnedTables and carries row-level
+// security, unlike app_user and organization, which are global. Isolation is
+// therefore the database policy, not a predicate a caller must remember, and
+// these methods take no tenant argument for that reason — the bound connection
+// already is the boundary (ADR-TENANCY-001, ADR-TENANCY-002).
+//
+// There is no Delete. Revoking a membership is a state change: the row survives
+// so the administrative record of the grant and its withdrawal keeps a subject
+// to point at (ADR-IDENTITY-001 §8.3).
+type MembershipRepository interface {
+	Grant(ctx context.Context, m *Membership) (*Membership, error)
+	Revoke(ctx context.Context, membershipID string) (*Membership, error)
+	ListByOrg(ctx context.Context, orgID string, limit int, after string) ([]*Membership, error)
 }
