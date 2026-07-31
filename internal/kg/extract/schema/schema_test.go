@@ -51,7 +51,7 @@ func TestEveryTableIsANode(t *testing.T) {
 	// Named rather than derived: a second derivation sharing this one's regexes
 	// would agree with it about anything, including a mistake.
 	want := []string{
-		"admin_audit_chain_head", "admin_audit_event", "app_user", "artifact_version",
+		"admin_audit_chain_head", "admin_audit_event", "app_user", "approval_record", "artifact_version",
 		"audit_chain_head", "audit_event", "audit_event_default", "configuration_metadata",
 		"configuration_object", "dependency_edge", "idempotency_key", "invitation",
 		"membership", "notification", "organization", "policy", "policy_cursor", "policy_execution",
@@ -98,8 +98,8 @@ func TestCommentsDoNotDeclareObjects(t *testing.T) {
 func TestIndexOnClauseMaySpanLines(t *testing.T) {
 	nodes, edges := extract(t)
 	idx := byKind(nodes)[kindIndex]
-	if len(idx) != 47 {
-		t.Errorf("extracted %d indexes, want 47", len(idx))
+	if len(idx) != 48 {
+		t.Errorf("extracted %d indexes, want 48", len(idx))
 	}
 	// ix_webhook_delivery_due declares ON on a following line.
 	const want = "index:ix_webhook_delivery_due"
@@ -282,7 +282,7 @@ func TestCorpusCensus(t *testing.T) {
 		got[n.Kind]++
 	}
 	want := map[string]int{
-		kindTable: 26, kindColumn: 221, kindIndex: 47, kindConstraint: 62, kindTrigger: 4,
+		kindTable: 27, kindColumn: 226, kindIndex: 48, kindConstraint: 63, kindTrigger: 4,
 	}
 	for kind, w := range want {
 		if got[kind] != w {
@@ -399,16 +399,16 @@ func TestMultiLineAlterTableIsExtracted(t *testing.T) {
 		}
 	}
 
-	// Twenty tables carry the discriminator. Anything less is a wrong answer
-	// to the question the graph exists to answer.
+	// Twenty-one tables carry the discriminator. Anything less is a wrong
+	// answer to the question the graph exists to answer.
 	scoped := 0
 	for _, n := range nodes {
 		if strings.HasSuffix(n.ID, ".tenant_id") && n.Kind == kindColumn {
 			scoped++
 		}
 	}
-	if scoped != 20 {
-		t.Errorf("%d tables carry tenant_id, want 20", scoped)
+	if scoped != 21 {
+		t.Errorf("%d tables carry tenant_id, want 21", scoped)
 	}
 
 	// A multi-line declaration must still be owned by its table.

@@ -254,7 +254,16 @@ func run(logger *slog.Logger) error {
 	}
 	engine.SetReplacementTester(replacementTest)
 
+	// Multi-approver approval quorum (ADR-GOV-005). Wiring is additive: it
+	// changes no existing operation for any tenant whose
+	// governance_required_approvals stays at its default of 1. Without it the
+	// engine refuses Approval outright (ErrApprovalRecorderUnavailable) rather
+	// than approving on an unenforced quorum.
+	approvalStore := postgres.NewApprovalStore(appPool)
+	engine.SetApprovalRecorder(approvalStore)
+
 	srv.SetGovernance(engine)
+	srv.SetApprovals(approvalStore)
 
 	httpServer := srv.HTTPServer()
 

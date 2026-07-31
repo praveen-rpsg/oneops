@@ -370,6 +370,56 @@ func (s *Server) getVerification(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// approverDTO is one recorded distinct approval (ADR-GOV-005).
+type approverDTO struct {
+	ApproverUserID string    `json:"approver_user_id"`
+	ApprovedAt     time.Time `json:"approved_at"`
+}
+
+type governanceApprovalsResponse struct {
+	CfgID     string        `json:"cfg_id"`
+	Approvers []approverDTO `json:"approvers"`
+	Count     int           `json:"count"`
+	Required  int           `json:"required"`
+	Met       bool          `json:"met"`
+}
+
+// getGovernanceApprovals serves GET /v1/governance/{id}/approvals: who has
+// recorded a distinct approval so far, against the tenant's configured
+// multi-approver quorum (ADR-GOV-005). It is read-only — recording an
+// approval is a constitutional mutation and goes through POST .../approve.
+func (s *Server) getGovernanceApprovals(w http.ResponseWriter, r *http.Request) {
+	if s.approvals == nil {
+		writeProblem(w, r, http.StatusNotImplemented, "not implemented", "approval quorum tracking is not configured")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if !s.requireObject(w, r, id) {
+		return
+	}
+	approvers, err := s.approvals.ListApprovers(r.Context(), id)
+	if err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+	required, err := s.requiredApprovals(r.Context())
+	if err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+	resp := governanceApprovalsResponse{
+		CfgID:     id,
+		Approvers: make([]approverDTO, 0, len(approvers)),
+		Count:     len(approvers),
+		Required:  required,
+		Met:       len(approvers) >= required,
+	}
+	for _, a := range approvers {
+		resp.Approvers = append(resp.Approvers, approverDTO{ApproverUserID: a.ApproverUserID, ApprovedAt: a.CreatedAt})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // filterOperation reads an optional operation filter and validates it against the
 // known §8 operations, returning 400 for an unknown value.
 func (s *Server) filterOperation(w http.ResponseWriter, r *http.Request) (string, bool) {

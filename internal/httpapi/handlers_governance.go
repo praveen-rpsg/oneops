@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -61,6 +62,21 @@ type governanceResponse struct {
 	// SuccessorID is returned by extend only: the object recorded as extending
 	// this one. Absent for every other operation.
 	SuccessorID string `json:"successor_id,omitempty"`
+	// Approvals reports multi-approver quorum status (ADR-GOV-005). Present
+	// only for the approve operation.
+	Approvals *approvalStatusDTO `json:"approvals,omitempty"`
+}
+
+// approvalStatusDTO is the quorum status surfaced by approve: how many
+// distinct approvers have approved, out of how many the tenant requires
+// (Setting governance_required_approvals). Met is false below quorum, and
+// the object's lifecycle in the sibling State field is then UNCHANGED —
+// fail-safe: it never reads Approved on anything less than quorum.
+type approvalStatusDTO struct {
+	Count    int    `json:"count"`
+	Required int    `json:"required"`
+	Met      bool   `json:"met"`
+	Summary  string `json:"summary"`
 }
 
 func toGovernanceResponse(res governance.Result, operationID string) governanceResponse {
@@ -85,6 +101,14 @@ func toGovernanceResponse(res governance.Result, operationID string) governanceR
 		}
 	}
 	resp.SuccessorID = res.SuccessorID
+	if res.Operation == domain.OpApproval {
+		resp.Approvals = &approvalStatusDTO{
+			Count:    res.ApprovalCount,
+			Required: res.RequiredApprovals,
+			Met:      res.ApprovalCount >= res.RequiredApprovals,
+			Summary:  fmt.Sprintf("approvals: %d of required %d", res.ApprovalCount, res.RequiredApprovals),
+		}
+	}
 	return resp
 }
 
@@ -101,6 +125,13 @@ func (s *Server) mapGovernanceError(w http.ResponseWriter, r *http.Request, err 
 		writeProblem(w, r, http.StatusConflict, "conflict", "object has dependents")
 	case errors.Is(err, governance.ErrUnsupportedOperation):
 		writeProblem(w, r, http.StatusUnprocessableEntity, "unsupported operation", err.Error())
+	case errors.Is(err, governance.ErrAlreadyApproved):
+		// A duplicate approval must not be silently accepted (it would count
+		// twice toward quorum) nor overwrite the caller's earlier vote; it is
+		// rejected as a conflict with the approver's own prior recorded state.
+		writeProblem(w, r, http.StatusConflict, "conflict", "this approver has already approved this object")
+	case errors.Is(err, governance.ErrApprovalRecorderUnavailable):
+		writeProblem(w, r, http.StatusInternalServerError, "internal error", "approval quorum tracking unavailable")
 	default:
 		s.mapError(w, r, err)
 	}
@@ -202,6 +233,24 @@ func (s *Server) execGovernance(w http.ResponseWriter, r *http.Request, op domai
 			writeProblem(w, r, http.StatusBadRequest, "bad request", "successor_id is required for replace")
 			return
 		}
+	}
+
+	// Approval alone needs the calling tenant (to scope the recorded approval)
+	// and the tenant's configured multi-approver quorum threshold
+	// (ADR-GOV-005). Every other operation ignores both Command fields.
+	if op == domain.OpApproval {
+		tenant, ok := domain.TenantFrom(r.Context())
+		if !ok {
+			writeProblem(w, r, http.StatusForbidden, "forbidden", "no tenant is bound to this request")
+			return
+		}
+		cmd.TenantID = tenant.TenantID
+		required, err := s.requiredApprovals(r.Context())
+		if err != nil {
+			s.mapError(w, r, err)
+			return
+		}
+		cmd.RequiredApprovals = required
 	}
 
 	res, err := s.governance.Execute(r.Context(), cmd)

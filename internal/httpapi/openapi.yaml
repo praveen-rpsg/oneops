@@ -512,6 +512,27 @@ paths:
         '401': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/governance/{id}/approvals:
+    get:
+      summary: Who has approved this configuration object so far (ADR-GOV-005)
+      description: >
+        Multi-approver quorum status: every distinct approval recorded for
+        this object against the tenant's configured
+        governance_required_approvals threshold. Read-only; recording an
+        approval is POST .../approve.
+      operationId: getGovernanceApprovals
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+      responses:
+        '200':
+          description: Approval quorum status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceApprovalsResponse' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
 
   # Administration & Operations — read-only except the explicit integrity run.
   # All require admin permission. No constitutional behavior is exposed here.
@@ -2109,6 +2130,34 @@ components:
         row_version: { type: integer, format: int64 }
         state: { $ref: '#/components/schemas/GovernanceState' }
         audit: { $ref: '#/components/schemas/GovernanceAudit' }
+        approvals: { $ref: '#/components/schemas/GovernanceApprovalStatus' }
+    GovernanceApprovalStatus:
+      type: object
+      description: >
+        Multi-approver quorum status (ADR-GOV-005). Present only on the
+        response to POST .../approve. met is false, and the sibling state
+        field's lifecycle is unchanged, until count >= required.
+      properties:
+        count: { type: integer, description: Distinct approvers recorded so far, including this call. }
+        required: { type: integer, description: The tenant's configured governance_required_approvals. }
+        met: { type: boolean }
+        summary: { type: string, example: "approvals: 1 of required 2" }
+    GovernanceApprover:
+      type: object
+      properties:
+        approver_user_id: { type: string }
+        approved_at: { type: string, format: date-time }
+    GovernanceApprovalsResponse:
+      type: object
+      description: Who has recorded a distinct approval of a governance object so far, against its tenant's configured quorum (ADR-GOV-005).
+      properties:
+        cfg_id: { type: string }
+        approvers:
+          type: array
+          items: { $ref: '#/components/schemas/GovernanceApprover' }
+        count: { type: integer }
+        required: { type: integer }
+        met: { type: boolean }
     GovernanceStateResponse:
       type: object
       properties:

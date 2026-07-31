@@ -54,6 +54,9 @@ var serverGeneratedIdentifiers = map[string]string{
 
 	// Notification Service. No create route accepts a client-supplied id.
 	"notification_pkey": "notification_id is server-minted (a ULID); no create route accepts one from a client",
+
+	// Multi-approver approval quorum (ADR-GOV-005).
+	"approval_record_pkey": "approval_id is server-minted (a ULID via domain.NewApprovalRecord); no create route accepts one from a client",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

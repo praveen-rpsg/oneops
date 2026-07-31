@@ -37,4 +37,5 @@ var TenantOwnedTables = []string{
 	"team_membership",
 	"notification",
 	"setting",
+	"approval_record",
 }

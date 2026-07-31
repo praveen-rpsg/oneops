@@ -82,6 +82,11 @@ var keyScopeJustifications = map[string]string{
 	// from a request — so this is not merely un-collidable, it is unreachable
 	// from outside the platform.
 	"notification.notification_pkey": "notification_id is platform-generated (a ULID); clients never supply it and there is no create route that accepts one",
+
+	// Multi-approver approval quorum (ADR-GOV-005). uq_approval_tenant_governance_approver
+	// already contains tenant_id and needs no justification here; only the
+	// surrogate PK does.
+	"approval_record.approval_record_pkey": "approval_id is platform-generated (a ULID via domain.NewApprovalRecord); clients never supply it and there is no create route that accepts one",
 }
 
 func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {

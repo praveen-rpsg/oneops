@@ -349,3 +349,151 @@ func TestGovernance_ReplaceFailedTestMapsTo409(t *testing.T) {
 		t.Errorf("body does not name the failing clause: %s", rec.Body.String())
 	}
 }
+
+// --- ADR-GOV-005 — multi-approver approval quorum ---------------------------
+
+type fakeApprovals struct {
+	items []*domain.ApprovalRecord
+	err   error
+}
+
+func (f *fakeApprovals) ListApprovers(context.Context, string) ([]*domain.ApprovalRecord, error) {
+	return f.items, f.err
+}
+
+// newGovQuorumAPI wires the governance engine plus the two dependencies the
+// quorum path needs (settings, for the threshold; approvals, for the list
+// endpoint) — newGovAPI wires neither, since no other governance test needs
+// them.
+func newGovQuorumAPI(t *testing.T, gov governanceExecutor, settings domain.SettingRepository, approvals domain.ApprovalRepository) http.Handler {
+	t.Helper()
+	cfg := &config.Config{
+		HTTPAddr: ":0", DefaultPageSize: 50, MaxPageSize: 200,
+		AuthEnabled: false, JWTIssuer: tIss, JWTAudience: tAud, JWTHMACKey: tSecret,
+	}
+	repo := newFakeRepo()
+	seedObject(repo, "c1") // GET .../approvals 404s an unknown object first
+	s := NewServer(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		repo, newFakeIdem(), auth.NewVerifier(tIss, tAud, tSecret, ""),
+		observability.NewMetrics(), func(context.Context) error { return nil })
+	s.SetGovernance(gov)
+	if settings != nil {
+		s.SetSettings(settings)
+	}
+	if approvals != nil {
+		s.SetApprovals(approvals)
+	}
+	return s.Router()
+}
+
+// Transport propagation: the calling tenant and the resolved quorum threshold
+// reach the engine's Command, and the engine's quorum status reaches the
+// response — the wiring this story adds, as distinct from the engine's own
+// quorum logic (tested in internal/governance).
+func TestGovernance_ApproveResolvesTenantAndRequiredApprovals(t *testing.T) {
+	gov := &fakeGov{res: governance.Result{
+		NewLifecycle: domain.LifecycleInReview, RowVersion: 2,
+		ApprovalCount: 1, RequiredApprovals: 2,
+	}}
+	settings := &fakeSettings{overrides: []*domain.Setting{
+		{Key: domain.GovernanceRequiredApprovalsKey, Value: "2"},
+	}}
+	h := newGovQuorumAPI(t, gov, settings, nil)
+
+	rec := do(h, http.MethodPost, "/v1/governance/c1/approve", nil, idemHdr("op-appr-1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if gov.lastCmd.TenantID != domain.SystemTenantID {
+		t.Fatalf("TenantID = %q, want %q (unauthenticated dev mode resolves to the system tenant)",
+			gov.lastCmd.TenantID, domain.SystemTenantID)
+	}
+	if gov.lastCmd.RequiredApprovals != 2 {
+		t.Fatalf("RequiredApprovals = %d, want 2 (resolved from the setting override)", gov.lastCmd.RequiredApprovals)
+	}
+
+	var resp governanceResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad body: %v", err)
+	}
+	if resp.Approvals == nil {
+		t.Fatal("response has no approvals status")
+	}
+	if resp.Approvals.Count != 1 || resp.Approvals.Required != 2 || resp.Approvals.Met {
+		t.Fatalf("approvals = %+v, want count=1 required=2 met=false", resp.Approvals)
+	}
+	if resp.State == nil || resp.State.Lifecycle != "in_review" {
+		t.Fatalf("state = %+v, want lifecycle unchanged at in_review (below quorum)", resp.State)
+	}
+}
+
+// Backward compatibility: with no setting repository wired at all, the
+// threshold resolved and propagated to the engine is 1 — reproducing today's
+// single-actor approve exactly.
+func TestGovernance_ApproveDefaultsToSingleApproverWithoutSettings(t *testing.T) {
+	gov := &fakeGov{res: governance.Result{
+		NewLifecycle: domain.LifecycleApproved, RowVersion: 2,
+		ApprovalCount: 1, RequiredApprovals: 1,
+	}}
+	h := newGovQuorumAPI(t, gov, nil, nil)
+
+	rec := do(h, http.MethodPost, "/v1/governance/c1/approve", nil, idemHdr("op-appr-2"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if gov.lastCmd.RequiredApprovals != 1 {
+		t.Fatalf("RequiredApprovals = %d, want 1", gov.lastCmd.RequiredApprovals)
+	}
+	var resp governanceResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Approvals == nil || !resp.Approvals.Met || resp.State.Lifecycle != "approved" {
+		t.Fatalf("response = %+v, want approvals met and lifecycle approved", resp)
+	}
+}
+
+// A duplicate approver maps to 409, distinct from every other conflict this
+// route already reports, and the message says why.
+func TestGovernance_ApproveDuplicateApproverMapsTo409(t *testing.T) {
+	gov := &fakeGov{err: governance.ErrAlreadyApproved}
+	h := newGovQuorumAPI(t, gov, nil, nil)
+
+	rec := do(h, http.MethodPost, "/v1/governance/c1/approve", nil, idemHdr("op-appr-3"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "already approved") {
+		t.Errorf("body does not explain the duplicate: %s", rec.Body.String())
+	}
+}
+
+// GET .../approvals is not gated behind the governance engine at all: it is
+// a read of the approval repository, unavailable (501) until wired.
+func TestGovernance_ApprovalsListNotWiredReturns501(t *testing.T) {
+	h := newGovQuorumAPI(t, &fakeGov{}, nil, nil)
+	rec := do(h, http.MethodGet, "/v1/governance/c1/approvals", nil, nil)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Code)
+	}
+}
+
+func TestGovernance_ApprovalsListReportsApproversAndQuorum(t *testing.T) {
+	approvals := &fakeApprovals{items: []*domain.ApprovalRecord{
+		{ApproverUserID: "alice"}, {ApproverUserID: "bob"},
+	}}
+	settings := &fakeSettings{overrides: []*domain.Setting{
+		{Key: domain.GovernanceRequiredApprovalsKey, Value: "2"},
+	}}
+	h := newGovQuorumAPI(t, &fakeGov{}, settings, approvals)
+
+	rec := do(h, http.MethodGet, "/v1/governance/c1/approvals", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp governanceApprovalsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad body: %v", err)
+	}
+	if resp.Count != 2 || resp.Required != 2 || !resp.Met || len(resp.Approvers) != 2 {
+		t.Fatalf("response = %+v", resp)
+	}
+}

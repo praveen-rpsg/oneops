@@ -96,6 +96,13 @@ type Server struct {
 	// team above, so nothing here needs an exemption from row-level security.
 	settings domain.SettingRepository
 
+	// Multi-approver quorum read side (ADR-GOV-005); nil until SetApprovals.
+	// approval_record is TENANT-OWNED, like setting above. The write side is
+	// wired into the Governance Engine directly (governance.ApprovalRecorder),
+	// not here — recording an approval is a constitutional mutation, listing
+	// who has approved so far is a read.
+	approvals domain.ApprovalRepository
+
 	// Organisation registry; nil until SetOrganizations. organization is global
 	// for the same reason (ADR-IDENTITY-002 §3.1): tenant_id is discovered BY
 	// reading this mapping, so the mapping cannot be scoped by it.
@@ -253,6 +260,8 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermRead)).Get("/governance/{id}/audit", s.getAuditChain)
 		rt.With(s.requirePermission(auth.PermRead)).Get("/governance/{id}/audit/events", s.getAuditEvents)
 		rt.With(s.requirePermission(auth.PermRead)).Get("/governance/{id}/verification", s.getVerification)
+		// Multi-approver quorum (ADR-GOV-005) — who has approved so far.
+		rt.With(s.requirePermission(auth.PermRead)).Get("/governance/{id}/approvals", s.getGovernanceApprovals)
 
 		// Administration & Operations — read-only except the explicit integrity
 		// run (which reuses the existing scheduler). All require admin permission.

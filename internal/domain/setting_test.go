@@ -20,6 +20,8 @@ func TestSettingDefinition_ValidateAcceptsLegalValues(t *testing.T) {
 		{"webhooks_enabled_by_default", "true"},
 		{"webhooks_enabled_by_default", "false"},
 		{"notification_from_name", "OneOps"},
+		{"governance_required_approvals", "1"},
+		{"governance_required_approvals", "10"},
 	} {
 		t.Run(c.key+"="+c.value, func(t *testing.T) {
 			def, ok := GetDefinition(c.key)
@@ -47,6 +49,9 @@ func TestSettingDefinition_ValidateRejectsIllegalValues(t *testing.T) {
 		{"webhooks_enabled_by_default", "1"},
 		{"notification_from_name", ""},
 		{"notification_from_name", strings.Repeat("x", MaxNotificationSubjectLength+1)},
+		{"governance_required_approvals", "0"},
+		{"governance_required_approvals", "11"},
+		{"governance_required_approvals", "one"},
 	} {
 		t.Run(c.key+"="+c.value, func(t *testing.T) {
 			def, ok := GetDefinition(c.key)

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,6 +15,27 @@ import (
 // SetSettings wires the setting repository. Until it is called the endpoints
 // report 501 rather than 404, the same convention SetTeams uses.
 func (s *Server) SetSettings(repo domain.SettingRepository) { s.settings = repo }
+
+// SetApprovals wires the multi-approver quorum read repository (ADR-GOV-005).
+// Until it is called, GET /governance/{id}/approvals reports 501 rather than
+// 404, the same convention SetSettings uses.
+func (s *Server) SetApprovals(repo domain.ApprovalRepository) { s.approvals = repo }
+
+// requiredApprovals resolves the calling tenant's configured Approval quorum
+// threshold (Setting governance_required_approvals; ADR-GOV-005). Absent a
+// wired setting repository it returns the definition's own default (1) —
+// exactly the same "not configured yet" fallback listSettings/putSetting
+// would otherwise force every caller to special-case.
+func (s *Server) requiredApprovals(ctx context.Context) (int, error) {
+	if s.settings == nil {
+		return domain.EffectiveRequiredApprovals(nil), nil
+	}
+	overrides, err := s.settings.GetAll(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return domain.EffectiveRequiredApprovals(overrides), nil
+}
 
 type settingDTO struct {
 	Key         string    `json:"key"`

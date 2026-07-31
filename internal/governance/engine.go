@@ -27,6 +27,16 @@ var (
 	// Replacement on the four-part test, so an engine that cannot evaluate the
 	// test must refuse the operation rather than perform it untested.
 	ErrReplacementTesterUnavailable = errors.New("governance: replacement test unavailable")
+	// ErrApprovalRecorderUnavailable is returned when Approval is attempted on
+	// an engine with no ApprovalRecorder wired. It FAILS CLOSED (ADR-GOV-005):
+	// an engine that cannot track distinct approvers must refuse the operation
+	// rather than approve on an unenforced quorum.
+	ErrApprovalRecorderUnavailable = errors.New("governance: approval recorder unavailable")
+	// ErrAlreadyApproved is returned when the calling actor has already
+	// recorded a distinct approval of this governance object. Approving twice
+	// must not count twice toward quorum (ADR-GOV-005), so a repeat call is
+	// rejected rather than silently accepted or double-counted.
+	ErrAlreadyApproved = errors.New("governance: this approver has already approved this object")
 )
 
 // Command is one constitutional configuration operation request (State Model §8).
@@ -51,6 +61,19 @@ type Command struct {
 	// successor that depends on / inherits CfgID. Required by Extension; unused
 	// by every other operation.
 	SuccessorID string
+	// TenantID scopes a multi-approver approval record to the calling tenant
+	// (ADR-GOV-005). Required by Approval when an ApprovalRecorder is wired;
+	// unused by every other operation. It is a parameter rather than something
+	// Execute derives, for the same reason Team.TenantID is: the only correct
+	// source is the caller's bound connection, and the write needs an actual
+	// column value (ADR-TENANCY-002).
+	TenantID string
+	// RequiredApprovals is the tenant's configured Approval quorum threshold
+	// (Setting governance_required_approvals; ADR-GOV-005). Zero defaults to 1
+	// inside Execute, which reproduces single-actor approval exactly — every
+	// existing caller that does not set this field is unaffected. Unused by
+	// every other operation.
+	RequiredApprovals int
 }
 
 func (c Command) validate() error {
@@ -82,6 +105,15 @@ type Result struct {
 	RowVersion   int64
 	// SuccessorID is set by Extension: the object recorded as extending CfgID.
 	SuccessorID string
+	// ApprovalCount and RequiredApprovals report multi-approver quorum
+	// progress after Approval (ADR-GOV-005): how many distinct approvers have
+	// now approved, out of how many the tenant requires. Both are zero for
+	// every other operation. NewLifecycle reaches LifecycleApproved only when
+	// ApprovalCount >= RequiredApprovals; below quorum the approval is still
+	// recorded (it counts toward the next call) but the object's dimensions
+	// are unchanged.
+	ApprovalCount     int
+	RequiredApprovals int
 }
 
 // auditPayload is the governance-owned JSON descriptor of a committed result:
@@ -103,15 +135,21 @@ func (r Result) auditPayload() (json.RawMessage, error) {
 		// existed — the hash chain over already-committed events is unaffected
 		// (Law 12: audit is append-only and never rewritten).
 		SuccessorID string `json:"successor_id,omitempty"`
+		// ApprovalCount/RequiredApprovals are emitted only by Approval, for the
+		// same byte-identical-marshalling reason SuccessorID is omitempty.
+		ApprovalCount     int `json:"approval_count,omitempty"`
+		RequiredApprovals int `json:"required_approvals,omitempty"`
 	}{
-		Operation:    r.Operation,
-		CfgID:        r.CfgID,
-		Removed:      r.Removed,
-		NewLifecycle: r.NewLifecycle,
-		NewRetention: r.NewRetention,
-		NewAuthority: r.NewAuthority,
-		RowVersion:   r.RowVersion,
-		SuccessorID:  r.SuccessorID,
+		Operation:         r.Operation,
+		CfgID:             r.CfgID,
+		Removed:           r.Removed,
+		NewLifecycle:      r.NewLifecycle,
+		NewRetention:      r.NewRetention,
+		NewAuthority:      r.NewAuthority,
+		RowVersion:        r.RowVersion,
+		SuccessorID:       r.SuccessorID,
+		ApprovalCount:     r.ApprovalCount,
+		RequiredApprovals: r.RequiredApprovals,
 	})
 }
 
@@ -166,6 +204,25 @@ type ReplacementTester interface {
 	Evaluate(ctx context.Context, oldCfgID, newCfgID string) (domain.ReplacementTestResult, error)
 }
 
+// ApprovalRecorder persists distinct-approver quorum tracking for the §8
+// Approval operation (ADR-GOV-005). It is declared here, consumer-side, the
+// same idiom as ReplacementTester; *postgres.ApprovalStore satisfies it.
+//
+// Both methods run INSIDE the engine's own transaction, on the
+// configuration_object row GetForUpdate already locked — so the approval
+// that is recorded and the count that decides whether quorum is met can
+// never race with a concurrent approver on the same object.
+type ApprovalRecorder interface {
+	// Record inserts one distinct approval. It returns ErrAlreadyApproved if
+	// this approver has already approved this governance object — the
+	// UNIQUE (tenant_id, governance_id, approver_user_id) constraint surfaced
+	// as a domain-shaped error rather than a raw conflict.
+	Record(ctx context.Context, tx pgx.Tx, tenantID, governanceID, approverUserID string) error
+	// CountDistinct returns the number of distinct approvers recorded so far
+	// for governanceID.
+	CountDistinct(ctx context.Context, tx pgx.Tx, governanceID string) (int, error)
+}
+
 // Engine executes constitutional configuration operations, owning exactly one
 // transaction per operation. It depends only on the Store and Authorizer ports.
 type Engine struct {
@@ -173,6 +230,7 @@ type Engine struct {
 	authorizer  Authorizer
 	audit       Auditor
 	replacement ReplacementTester
+	approvals   ApprovalRecorder
 	now         func() time.Time
 }
 
@@ -185,6 +243,16 @@ type Engine struct {
 // Absence is NOT a silent skip: Execute refuses Replacement outright when this
 // is unset (ErrReplacementTesterUnavailable).
 func (e *Engine) SetReplacementTester(t ReplacementTester) { e.replacement = t }
+
+// SetApprovalRecorder wires the multi-approver quorum tracker (ADR-GOV-005),
+// following the same optional-wiring idiom as SetReplacementTester: the six
+// operations that predate quorum do not need it, and widening the
+// constructor would churn every existing call site for no behavioural gain.
+//
+// Absence is NOT a silent skip: Execute refuses Approval outright when this
+// is unset (ErrApprovalRecorderUnavailable) — quorum enforcement fails
+// closed, exactly like the Replacement Test.
+func (e *Engine) SetApprovalRecorder(r ApprovalRecorder) { e.approvals = r }
 
 // NewEngine composes the engine. store, authorizer, and auditor are all required.
 func NewEngine(store Store, authorizer Authorizer, auditor Auditor) (*Engine, error) {
@@ -251,7 +319,44 @@ func (e *Engine) Execute(ctx context.Context, cmd Command) (Result, error) {
 		}
 	}
 
+	// §8 Approval precondition — the multi-approver quorum (ADR-GOV-005).
+	// Evaluated here for the same reason the Replacement Test is: it needs I/O
+	// (how many DISTINCT approvers exist so far) and must run INSIDE the
+	// transaction, on the row GetForUpdate already locked, so the approval
+	// recorded here and the count that decides the outcome can never race with
+	// a concurrent approver of the same object.
+	//
+	// Unlike Replacement, a quorum not yet met is not a rejected operation: the
+	// approval is still recorded (it counts toward the next call) and the call
+	// still succeeds, but planTransition's Approved outcome is FAIL-SAFE
+	// overridden back to the object's current, unchanged dimensions — an
+	// object can never reach Approved on anything less than the configured
+	// quorum.
+	var approvalCount, requiredApprovals int
+	if cmd.Operation == domain.OpApproval {
+		if e.approvals == nil {
+			return Result{}, ErrApprovalRecorderUnavailable
+		}
+		requiredApprovals = cmd.RequiredApprovals
+		if requiredApprovals < 1 {
+			requiredApprovals = 1
+		}
+		if err := e.approvals.Record(ctx, tx, cmd.TenantID, cmd.CfgID, cmd.Actor); err != nil {
+			return Result{}, err // ErrAlreadyApproved propagates unchanged
+		}
+		approvalCount, err = e.approvals.CountDistinct(ctx, tx, cmd.CfgID)
+		if err != nil {
+			return Result{}, err
+		}
+		if approvalCount < requiredApprovals {
+			p.Lifecycle, p.Retention, p.Authority = obj.Lifecycle, obj.RetentionClass, obj.Authority
+		}
+	}
+
 	res := Result{Operation: cmd.Operation, CfgID: cmd.CfgID, Actor: cmd.Actor, OccurredAt: e.now()}
+	if cmd.Operation == domain.OpApproval {
+		res.ApprovalCount, res.RequiredApprovals = approvalCount, requiredApprovals
+	}
 	if p.Remove {
 		n, err := e.store.CountDependents(ctx, tx, cmd.CfgID)
 		if err != nil {

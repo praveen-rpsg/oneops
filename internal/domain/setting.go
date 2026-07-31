@@ -187,6 +187,43 @@ var SettingDefinitions = map[string]SettingDefinition{
 		Description: "Display name attached to an outbound notification.",
 		MaxLen:      MaxNotificationSubjectLength,
 	},
+	GovernanceRequiredApprovalsKey: {
+		Key:     GovernanceRequiredApprovalsKey,
+		Type:    SettingTypeInt,
+		Default: "1",
+		Description: "How many DISTINCT approvers a governance object's Approval operation " +
+			"requires before it transitions to Approved (ADR-GOV-005). The default of 1 " +
+			"reproduces single-actor approval exactly.",
+		Min: 1, Max: 10,
+	},
+}
+
+// GovernanceRequiredApprovalsKey names the tenant-scoped multi-approver quorum
+// threshold for the §8 Approval operation (ADR-GOV-005). Exported so the
+// governance engine and its HTTP handlers resolve it by name rather than
+// repeating the string literal SettingDefinitions is keyed on.
+const GovernanceRequiredApprovalsKey = "governance_required_approvals"
+
+// EffectiveRequiredApprovals resolves a tenant's configured Approval quorum
+// from its stored setting overrides (ADR-GOV-005). It never returns less than
+// 1: the definition's own Min bound already refuses a stored value below it,
+// and DecodeValue on a missing override falls back to the "1" default — so
+// this can only fail closed toward the single-approver behaviour the platform
+// already had before this setting existed, never toward zero.
+func EffectiveRequiredApprovals(overrides []*Setting) int {
+	def := SettingDefinitions[GovernanceRequiredApprovalsKey]
+	raw := def.Default
+	for _, o := range overrides {
+		if o.Key == GovernanceRequiredApprovalsKey {
+			raw = o.Value
+			break
+		}
+	}
+	n, ok := def.DecodeValue(raw).(int64)
+	if !ok || n < 1 {
+		return 1
+	}
+	return int(n)
 }
 
 // GetDefinition returns the definition for key, and whether it exists.
