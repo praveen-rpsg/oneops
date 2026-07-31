@@ -51,6 +51,9 @@ var serverGeneratedIdentifiers = map[string]string{
 	"team_pkey":                    "team_id is server-minted",
 	"team_membership_pkey":         "team_membership_id is server-minted",
 	"uq_team_membership_team_user": "team_id is server-minted and already belongs to exactly one tenant; user_id is server-minted",
+
+	// Notification Service. No create route accepts a client-supplied id.
+	"notification_pkey": "notification_id is server-minted (a ULID); no create route accepts one from a client",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

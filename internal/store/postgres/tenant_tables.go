@@ -35,4 +35,5 @@ var TenantOwnedTables = []string{
 	"invitation",
 	"team",
 	"team_membership",
+	"notification",
 }

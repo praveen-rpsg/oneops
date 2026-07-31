@@ -23,6 +23,7 @@ import (
 	"github.com/rpsg/oneops/internal/events"
 	"github.com/rpsg/oneops/internal/governance"
 	"github.com/rpsg/oneops/internal/httpapi"
+	"github.com/rpsg/oneops/internal/notification"
 	"github.com/rpsg/oneops/internal/observability"
 	"github.com/rpsg/oneops/internal/ops"
 	"github.com/rpsg/oneops/internal/policy"
@@ -368,7 +369,30 @@ func run(logger *slog.Logger) error {
 	// Policy HTTP actions POST to operator-supplied URLs too, so they share the
 	// SSRF-safe client (ADR-SECURITY-001).
 	policyActionClient := safehttp.Client(15*time.Second, cfg.WebhookAllowPrivateTargets)
-	policyRegistry := policy.DefaultRegistry(policyActionClient, nil, nil, nil, logger)
+
+	// Notification Service: persisted, tracked delivery of the platform's own
+	// outbound notifications, replacing the fire-and-forget policy.Notifier call
+	// with a real record (status, attempts, last error). Split for the same
+	// reason as the webhook and policy stores above: the delivery worker
+	// processes every tenant, while the read-only admin API must be confined to
+	// the caller's tenant.
+	notificationStore := postgres.NewNotificationStore(pool)
+	notificationAdminStore := postgres.NewNotificationStore(appPool)
+	notificationMetrics := notification.NewPromMetrics(metrics.Registry())
+	notificationSvc := notification.NewService(notificationStore)
+	// The webhook channel POSTs to operator-supplied URLs too, so it shares the
+	// SSRF-safe client (ADR-SECURITY-001). No EmailSender is wired yet anywhere
+	// in this service (policy.DefaultRegistry's own email action is also nil
+	// below), so the email channel fails its attempts until one is configured.
+	notificationHTTPClient := safehttp.Client(15*time.Second, cfg.WebhookAllowPrivateTargets)
+	notificationWorker := notification.NewWorker(notificationStore, nil, notificationHTTPClient, notificationMetrics, logger, notification.WorkerConfig{})
+	workers = append(workers, notificationWorker.Run)
+	srv.SetNotifications(notificationAdminStore)
+	// policy.Notifier is backed by the Notification Service: a policy's
+	// "notification" action now produces a tracked Notification row instead of
+	// the previous fire-and-forget log line.
+	policyNotifier := notification.NewPolicyNotifier(notificationSvc)
+	policyRegistry := policy.DefaultRegistry(policyActionClient, nil, nil, policyNotifier, logger)
 	policyConsumer := policy.NewConsumer(auditStore, policyStore, policyStore, policyStore, policyMetrics, logger, policy.ConsumerConfig{})
 	// auditStore is the authoritative event-owner resolver, exactly as for the
 	// webhook dispatcher: the executor re-derives the triggering event's owner

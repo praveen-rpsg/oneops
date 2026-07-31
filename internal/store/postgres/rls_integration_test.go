@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
@@ -470,6 +471,98 @@ func TestRLS_TeamsAreTenantIsolated(t *testing.T) {
 	}
 	if !found {
 		t.Error("the owning tenant must still see its own team")
+	}
+}
+
+// Notification is tenant data, not platform data, exactly like webhook and
+// team: it can carry an operator recipient address and message content that
+// must not leak across the tenant boundary.
+func TestRLS_NotificationsAreTenantIsolated(t *testing.T) {
+	priv := testPool(t)
+	ctx := adminTestCtx()
+
+	tenants := NewTenantStore(priv)
+	a, err := tenants.Create(ctx, newTenant("rls-notif-a", "ext-rls-notif-a"))
+	if err != nil {
+		t.Fatalf("create tenant a: %v", err)
+	}
+	b, err := tenants.Create(ctx, newTenant("rls-notif-b", "ext-rls-notif-b"))
+	if err != nil {
+		t.Fatalf("create tenant b: %v", err)
+	}
+
+	scoped := tenantScopedPool(t)
+	store := NewNotificationStore(scoped)
+
+	aCtx := domain.WithTenant(ctx, a)
+	n, err := domain.NewNotification(a.TenantID, domain.NotificationInApp, "alice-secret", "s", "b")
+	if err != nil {
+		t.Fatalf("build notification: %v", err)
+	}
+	created, err := store.Enqueue(aCtx, n)
+	if err != nil {
+		t.Fatalf("tenant a enqueues: %v", err)
+	}
+
+	// Tenant B must not see it in a list...
+	bCtx := domain.WithTenant(ctx, b)
+	listAsB, err := store.List(bCtx, "", 50, "")
+	if err != nil {
+		t.Fatalf("list as tenant b: %v", err)
+	}
+	for _, item := range listAsB {
+		if item.NotificationID == created.NotificationID {
+			t.Fatal("tenant b listed tenant a's notification — isolation is not enforced")
+		}
+	}
+
+	// ...nor fetch it directly by id...
+	if _, err := store.Get(bCtx, created.NotificationID); err == nil {
+		t.Fatal("tenant b could fetch tenant a's notification by id")
+	}
+
+	// ...nor claim it for delivery through the tenant-scoped connection (the
+	// worker itself uses the privileged pool precisely so it is NOT scoped this
+	// way, but a scoped connection must still see nothing to claim).
+	dueAsB, err := store.ClaimDue(bCtx, time.Now().UTC(), time.Minute, 10)
+	if err != nil {
+		t.Fatalf("claim as tenant b: %v", err)
+	}
+	for _, d := range dueAsB {
+		if d.NotificationID == created.NotificationID {
+			t.Fatal("tenant b's scoped connection claimed tenant a's notification")
+		}
+	}
+
+	// The owning tenant still sees its own.
+	own, err := store.List(aCtx, "", 50, "")
+	if err != nil {
+		t.Fatalf("owner list: %v", err)
+	}
+	found := false
+	for _, item := range own {
+		if item.NotificationID == created.NotificationID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the owning tenant must still see its own notification")
+	}
+
+	// The privileged worker pool sees both tenants' notifications, because
+	// delivery is cross-tenant by design.
+	dueAsWorker, err := NewNotificationStore(priv).ClaimDue(ctx, time.Now().UTC(), time.Minute, 100)
+	if err != nil {
+		t.Fatalf("claim as worker: %v", err)
+	}
+	foundAsWorker := false
+	for _, d := range dueAsWorker {
+		if d.NotificationID == created.NotificationID {
+			foundAsWorker = true
+		}
+	}
+	if !foundAsWorker {
+		t.Error("the privileged delivery worker must be able to claim any tenant's due notification")
 	}
 }
 
