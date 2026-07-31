@@ -1246,6 +1246,58 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/settings:
+    get:
+      summary: Get the caller's tenant's effective settings
+      description: >-
+        Setting is tenant-owned and under row-level security, exactly like
+        Team, so the result reflects only the caller's tenant. Every key
+        defined in the platform's SettingDefinition registry is returned once,
+        resolved to its stored override if the tenant has one, otherwise to
+        its default — there is no way to see a key that is not in the
+        registry, and no way for the registry to omit one silently.
+      operationId: listSettings
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: The tenant's effective settings
+          content: { application/json: { schema: { $ref: '#/components/schemas/SettingList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/settings/{key}:
+    put:
+      summary: Create or update the caller's tenant's override of one setting
+      description: >-
+        `key` must name an entry in the platform's SettingDefinition registry;
+        an unknown key or a value that fails that definition's validation
+        (wrong type, out of range, not an allowed enum value) is refused with
+        422 before anything is written. `row_version` is 0 to create a new
+        override, or the version last read from GET /admin/settings to update
+        one — the same optimistic-locking discipline PatchTeamRequest uses.
+      operationId: putSetting
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PutSettingRequest' }
+      responses:
+        '200':
+          description: The updated effective setting
+          content: { application/json: { schema: { $ref: '#/components/schemas/Setting' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/organizations:
     get:
       summary: List organizations, or resolve one by slug
@@ -1786,6 +1838,37 @@ components:
       required: [user_id]
       properties:
         user_id: { type: string }
+    Setting:
+      type: object
+      description: >-
+        `value` and `default` are rendered as the type the key's definition
+        declares — a boolean for a bool setting, a number for an int setting —
+        never as the string every value is stored as internally.
+      properties:
+        key: { type: string }
+        type: { type: string, enum: [bool, int, string, enum] }
+        description: { type: string }
+        value: {}
+        default: {}
+        overridden: { type: boolean }
+        row_version: { type: integer, format: int64 }
+        updated_at: { type: string, format: date-time }
+    SettingList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Setting' }
+    PutSettingRequest:
+      type: object
+      required: [value, row_version]
+      properties:
+        value: {}
+        row_version:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 0 to create a new override; the row_version last read to update one.
     Notification:
       type: object
       properties:

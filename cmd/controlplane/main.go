@@ -465,6 +465,9 @@ func run(logger *slog.Logger) error {
 	// Team is tenant-owned and under row-level security, exactly like
 	// membership above, so no exemption is needed here either.
 	srv.SetTeams(postgres.NewTeamStore(appPool))
+	// Setting is tenant-owned and under row-level security, exactly like team
+	// above, so no exemption is needed here either.
+	srv.SetSettings(postgres.NewSettingStore(appPool))
 
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.

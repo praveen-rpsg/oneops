@@ -92,6 +92,10 @@ type Server struct {
 	// exemption from row-level security.
 	notifications notificationRegistry
 
+	// Setting registry; nil until SetSettings. setting is TENANT-OWNED, like
+	// team above, so nothing here needs an exemption from row-level security.
+	settings domain.SettingRepository
+
 	// Organisation registry; nil until SetOrganizations. organization is global
 	// for the same reason (ADR-IDENTITY-002 §3.1): tenant_id is discovered BY
 	// reading this mapping, so the mapping cannot be scoped by it.
@@ -337,6 +341,16 @@ func (s *Server) routes() *chi.Mux {
 		// future producer), never directly over HTTP.
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/notifications", s.listNotifications)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/notifications/{id}", s.getNotification)
+
+		// Setting administration. setting is TENANT-OWNED, exactly like team
+		// and notification above, so the permission tier is tenant
+		// administration, not requirePlatformAdmin. There is one PUT per key
+		// rather than a bulk PATCH: each key carries its own optimistic-lock
+		// row_version, and a bulk write could consume several versions while
+		// reporting only one outcome — the same reason patchTeam refuses to
+		// change name and status in one call.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/settings", s.listSettings)
+		rt.With(s.requirePermission(auth.PermAdmin)).Put("/admin/settings/{key}", s.putSetting)
 
 		// Event delivery — webhook administration (admin permission).
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/webhooks", s.listWebhooks)
