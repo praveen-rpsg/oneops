@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/rpsg/oneops/internal/kg/extract/gopkg"
+	"github.com/rpsg/oneops/internal/kg/extract/schema"
 	"github.com/rpsg/oneops/internal/kg/graph"
 	"github.com/rpsg/oneops/internal/kg/model"
 )
@@ -151,13 +152,104 @@ func TestMergedOutputIsNormalised(t *testing.T) {
 	}
 }
 
-func TestDefaultRegistryIsE1(t *testing.T) {
-	reg := Default()
-	if len(reg) != 1 {
-		t.Fatalf("registry has %d extractors, want 1", len(reg))
+func TestDefaultRegistry(t *testing.T) {
+	var got []string
+	for _, e := range Default() {
+		got = append(got, e.ID())
 	}
-	if reg[0].ID() != gopkg.ExtractorID {
-		t.Errorf("registered %q, want %q", reg[0].ID(), gopkg.ExtractorID)
+	want := []string{gopkg.ExtractorID, schema.ExtractorID}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("registry = %v, want %v", got, want)
+	}
+}
+
+// The whole point of the registry: the published graph carries facts no single
+// extractor could produce.
+func TestRegisteredExtractorsContributeDistinctKinds(t *testing.T) {
+	g, err := Build(context.Background(), repoRoot)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	kinds := map[string]int{}
+	for _, n := range g.Nodes {
+		kinds[n.Kind]++
+	}
+	for _, want := range []string{"package", "table", "column", "index", "constraint", "trigger"} {
+		if kinds[want] == 0 {
+			t.Errorf("no %q node in the merged graph", want)
+		}
+	}
+	t.Logf("kinds: %v", kinds)
+}
+
+// ---------------------------------------------------------------- normalise
+
+// §IV: an identity seen twice is carried once, with both citations.
+func TestDedupeMergesIdenticalNodes(t *testing.T) {
+	a := node("package:same")
+	b := node("package:same")
+	b.Evidence = []graph.Evidence{{Source: "go.mod", Line: 3, Rule: "T.other"}}
+
+	g, err := BuildWith(context.Background(), repoRoot, []Extractor{
+		fake{id: "TA", nodes: []graph.Node{a}},
+		fake{id: "TB", nodes: []graph.Node{b}},
+	})
+	if err != nil {
+		t.Fatalf("identical nodes must merge, not fail: %v", err)
+	}
+	if len(g.Nodes) != 1 {
+		t.Fatalf("got %d nodes, want 1", len(g.Nodes))
+	}
+	if len(g.Nodes[0].Evidence) != 2 {
+		t.Errorf("evidence = %+v, want both citations", g.Nodes[0].Evidence)
+	}
+	// Canonical order, so merging cannot make two runs differ.
+	if g.Nodes[0].Evidence[0].Source > g.Nodes[0].Evidence[1].Source {
+		t.Errorf("merged evidence is not sorted: %+v", g.Nodes[0].Evidence)
+	}
+}
+
+// §IV makes disagreement fatal: merging would publish a fact no extractor
+// stands behind, and choosing one would hide the conflict.
+func TestDedupeRefusesDisagreement(t *testing.T) {
+	a := node("package:same")
+	b := node("package:same")
+	b.Kind = "table"
+
+	if _, err := BuildWith(context.Background(), repoRoot, []Extractor{
+		fake{id: "TA", nodes: []graph.Node{a}},
+		fake{id: "TB", nodes: []graph.Node{b}},
+	}); !errors.Is(err, ErrIDCollision) {
+		t.Errorf("got %v, want ErrIDCollision", err)
+	}
+
+	c := node("package:same")
+	c.Attrs = map[string]string{"dir": "elsewhere"}
+	if _, err := BuildWith(context.Background(), repoRoot, []Extractor{
+		fake{id: "TA", nodes: []graph.Node{a}},
+		fake{id: "TB", nodes: []graph.Node{c}},
+	}); !errors.Is(err, ErrIDCollision) {
+		t.Errorf("differing attrs: got %v, want ErrIDCollision", err)
+	}
+}
+
+func TestDedupeMergesIdenticalEdges(t *testing.T) {
+	e1 := edge("package:a", "package:b")
+	e2 := edge("package:a", "package:b")
+	e2.Evidence = []graph.Evidence{{Source: "go.mod", Rule: "T.other"}}
+
+	g, err := BuildWith(context.Background(), repoRoot, []Extractor{
+		fake{id: "TA", nodes: []graph.Node{node("package:a"), node("package:b")}, edges: []graph.Edge{e1}},
+		fake{id: "TB", edges: []graph.Edge{e2}},
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(g.Edges) != 1 {
+		t.Fatalf("got %d edges, want 1", len(g.Edges))
+	}
+	if len(g.Edges[0].Evidence) != 2 {
+		t.Errorf("evidence = %+v, want both citations", g.Edges[0].Evidence)
 	}
 }
 
@@ -172,7 +264,6 @@ func TestValidationIsMandatory(t *testing.T) {
 	}{
 		{"dangling edge", fake{id: "TX", nodes: []graph.Node{node("package:a")},
 			edges: []graph.Edge{edge("package:a", "package:absent")}}},
-		{"duplicate node id", fake{id: "TX", nodes: []graph.Node{node("package:a"), node("package:a")}}},
 		{"node without evidence", fake{id: "TX", nodes: []graph.Node{{
 			ID: "package:a", Kind: "package",
 			Origin: model.OriginDerived, Confidence: model.ConfidenceCertain}}}},

@@ -21,11 +21,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os/exec"
 	"slices"
 	"strings"
 
 	"github.com/rpsg/oneops/internal/kg/extract/gopkg"
+	"github.com/rpsg/oneops/internal/kg/extract/schema"
 	"github.com/rpsg/oneops/internal/kg/graph"
 )
 
@@ -43,6 +45,10 @@ var (
 	ErrCommit = errors.New("pipeline: cannot read the repository commit")
 	// ErrInvalidGraph is a derived graph that violates §II.
 	ErrInvalidGraph = errors.New("pipeline: the derived graph is not valid")
+	// ErrIDCollision is one identity claimed by two extractors that disagree
+	// about what it is. §IV makes this fatal: merging them would publish a fact
+	// no extractor stands behind, and picking one would hide the disagreement.
+	ErrIDCollision = errors.New("pipeline: two extractors describe the same id differently")
 )
 
 // Extractor is the contract §III defines.
@@ -61,7 +67,7 @@ type Extractor interface {
 // One entry today. §III lists E1 through E11; each arrives with its own story
 // and is added here.
 func Default() []Extractor {
-	return []Extractor{gopkg.Extractor{}}
+	return []Extractor{gopkg.Extractor{}, schema.Extractor{}}
 }
 
 // Build derives the knowledge graph for the repository rooted at root.
@@ -95,10 +101,21 @@ func BuildWith(ctx context.Context, root string, extractors []Extractor) (*graph
 		edges = append(edges, ed...)
 	}
 
-	// Normalise (§IV). Each extractor sorts what it returns, but concatenating
-	// two sorted runs does not give a sorted whole, so canonical order is
-	// re-established over the merged result. graph.Validate reports disorder
-	// rather than repairing it, and this is the producer it holds responsible.
+	// Normalise (§IV): dedup, then canonical order.
+	//
+	// Two extractors may legitimately observe the same thing — a table is a
+	// table whether the schema reader or a future query reader found it — and
+	// the merged result must carry it once, with both pieces of evidence. They
+	// may not disagree about what it is.
+	nodes, edges, err = dedupe(nodes, edges)
+	if err != nil {
+		return nil, err
+	}
+
+	// Each extractor sorts what it returns, but concatenating two sorted runs
+	// does not give a sorted whole, so canonical order is re-established over
+	// the merged result. graph.Validate reports disorder rather than repairing
+	// it, and this is the producer it holds responsible.
 	slices.SortFunc(nodes, func(a, b graph.Node) int { return strings.Compare(a.ID, b.ID) })
 	slices.SortFunc(edges, func(a, b graph.Edge) int {
 		if c := strings.Compare(a.From, b.From); c != 0 {
@@ -140,4 +157,66 @@ func headCommit(ctx context.Context, root string) (string, error) {
 		return "", fmt.Errorf("%w [root %s]: git reported an empty HEAD", ErrCommit, root)
 	}
 	return commit, nil
+}
+
+// dedupe collapses identities seen more than once, and refuses disagreement.
+//
+// Evidence is unioned rather than replaced: when two extractors find the same
+// object, the graph should say so, and a reader following the citations should
+// reach both places it was seen.
+func dedupe(nodes []graph.Node, edges []graph.Edge) ([]graph.Node, []graph.Edge, error) {
+	at := make(map[string]int, len(nodes))
+	outN := make([]graph.Node, 0, len(nodes))
+	for _, n := range nodes {
+		i, seen := at[n.ID]
+		if !seen {
+			at[n.ID] = len(outN)
+			outN = append(outN, n)
+			continue
+		}
+		p := outN[i]
+		if p.Kind != n.Kind || p.Origin != n.Origin || p.Confidence != n.Confidence ||
+			!maps.Equal(p.Attrs, n.Attrs) {
+			return nil, nil, fmt.Errorf("%w: %q is %s/%s/%s here and %s/%s/%s there",
+				ErrIDCollision, n.ID, p.Kind, p.Origin, p.Confidence, n.Kind, n.Origin, n.Confidence)
+		}
+		outN[i].Evidence = mergeEvidence(p.Evidence, n.Evidence)
+	}
+
+	atE := make(map[string]int, len(edges))
+	outE := make([]graph.Edge, 0, len(edges))
+	for _, e := range edges {
+		key := e.From + "\x00" + e.To + "\x00" + e.Kind
+		i, seen := atE[key]
+		if !seen {
+			atE[key] = len(outE)
+			outE = append(outE, e)
+			continue
+		}
+		outE[i].Evidence = mergeEvidence(outE[i].Evidence, e.Evidence)
+	}
+	return outN, outE, nil
+}
+
+// mergeEvidence unions two evidence sets, in canonical order so the merge
+// cannot make two otherwise identical runs differ.
+func mergeEvidence(a, b []graph.Evidence) []graph.Evidence {
+	seen := make(map[graph.Evidence]bool, len(a)+len(b))
+	out := make([]graph.Evidence, 0, len(a)+len(b))
+	for _, e := range append(append([]graph.Evidence{}, a...), b...) {
+		if !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	slices.SortFunc(out, func(x, y graph.Evidence) int {
+		if c := strings.Compare(x.Source, y.Source); c != 0 {
+			return c
+		}
+		if x.Line != y.Line {
+			return x.Line - y.Line
+		}
+		return strings.Compare(x.Rule, y.Rule)
+	})
+	return out
 }
