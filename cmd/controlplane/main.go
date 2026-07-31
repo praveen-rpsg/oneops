@@ -107,7 +107,25 @@ func run(logger *slog.Logger) error {
 
 	repo := postgres.NewConfigObjectRepo(appPool)
 	idem := postgres.NewIdempotencyStore(appPool)
-	verifier := auth.NewVerifier(cfg.JWTIssuer, cfg.JWTAudience, cfg.JWTHMACKey, cfg.JWKSURL)
+
+	// Enterprise SSO: the default IdP (ONEOPS_JWT_ISSUER/...) plus any
+	// tenant-brought IdPs from ONEOPS_ADDITIONAL_IDPS, each verified with its
+	// own issuer, audience and keys. config.Load already validated this set
+	// (no duplicate issuers, every entry has a key source), so a construction
+	// error here would be a bug in that validation, not a runtime condition.
+	idpConfigs := make([]auth.IDPConfig, 0, 1+len(cfg.AdditionalIDPs))
+	idpConfigs = append(idpConfigs, auth.IDPConfig{
+		Issuer: cfg.JWTIssuer, Audience: cfg.JWTAudience, HMACKey: cfg.JWTHMACKey, JWKSURL: cfg.JWKSURL,
+	})
+	for _, extra := range cfg.AdditionalIDPs {
+		idpConfigs = append(idpConfigs, auth.IDPConfig{
+			Issuer: extra.Issuer, Audience: extra.Audience, HMACKey: extra.HMACKey, JWKSURL: extra.JWKSURL,
+		})
+	}
+	verifier, err := auth.NewMultiVerifier(idpConfigs)
+	if err != nil {
+		return fmt.Errorf("build auth verifier: %w", err)
+	}
 	metrics := observability.NewMetrics()
 	execMetrics := ops.NewExecutiveMetrics(metrics.Registry())
 
