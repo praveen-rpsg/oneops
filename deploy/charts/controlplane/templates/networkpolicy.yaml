@@ -1,0 +1,35 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "controlplane.fullname" . }}
+  labels:
+    {{- include "controlplane.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "controlplane.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  # Default-deny: only the two rules below are allowed in. Everything else
+  # (including pod-to-pod within the namespace) is blocked unless it matches
+  # one of these.
+  ingress:
+    # The app port, reachable only from the ingress controller's namespace.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressNamespaceSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.targetPort }}
+    # The metrics port, reachable only from the monitoring namespace.
+    # Deliberately never exposed to the ingress controller's namespace.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.metrics.port }}
+{{- end }}

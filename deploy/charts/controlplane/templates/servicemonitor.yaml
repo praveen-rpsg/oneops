@@ -1,0 +1,49 @@
+{{- if .Values.serviceMonitor.enabled }}
+# Dedicated metrics-only Service. Kept separate from the public Service in
+# service.yaml so /metrics (unauthenticated, discloses audit-integrity state
+# and per-route request volumes) can never be reached through the ingress —
+# only this ClusterIP, scraped in-cluster by Prometheus, exposes it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "controlplane.metricsServiceName" . }}
+  labels:
+    {{- include "controlplane.labels" . | nindent 4 }}
+    # Distinguishes this metrics Service from the public one so the
+    # ServiceMonitor selects it explicitly, not by relying on the public
+    # Service lacking a port named "metrics".
+    oneops.io/service: metrics
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    {{- include "controlplane.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "controlplane.fullname" . }}
+  labels:
+    {{- include "controlplane.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "controlplane.selectorLabels" . | nindent 6 }}
+      oneops.io/service: metrics
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+{{- end }}

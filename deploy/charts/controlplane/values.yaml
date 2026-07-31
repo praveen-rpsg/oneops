@@ -23,12 +23,112 @@ resources:
 metrics:
   port: 9090
 
+# Name of a pre-existing Kubernetes Secret carrying the sensitive env vars
+# below (ONEOPS_DB_URL, ONEOPS_JWT_HMAC_KEY). The chart never creates this
+# Secret — provision it out of band (sealed-secrets, external-secrets, etc.)
+# and point this at it. Empty means "use the insecure inline dev defaults",
+# which is only acceptable for local/dev installs.
+existingSecret: ""
+
+# Non-sensitive env, injected inline as before. Sensitive keys
+# (ONEOPS_DB_URL, ONEOPS_JWT_HMAC_KEY) are deliberately NOT here — they come
+# from existingSecret via secretKeyRef so they never land in `helm get values`
+# or a ConfigMap/Deployment diff in plaintext.
 env:
   ONEOPS_ENV: dev
   ONEOPS_HTTP_ADDR: ":8080"
   ONEOPS_METRICS_ADDR: ":9090"
 
+# Fallback plaintext values, used only when existingSecret is unset (dev
+# convenience). In production, set existingSecret instead and leave these at
+# their insecure defaults — config.go refuses to boot in production with them.
+secretEnv:
+  ONEOPS_DB_URL: "postgres://oneops:dev@localhost:5432/oneops?sslmode=disable"
+  ONEOPS_JWT_HMAC_KEY: "dev-insecure-secret-change-me"
+
 podAnnotations: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# PodDisruptionBudget: on by default so a single voluntary node drain cannot
+# take down every replica at once. minAvailable is ignored when replicaCount
+# (or the HPA minReplicas) is 1.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# HorizontalPodAutoscaler (autoscaling/v2, CPU utilization). Off by default
+# to keep the plain `helm install` behavior (fixed replicaCount) unchanged.
+# When enabled, deployment.yaml omits spec.replicas so the HPA owns it.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercent: 70
+
+# NetworkPolicy: default-deny ingress, with explicit allows for the app port
+# (from the ingress controller namespace) and the metrics port (from the
+# monitoring namespace). Off by default — enabling requires the target
+# cluster's namespace labels to match ingressNamespaceSelector /
+# monitoringNamespaceSelector below.
+networkPolicy:
+  enabled: false
+  # Namespace running the ingress controller, allowed to reach the http port.
+  ingressNamespaceSelector:
+    kubernetes.io/metadata.name: ingress-nginx
+  # Namespace running Prometheus, allowed to reach the metrics port.
+  monitoringNamespaceSelector:
+    kubernetes.io/metadata.name: monitoring
+
+# Prometheus Operator ServiceMonitor scraping the metrics listener. Off by
+# default because it requires the Prometheus Operator CRDs to be installed.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  # Extra labels merged onto the ServiceMonitor so the cluster's Prometheus
+  # selector (serviceMonitorSelector) picks it up.
+  labels: {}
+
+# Ingress with TLS. Off by default; when enabled, set host/className/TLS to
+# match the target cluster's ingress controller and cert issuer.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: ""
+  tls:
+    enabled: false
+    secretName: ""
+
+# Prometheus Operator PrometheusRule (SLO burn-rate + domain-critical alerts).
+# Off by default: emitting metrics does not obligate a cluster to run the
+# Prometheus Operator, and a CRD that doesn't exist would fail `helm install`.
+# See docs/observability/SLO.md for what each alert means and why.
+prometheusRule:
+  enabled: false
+  # Extra labels merged onto the PrometheusRule so a Prometheus CR's
+  # ruleSelector/ruleNamespaceSelector can pick it up (e.g. `release: <name>`
+  # for the kube-prometheus-stack convention). Chart labels are always applied.
+  labels: {}
+  slo:
+    # Availability objective as a percentage string, e.g. "99.9" == three
+    # nines. Drives both burn-rate alert thresholds (fastBurn = 14.4x the
+    # implied error budget, slowBurn = 6x) per the Google SRE workbook's
+    # multi-window multi-burn-rate method.
+    availabilityObjective: "99.9"
+    # p99 http_request_duration_seconds threshold, in seconds, sustained over
+    # 5m, before OneOpsLatencySLOBreach fires.
+    latencySLOSeconds: 1.0
+    # Seconds since oneops_audit_last_verification_timestamp_seconds before
+    # OneOpsAuditVerifierStale fires. Default is 2x the scheduler's default
+    # ONEOPS_AUDIT_VERIFY_INTERVAL_SECONDS (300s) — override this alongside
+    # that env var if the sweep interval is changed.
+    auditVerifyStalenessSeconds: 600
+    # Fraction (0-1) of webhook delivery attempts that may fail over 15m
+    # before OneOpsWebhookFailureRatioHigh fires.
+    webhookFailureRatio: 0.05
+    # Fraction (0-1) of policy executions that may fail over 15m before
+    # OneOpsPolicyFailureRatioHigh fires.
+    policyFailureRatio: 0.05
