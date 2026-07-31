@@ -55,7 +55,8 @@ func TestEveryTableIsANode(t *testing.T) {
 		"audit_chain_head", "audit_event", "audit_event_default", "configuration_metadata",
 		"configuration_object", "dependency_edge", "idempotency_key", "invitation",
 		"membership", "organization", "policy", "policy_cursor", "policy_execution",
-		"tenant", "webhook", "webhook_cursor", "webhook_delivery", "webhook_replay_job",
+		"team", "team_membership", "tenant", "webhook", "webhook_cursor",
+		"webhook_delivery", "webhook_replay_job",
 	}
 	for _, w := range want {
 		if !got[w] {
@@ -97,8 +98,8 @@ func TestCommentsDoNotDeclareObjects(t *testing.T) {
 func TestIndexOnClauseMaySpanLines(t *testing.T) {
 	nodes, edges := extract(t)
 	idx := byKind(nodes)[kindIndex]
-	if len(idx) != 40 {
-		t.Errorf("extracted %d indexes, want 40", len(idx))
+	if len(idx) != 45 {
+		t.Errorf("extracted %d indexes, want 45", len(idx))
 	}
 	// ix_webhook_delivery_due declares ON on a following line.
 	const want = "index:ix_webhook_delivery_due"
@@ -281,7 +282,7 @@ func TestCorpusCensus(t *testing.T) {
 		got[n.Kind]++
 	}
 	want := map[string]int{
-		kindTable: 22, kindColumn: 185, kindIndex: 40, kindConstraint: 54, kindTrigger: 4,
+		kindTable: 24, kindColumn: 200, kindIndex: 45, kindConstraint: 57, kindTrigger: 4,
 	}
 	for kind, w := range want {
 		if got[kind] != w {
@@ -398,7 +399,7 @@ func TestMultiLineAlterTableIsExtracted(t *testing.T) {
 		}
 	}
 
-	// Sixteen tables carry the discriminator. Anything less is a wrong answer
+	// Eighteen tables carry the discriminator. Anything less is a wrong answer
 	// to the question the graph exists to answer.
 	scoped := 0
 	for _, n := range nodes {
@@ -406,8 +407,8 @@ func TestMultiLineAlterTableIsExtracted(t *testing.T) {
 			scoped++
 		}
 	}
-	if scoped != 16 {
-		t.Errorf("%d tables carry tenant_id, want 16", scoped)
+	if scoped != 18 {
+		t.Errorf("%d tables carry tenant_id, want 18", scoped)
 	}
 
 	// A multi-line declaration must still be owned by its table.

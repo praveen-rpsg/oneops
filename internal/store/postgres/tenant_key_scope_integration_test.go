@@ -71,6 +71,11 @@ var keyScopeJustifications = map[string]string{
 	"invitation.invitation_pkey":        "invitation_id is platform-generated; clients never supply it",
 	"invitation.uq_invitation_token":    "token_hash is the hash of a server-generated token — a client cannot choose the value (ADR-IDENTITY-002 §2.4)",
 	"membership.uq_membership_org_user": "keyed by org_id, which stands 1:1 with a tenant (ADR-IDENTITY-001 §4), so the pair is confined to one tenant by construction; user_id is platform-generated",
+
+	// Team (extends the same shape to a non-authorisation grouping).
+	"team.team_pkey":                               "team_id is platform-generated; clients never supply it",
+	"team_membership.team_membership_pkey":         "team_membership_id is platform-generated; clients never supply it",
+	"team_membership.uq_team_membership_team_user": "team_id is platform-generated and already belongs to exactly one tenant; user_id is platform-generated",
 }
 
 func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {

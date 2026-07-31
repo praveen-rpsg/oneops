@@ -83,6 +83,10 @@ type Server struct {
 	adminAudit  domain.AdminAuditReader
 	memberships domain.MembershipRepository
 
+	// Team registry; nil until SetTeams. team is TENANT-OWNED, like membership
+	// above, so nothing here needs an exemption from row-level security.
+	teams domain.TeamRepository
+
 	// Organisation registry; nil until SetOrganizations. organization is global
 	// for the same reason (ADR-IDENTITY-002 §3.1): tenant_id is discovered BY
 	// reading this mapping, so the mapping cannot be scoped by it.
@@ -308,6 +312,18 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/memberships", s.listMemberships)
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/memberships", s.grantMembership)
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/memberships/{id}", s.revokeMembership)
+
+		// Team administration. Team is TENANT-OWNED, exactly like membership
+		// above and for the same reason: it is in TenantOwnedTables and carries
+		// row-level security, so the permission tier is tenant administration,
+		// not requirePlatformAdmin.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/teams", s.listTeams)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/teams", s.createTeam)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/teams/{id}", s.getTeam)
+		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/teams/{id}", s.patchTeam)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/teams/{id}/members", s.listTeamMembers)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/teams/{id}/members", s.addTeamMember)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/teams/{id}/members/{userId}", s.removeTeamMember)
 
 		// Event delivery — webhook administration (admin permission).
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/webhooks", s.listWebhooks)

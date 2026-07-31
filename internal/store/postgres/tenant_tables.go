@@ -33,4 +33,6 @@ var TenantOwnedTables = []string{
 	"policy_execution",
 	"membership",
 	"invitation",
+	"team",
+	"team_membership",
 }

@@ -1016,6 +1016,186 @@ paths:
         '409': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/teams:
+    get:
+      summary: List an organization's teams
+      description: >-
+        Team is tenant-owned and under row-level security, exactly like
+        Membership, so the result is confined to the caller's tenant by the
+        database. An org_id belonging to another tenant returns an empty page,
+        not a refusal. Paging is keyset over `team_id`, which is a ULID and
+        therefore ordered by creation.
+      operationId: listTeams
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: org_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last team_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of teams
+          content: { application/json: { schema: { $ref: '#/components/schemas/TeamList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Register a team within an organization
+      description: >-
+        The tenant is taken from the bound connection and never from the
+        request, so a caller cannot plant a team inside another boundary
+        (the same rule grantMembership enforces).
+      operationId: createTeam
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTeamRequest' }
+      responses:
+        '201':
+          description: The team
+          content: { application/json: { schema: { $ref: '#/components/schemas/Team' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/teams/{id}:
+    get:
+      summary: Get a team by identifier
+      operationId: getTeam
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The team
+          content: { application/json: { schema: { $ref: '#/components/schemas/Team' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Rename a team or perform a lifecycle transition
+      description: >-
+        Supply exactly one of name or status per call — the same rule
+        PatchUserRequest enforces, and for the same reason: the two go through
+        different repository methods, so a request that changed both would
+        consume two row versions and leave the outcome of one unreported.
+      operationId: patchTeam
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchTeamRequest' }
+      responses:
+        '200':
+          description: The updated team
+          content: { application/json: { schema: { $ref: '#/components/schemas/Team' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/teams/{id}/members:
+    get:
+      summary: List a team's members
+      operationId: listTeamMembers
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last team_membership_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of team members
+          content: { application/json: { schema: { $ref: '#/components/schemas/TeamMembershipList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Add a member to a team
+      description: >-
+        Idempotent: a user already on the team is returned unchanged rather
+        than rejected as a conflict. Team membership is not an authorisation
+        fact — Membership alone grants access to an organization's boundary —
+        so this does not affect what the user may do, only who a team groups.
+      operationId: addTeamMember
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddTeamMemberRequest' }
+      responses:
+        '201':
+          description: The team membership
+          content: { application/json: { schema: { $ref: '#/components/schemas/TeamMembership' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/teams/{id}/members/{userId}:
+    delete:
+      summary: Remove a member from a team
+      description: >-
+        A real delete, unlike Membership.Revoke: team membership carries no
+        status because it authorises nothing on its own, so there is no
+        administrative record whose subject the row must survive for.
+      operationId: removeTeamMember
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: The member was removed
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/organizations:
     get:
       summary: List organizations, or resolve one by slug
@@ -1503,6 +1683,58 @@ components:
       required: [org_id, user_id]
       properties:
         org_id: { type: string }
+        user_id: { type: string }
+    Team:
+      type: object
+      properties:
+        team_id: { type: string }
+        org_id: { type: string }
+        name: { type: string, maxLength: 200 }
+        status: { type: string, enum: [active, archived] }
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TeamList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Team' }
+    CreateTeamRequest:
+      type: object
+      required: [org_id, name]
+      properties:
+        org_id: { type: string }
+        name: { type: string, maxLength: 200 }
+    PatchTeamRequest:
+      type: object
+      required: [row_version]
+      description: Supply exactly one of name or status.
+      properties:
+        row_version: { type: integer, format: int64, minimum: 1 }
+        name: { type: string, maxLength: 200 }
+        status:
+          type: string
+          enum: [active, archived]
+    TeamMembership:
+      type: object
+      properties:
+        team_membership_id: { type: string }
+        team_id: { type: string }
+        user_id: { type: string }
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TeamMembershipList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/TeamMembership' }
+    AddTeamMemberRequest:
+      type: object
+      required: [user_id]
+      properties:
         user_id: { type: string }
     AdminAuditRecord:
       type: object
