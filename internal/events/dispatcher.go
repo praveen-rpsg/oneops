@@ -275,8 +275,18 @@ func (d *Dispatcher) post(ctx context.Context, url string, del Delivery, ts int6
 	return resp.StatusCode, nil
 }
 
+// backoff computes the delay before the next attempt. retry is normally >= 1
+// (ClaimDue always increments it before an attempt is made), but Deliver is
+// also called directly, unclaimed, by the admin "test this webhook" endpoint
+// with a fresh record whose RetryCount is 0 — shift must not go negative for
+// that input, or this panics. Clamping the shift at 0 makes retry<=1 both
+// yield BaseBackoff, and leaves the queue-driven path (retry>=1) unchanged.
 func (d *Dispatcher) backoff(retry int) time.Duration {
-	b := d.cfg.BaseBackoff << (retry - 1)
+	shift := retry - 1
+	if shift < 0 {
+		shift = 0
+	}
+	b := d.cfg.BaseBackoff << shift
 	if b <= 0 || b > d.cfg.MaxBackoff {
 		return d.cfg.MaxBackoff
 	}

@@ -217,8 +217,18 @@ func (e *Executor) runIsolated(ctx context.Context, p Policy, ev Event) (err err
 	return e.registry.Run(ctx, p.Action.Type, ev, p.Action.Config)
 }
 
+// backoff computes the delay before the next attempt. retry is normally >= 1
+// (ClaimDue always increments it before an attempt is made), but Attempt is
+// also called directly, unclaimed, by the admin "test this policy" endpoint
+// with a fresh record whose RetryCount is 0 — shift must not go negative for
+// that input, or this panics. Clamping the shift at 0 makes retry<=1 both
+// yield BaseBackoff, and leaves the queue-driven path (retry>=1) unchanged.
 func (e *Executor) backoff(retry int) time.Duration {
-	b := e.cfg.BaseBackoff << (retry - 1)
+	shift := retry - 1
+	if shift < 0 {
+		shift = 0
+	}
+	b := e.cfg.BaseBackoff << shift
 	if b <= 0 || b > e.cfg.MaxBackoff {
 		return e.cfg.MaxBackoff
 	}

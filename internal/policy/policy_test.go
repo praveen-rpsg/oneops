@@ -137,6 +137,13 @@ func (f *fakePolicies) Delete(_ context.Context, id string) error {
 type fakeExecs struct {
 	mu sync.Mutex
 	m  map[string]Execution
+	// claimErr, releaseErr and staleIDs/markErr let a test model the store
+	// failures RunOnce/attempt must survive: a claim-pass failure, a failed
+	// release of an unused claim, and a fenced or errored MarkResult write.
+	claimErr   error
+	releaseErr error
+	staleIDs   map[string]bool
+	markErr    map[string]error
 }
 
 func newFakeExecs() *fakeExecs { return &fakeExecs{m: map[string]Execution{}} }
@@ -155,6 +162,9 @@ func (f *fakeExecs) Enqueue(_ context.Context, xs []Execution) error {
 func (f *fakeExecs) ClaimDue(_ context.Context, now time.Time, _ time.Duration, limit int) ([]Execution, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.claimErr != nil {
+		return nil, f.claimErr
+	}
 	var out []Execution
 	for _, x := range f.m {
 		if (x.Status == ExecPending || x.Status == ExecFailed) && !x.NextAttemptAt.After(now) {
@@ -172,6 +182,9 @@ func (f *fakeExecs) ClaimDue(_ context.Context, now time.Time, _ time.Duration, 
 func (f *fakeExecs) ReleaseClaim(_ context.Context, id string, _ time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.releaseErr != nil {
+		return f.releaseErr
+	}
 	x := f.m[id]
 	if x.RetryCount > 0 {
 		x.RetryCount--
@@ -183,6 +196,14 @@ func (f *fakeExecs) ReleaseClaim(_ context.Context, id string, _ time.Time) erro
 func (f *fakeExecs) MarkResult(_ context.Context, id string, _ time.Time, status ExecutionStatus, retry int, errMsg string, started, ended, next time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// A fenced or errored write records nothing and erases nothing — exactly
+	// like the real store's atomic write (ADR-CONCURRENCY-005).
+	if f.staleIDs[id] {
+		return ErrStaleClaim
+	}
+	if err, ok := f.markErr[id]; ok {
+		return err
+	}
 	x := f.m[id]
 	x.Status, x.RetryCount, x.Error, x.StartedAt, x.EndedAt, x.NextAttemptAt = status, retry, errMsg, started, ended, next
 	f.m[id] = x
@@ -246,6 +267,43 @@ func auditEvt(chain string, seq int64, op, actor string, payload string) domain.
 		ChainID: chain, Seq: seq, EventID: "evt_" + strconv.FormatInt(seq, 10),
 		OperationID: "op-" + strconv.FormatInt(seq, 10), Operation: domain.ConfigurationOperation(op),
 		Actor: actor, PayloadCanonical: []byte(payload), OccurredAt: time.Now().UTC(),
+	}
+}
+
+// ---- stringify / trimFloat ---------------------------------------------------
+
+// stringify renders every JSON value shape a payload's top-level fields can
+// take into the plain string a Condition.Metadata match compares against.
+func TestStringify_AllValueShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"string", "ratified", "ratified"},
+		{"bool true", true, "true"},
+		{"bool false", false, "false"},
+		{"json.Number", json.Number("42"), "42"},
+		{"float64", 3.5, "3.5"},
+		{"float64 whole", float64(3), "3"},
+		{"nil falls back to JSON", nil, "null"},
+		{"object falls back to JSON", map[string]any{"a": float64(1)}, `{"a":1}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stringify(tc.in); got != tc.want {
+				t.Errorf("stringify(%#v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTrimFloat(t *testing.T) {
+	if got := trimFloat(3.0); got != "3" {
+		t.Errorf("trimFloat(3.0) = %q, want %q (no trailing .0)", got, "3")
+	}
+	if got := trimFloat(3.14); got != "3.14" {
+		t.Errorf("trimFloat(3.14) = %q, want %q", got, "3.14")
 	}
 }
 
@@ -419,6 +477,110 @@ func TestActions_Builtins(t *testing.T) {
 	// Unknown action type.
 	if err := NewRegistry().Run(ctx, "nope", ev, nil); !errors.Is(err, ErrUnknownAction) {
 		t.Errorf("unknown: %v", err)
+	}
+}
+
+// HTTPAction's failure modes must each be a plain returned error, never a
+// panic or a silently-swallowed problem — the executor's retry/dead-letter
+// accounting depends on every one of them surfacing as runErr.
+func TestHTTPAction_FailureModes(t *testing.T) {
+	ctx := context.Background()
+	ev := Event{TenantID: testTenant, Operation: "ratification", EventID: "evt_1"}
+
+	if err := (HTTPAction{}).Run(ctx, ev, json.RawMessage(`not-json`)); err == nil {
+		t.Error("malformed config JSON must error, not panic")
+	}
+	if err := (HTTPAction{}).Run(ctx, ev, json.RawMessage(`{}`)); err == nil {
+		t.Error("a missing url must error")
+	}
+	badURL := HTTPAction{Doer: doerFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("must not reach the transport with a request that could not be built")
+		return resp(200), nil
+	})}
+	if err := badURL.Run(ctx, ev, json.RawMessage("{\"url\":\"http://x\x7f\"}")); err == nil {
+		t.Error("a URL that fails to build into a request must error")
+	}
+	transportErr := errors.New("connection refused")
+	failed := HTTPAction{Doer: doerFunc(func(*http.Request) (*http.Response, error) { return nil, transportErr })}
+	if err := failed.Run(ctx, ev, json.RawMessage(`{"url":"http://x"}`)); !errors.Is(err, transportErr) {
+		t.Errorf("transport error = %v, want it wrapped/returned", err)
+	}
+}
+
+type fakeEmailSender struct{ called bool }
+
+func (f *fakeEmailSender) Send(context.Context, Event, json.RawMessage) error {
+	f.called = true
+	return nil
+}
+
+type fakeCommandRunner struct{ called bool }
+
+func (f *fakeCommandRunner) Execute(context.Context, Event, json.RawMessage) error {
+	f.called = true
+	return nil
+}
+
+type fakeNotifier struct{ called bool }
+
+func (f *fakeNotifier) Notify(context.Context, Event, json.RawMessage) error {
+	f.called = true
+	return nil
+}
+
+// A configured backend for email/command/notification must actually be
+// invoked, not bypassed in favor of the interface-only/log-only default.
+func TestActions_ConfiguredBackendsAreInvoked(t *testing.T) {
+	ctx := context.Background()
+	ev := Event{TenantID: testTenant}
+
+	sender := &fakeEmailSender{}
+	if err := (EmailAction{Sender: sender}).Run(ctx, ev, nil); err != nil || !sender.called {
+		t.Errorf("email backend not invoked: err=%v called=%v", err, sender.called)
+	}
+	runner := &fakeCommandRunner{}
+	if err := (CommandAction{Runner: runner}).Run(ctx, ev, nil); err != nil || !runner.called {
+		t.Errorf("command backend not invoked: err=%v called=%v", err, runner.called)
+	}
+	notifier := &fakeNotifier{}
+	if err := (NotificationAction{Notifier: notifier}).Run(ctx, ev, nil); err != nil || !notifier.called {
+		t.Errorf("notification backend not invoked: err=%v called=%v", err, notifier.called)
+	}
+	// No notifier and no logger: falls back to slog.Default() rather than
+	// nil-dereferencing.
+	if err := (NotificationAction{}).Run(ctx, ev, nil); err != nil {
+		t.Errorf("notification with no notifier/logger must still succeed: %v", err)
+	}
+}
+
+// Has reports registration state; a registry with nothing registered answers
+// "no" rather than panicking on a lookup miss.
+func TestRegistry_Has(t *testing.T) {
+	r := NewRegistry()
+	if r.Has("http") {
+		t.Error("an empty registry must not report any action as registered")
+	}
+	r.Register("http", HTTPAction{})
+	if !r.Has("http") {
+		t.Error("a registered action type must report as present")
+	}
+	if r.Has("nope") {
+		t.Error("an unregistered action type must report as absent")
+	}
+}
+
+// DefaultRegistry must wire exactly the built-in action types, so an
+// operator-authored policy naming any of them resolves rather than dead-letters
+// on ErrUnknownAction.
+func TestDefaultRegistry_RegistersAllBuiltins(t *testing.T) {
+	r := DefaultRegistry(nil, nil, nil, nil, nil)
+	for _, typ := range []string{"http", "email", "command", "notification"} {
+		if !r.Has(typ) {
+			t.Errorf("DefaultRegistry did not register %q", typ)
+		}
+	}
+	if r.Has("nope") {
+		t.Error("DefaultRegistry must not register anything beyond the four builtins")
 	}
 }
 
