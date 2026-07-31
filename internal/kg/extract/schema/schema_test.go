@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -265,6 +266,162 @@ func TestExtractionIsDeterministic(t *testing.T) {
 	}
 }
 
+// ------------------------------------------------- class-elimination guards
+
+// A census of every kind, not of the three that happened to be right.
+//
+// The suite this replaces asserted totals for tables, indexes and triggers and
+// spot-checked one table's columns. That table declares everything inline, so
+// 12 columns and 3 constraints declared by multi-line ALTER TABLE were missing
+// while every assertion passed.
+func TestCorpusCensus(t *testing.T) {
+	nodes, _ := extract(t)
+	got := map[string]int{}
+	for _, n := range nodes {
+		got[n.Kind]++
+	}
+	want := map[string]int{
+		kindTable: 22, kindColumn: 185, kindIndex: 40, kindConstraint: 54, kindTrigger: 4,
+	}
+	for kind, w := range want {
+		if got[kind] != w {
+			t.Errorf("%s: extracted %d, want %d", kind, got[kind], w)
+		}
+	}
+	for kind := range got {
+		if _, named := want[kind]; !named {
+			t.Errorf("unexpected node kind %q — the census must cover every kind E3 emits", kind)
+		}
+	}
+}
+
+// The invariant that retires the defect class.
+//
+// Declarations are found by flattening whitespace and matching the flattened
+// text — a technique that cannot care where a line break falls, and that shares
+// no code with the extractor's statement splitter. Every declaration it finds
+// must be a node. A future extractor change that loses a statement form fails
+// here regardless of which form it is, so the class cannot come back one
+// keyword at a time.
+func TestEveryDeclarationResolvesToANode(t *testing.T) {
+	nodes, _ := extract(t)
+	have := map[string]bool{}
+	for _, n := range nodes {
+		have[n.ID] = true
+	}
+
+	dir := filepath.Join(repoRoot, migrationDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read corpus: %v", err)
+	}
+	var (
+		flatTable = regexp.MustCompile(`(?i)CREATE TABLE (?:IF NOT EXISTS )?([a-z_][a-z0-9_]*)`)
+		flatIndex = regexp.MustCompile(`(?i)CREATE (?:UNIQUE )?INDEX (?:CONCURRENTLY )?(?:IF NOT EXISTS )?([a-z_][a-z0-9_]*) ON `)
+		flatTrig  = regexp.MustCompile(`(?i)CREATE (?:OR REPLACE )?TRIGGER ([a-z_][a-z0-9_]*)`)
+		flatAlter = regexp.MustCompile(`(?i)ALTER TABLE (?:IF EXISTS )?(?:ONLY )?([a-z_][a-z0-9_]*) ADD (COLUMN|CONSTRAINT) (?:IF NOT EXISTS )?([a-z_][a-z0-9_]*)`)
+		collapse  = regexp.MustCompile(`\s+`)
+		checked   int
+	)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		raw, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
+		if rerr != nil {
+			t.Fatalf("read %s: %v", e.Name(), rerr)
+		}
+		// Blank prose and dynamic bodies first; a comment is not a declaration.
+		flat := collapse.ReplaceAllString(blankNonCode(string(raw)), " ")
+
+		for _, m := range flatTable.FindAllStringSubmatch(flat, -1) {
+			checked++
+			if id := "table:" + strings.ToLower(m[1]); !have[id] {
+				t.Errorf("%s declares %s but it is not a node", e.Name(), id)
+			}
+		}
+		for _, m := range flatIndex.FindAllStringSubmatch(flat, -1) {
+			checked++
+			if id := "index:" + strings.ToLower(m[1]); !have[id] {
+				t.Errorf("%s declares %s but it is not a node", e.Name(), id)
+			}
+		}
+		for _, m := range flatTrig.FindAllStringSubmatch(flat, -1) {
+			checked++
+			if id := "trigger:" + strings.ToLower(m[1]); !have[id] {
+				t.Errorf("%s declares %s but it is not a node", e.Name(), id)
+			}
+		}
+		for _, m := range flatAlter.FindAllStringSubmatch(flat, -1) {
+			checked++
+			kind := kindConstraint
+			if strings.EqualFold(m[2], "COLUMN") {
+				kind = kindColumn
+			}
+			id := kind + ":" + strings.ToLower(m[1]) + "." + strings.ToLower(m[3])
+			if !have[id] {
+				t.Errorf("%s declares %s but it is not a node", e.Name(), id)
+			}
+		}
+	}
+	// Anti-vacuity: a sweep that finds nothing passes forever.
+	if checked < 50 {
+		t.Fatalf("swept only %d declarations; the corpus scan is broken", checked)
+	}
+	t.Logf("declarations swept: %d", checked)
+}
+
+// The named regression for the defect this replaced.
+//
+// Fifteen of thirty-one ALTER TABLE ... ADD statements put the ADD clause on a
+// line after the keyword. Twelve of them add the tenancy discriminator, so the
+// graph claimed four tables were tenant-scoped when sixteen are.
+func TestMultiLineAlterTableIsExtracted(t *testing.T) {
+	nodes, edges := extract(t)
+	have := map[string]bool{}
+	for _, n := range nodes {
+		have[n.ID] = true
+	}
+	for _, want := range []string{
+		"column:artifact_version.tenant_id", "column:audit_chain_head.tenant_id",
+		"column:audit_event.tenant_id", "column:configuration_metadata.tenant_id",
+		"column:configuration_object.tenant_id", "column:dependency_edge.tenant_id",
+		"column:idempotency_key.tenant_id", "column:policy.tenant_id",
+		"column:policy_execution.tenant_id", "column:webhook.tenant_id",
+		"column:webhook_delivery.tenant_id", "column:webhook_replay_job.tenant_id",
+		"constraint:admin_audit_event.ck_admin_audit_subject_bound",
+		"constraint:configuration_object.uq_cfg_tenant_artifact_version",
+		"constraint:idempotency_key.idempotency_key_pkey",
+	} {
+		if !have[want] {
+			t.Errorf("%s is declared by a multi-line ALTER TABLE but is not a node", want)
+		}
+	}
+
+	// Sixteen tables carry the discriminator. Anything less is a wrong answer
+	// to the question the graph exists to answer.
+	scoped := 0
+	for _, n := range nodes {
+		if strings.HasSuffix(n.ID, ".tenant_id") && n.Kind == kindColumn {
+			scoped++
+		}
+	}
+	if scoped != 16 {
+		t.Errorf("%d tables carry tenant_id, want 16", scoped)
+	}
+
+	// A multi-line declaration must still be owned by its table.
+	var owner string
+	for _, e := range edges {
+		if e.To == "column:artifact_version.tenant_id" && e.Kind == edgeOwns {
+			owner = e.From
+		}
+	}
+	if owner != "table:artifact_version" {
+		t.Errorf("ownership lost for a multi-line declaration: owner=%q", owner)
+	}
+}
+
 // ---------------------------------------------------------------- negative
 
 // §III: an unparsed statement warns and continues. One migration builds its
@@ -340,17 +497,32 @@ func TestEmptyCorpusIsAnError(t *testing.T) {
 	}
 }
 
-func TestStripComment(t *testing.T) {
+func TestBlankNonCode(t *testing.T) {
 	cases := map[string]string{
 		"CREATE TABLE x (":             "CREATE TABLE x (",
-		"-- CREATE TABLE in schemas":   "",
-		"CREATE TABLE x ( -- trailing": "CREATE TABLE x ( ",
+		"-- CREATE TABLE in schemas":   "                          ",
+		"CREATE TABLE x ( -- trailing": "CREATE TABLE x (            ",
 		"DEFAULT 'a--b'":               "DEFAULT 'a--b'",
-		"CHECK (s IN ('x')) -- note":   "CHECK (s IN ('x')) ",
+		"CHECK (s IN ('x')) -- note":   "CHECK (s IN ('x'))        ",
+		"/* block */ SELECT":           "            SELECT",
 	}
 	for in, want := range cases {
-		if got := stripComment(in); got != want {
-			t.Errorf("stripComment(%q) = %q, want %q", in, got, want)
+		got := blankNonCode(in)
+		if got != want {
+			t.Errorf("blankNonCode(%q)\n got  %q\n want %q", in, got, want)
 		}
+		if len(got) != len(in) {
+			t.Errorf("blankNonCode(%q) changed length %d -> %d; offsets would shift", in, len(in), len(got))
+		}
+	}
+	// A dollar body is blanked but its newlines survive, so line numbers after
+	// it stay correct.
+	src := "A\n$$\nx\ny\n$$\nB"
+	got := blankNonCode(src)
+	if len(got) != len(src) || strings.Count(got, "\n") != strings.Count(src, "\n") {
+		t.Errorf("dollar blanking changed geometry: %q", got)
+	}
+	if strings.Contains(got, "x") || strings.Contains(got, "y") {
+		t.Errorf("dollar body survived blanking: %q", got)
 	}
 }
