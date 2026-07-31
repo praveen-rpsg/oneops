@@ -11,6 +11,24 @@ import (
 	"github.com/rpsg/oneops/internal/domain"
 )
 
+// ---- replay job id generation -------------------------------------------------
+
+// A replay job id is prefixed, fixed-length hex, and unique per call — the
+// replay worker's own fencing token (ClaimedAt) is keyed on the job id it names.
+func TestNewReplayJobID_FormatAndUniqueness(t *testing.T) {
+	a := NewReplayJobID()
+	b := NewReplayJobID()
+	if len(a) < len("rpl_") || a[:len("rpl_")] != "rpl_" {
+		t.Fatalf("id %q missing rpl_ prefix", a)
+	}
+	if len(a) != len("rpl_")+32 { // 16 random bytes, hex-encoded
+		t.Fatalf("id %q has length %d, want %d", a, len(a), len("rpl_")+32)
+	}
+	if a == b {
+		t.Fatal("two generated job ids must not collide")
+	}
+}
+
 // ---- extra fakes ------------------------------------------------------------
 
 func (f *fakeDeliveries) GetDelivery(_ context.Context, id string) (Delivery, bool, error) {

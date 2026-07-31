@@ -121,6 +121,13 @@ type fakeDeliveries struct {
 	mu sync.Mutex
 	m  map[string]Delivery
 	n  int
+	// claimErr, releaseErr and staleIDs/markErr let a test model the store
+	// failures RunOnce/attempt must survive: a claim-pass failure, a failed
+	// release of an unused claim, and a fenced or errored MarkResult write.
+	claimErr   error
+	releaseErr error
+	staleIDs   map[string]bool
+	markErr    map[string]error
 }
 
 func newFakeDeliveries() *fakeDeliveries { return &fakeDeliveries{m: map[string]Delivery{}} }
@@ -140,6 +147,9 @@ func (f *fakeDeliveries) Enqueue(_ context.Context, ds []Delivery) error {
 func (f *fakeDeliveries) ClaimDue(_ context.Context, now time.Time, _ time.Duration, limit int) ([]Delivery, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.claimErr != nil {
+		return nil, f.claimErr
+	}
 	var out []Delivery
 	for _, d := range f.m {
 		if (d.Status == StatusPending || d.Status == StatusFailed) && !d.NextAttemptAt.After(now) {
@@ -157,6 +167,9 @@ func (f *fakeDeliveries) ClaimDue(_ context.Context, now time.Time, _ time.Durat
 func (f *fakeDeliveries) ReleaseClaim(_ context.Context, id string, _ time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.releaseErr != nil {
+		return f.releaseErr
+	}
 	d := f.m[id]
 	if d.RetryCount > 0 {
 		d.RetryCount--
@@ -168,6 +181,14 @@ func (f *fakeDeliveries) ReleaseClaim(_ context.Context, id string, _ time.Time)
 func (f *fakeDeliveries) MarkResult(_ context.Context, id string, _ time.Time, status DeliveryStatus, retry, code int, last, next time.Time, facts AttemptFacts) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// A fenced or errored write records nothing and erases nothing — exactly
+	// like the real store's atomic write (ADR-CONCURRENCY-005).
+	if f.staleIDs[id] {
+		return ErrStaleClaim
+	}
+	if err, ok := f.markErr[id]; ok {
+		return err
+	}
 	d := f.m[id]
 	d.Status, d.RetryCount, d.LastStatusCode, d.LastAttempt, d.NextAttemptAt = status, retry, code, last, next
 	// Zero facts leave the recorded ones untouched, matching the store
