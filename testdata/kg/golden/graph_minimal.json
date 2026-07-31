@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "nodes": [
+    {
+      "id": "package:internal/kg/graph",
+      "kind": "package",
+      "attrs": {
+        "dir": "internal/kg/graph",
+        "exported": "true",
+        "name": "graph",
+        "stdlib": "false"
+      },
+      "evidence": [
+        {
+          "source": "internal/kg/graph/graph.go",
+          "line": 1,
+          "rule": "E1.package"
+        }
+      ],
+      "origin": "derived",
+      "confidence": "certain"
+    },
+    {
+      "id": "package:internal/kg/model",
+      "kind": "package",
+      "evidence": [
+        {
+          "source": "internal/kg/model/model.go",
+          "rule": "E1.package"
+        }
+      ],
+      "origin": "derived",
+      "confidence": "certain"
+    },
+    {
+      "id": "team:platform",
+      "kind": "team",
+      "evidence": null,
+      "origin": "declared",
+      "confidence": "high"
+    }
+  ],
+  "edges": [
+    {
+      "from": "package:internal/kg/graph",
+      "to": "package:internal/kg/model",
+      "kind": "imports",
+      "evidence": [
+        {
+          "source": "internal/kg/graph/graph.go",
+          "line": 20,
+          "rule": "E1.import"
+        }
+      ],
+      "origin": "derived",
+      "confidence": "certain"
+    }
+  ]
+}
