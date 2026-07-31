@@ -3,8 +3,8 @@
 #
 # Documents the intended prod posture. Cluster-specific values below
 # (ingress className/host/annotations, monitoring/ingress namespace
-# selectors, existingSecret name) are ASSUMPTIONS for a generic cluster —
-# override per-environment.
+# selectors, existingSecret name, prometheusRule release label) are
+# ASSUMPTIONS for a generic cluster — override per-environment.
 
 env:
   ONEOPS_ENV: production
@@ -52,3 +52,20 @@ ingress:
   tls:
     enabled: true
     secretName: oneops-controlplane-tls
+
+prometheusRule:
+  enabled: true
+  # ASSUMPTION: kube-prometheus-stack convention, where the Prometheus CR's
+  # ruleSelector matches `release: <helm release name of the stack>`.
+  # Override to match the target cluster's Prometheus Operator install.
+  labels:
+    release: kube-prometheus-stack
+  slo:
+    # Same three-nines objective as the default; production is where it's
+    # enforced. Tighten here (not in values.yaml) if a stricter SLO is
+    # committed to for this environment.
+    availabilityObjective: "99.9"
+    latencySLOSeconds: 1.0
+    auditVerifyStalenessSeconds: 600
+    webhookFailureRatio: 0.05
+    policyFailureRatio: 0.05

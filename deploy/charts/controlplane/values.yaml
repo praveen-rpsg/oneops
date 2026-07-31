@@ -101,3 +101,34 @@ ingress:
   tls:
     enabled: false
     secretName: ""
+
+# Prometheus Operator PrometheusRule (SLO burn-rate + domain-critical alerts).
+# Off by default: emitting metrics does not obligate a cluster to run the
+# Prometheus Operator, and a CRD that doesn't exist would fail `helm install`.
+# See docs/observability/SLO.md for what each alert means and why.
+prometheusRule:
+  enabled: false
+  # Extra labels merged onto the PrometheusRule so a Prometheus CR's
+  # ruleSelector/ruleNamespaceSelector can pick it up (e.g. `release: <name>`
+  # for the kube-prometheus-stack convention). Chart labels are always applied.
+  labels: {}
+  slo:
+    # Availability objective as a percentage string, e.g. "99.9" == three
+    # nines. Drives both burn-rate alert thresholds (fastBurn = 14.4x the
+    # implied error budget, slowBurn = 6x) per the Google SRE workbook's
+    # multi-window multi-burn-rate method.
+    availabilityObjective: "99.9"
+    # p99 http_request_duration_seconds threshold, in seconds, sustained over
+    # 5m, before OneOpsLatencySLOBreach fires.
+    latencySLOSeconds: 1.0
+    # Seconds since oneops_audit_last_verification_timestamp_seconds before
+    # OneOpsAuditVerifierStale fires. Default is 2x the scheduler's default
+    # ONEOPS_AUDIT_VERIFY_INTERVAL_SECONDS (300s) — override this alongside
+    # that env var if the sweep interval is changed.
+    auditVerifyStalenessSeconds: 600
+    # Fraction (0-1) of webhook delivery attempts that may fail over 15m
+    # before OneOpsWebhookFailureRatioHigh fires.
+    webhookFailureRatio: 0.05
+    # Fraction (0-1) of policy executions that may fail over 15m before
+    # OneOpsPolicyFailureRatioHigh fires.
+    policyFailureRatio: 0.05
