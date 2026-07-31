@@ -91,6 +91,10 @@ type Server struct {
 	// Tenant registry; nil until SetTenants. While nil the platform resolves
 	// every request to the system tenant, which is the pre-tenancy behaviour.
 	tenants domain.TenantRepository
+
+	// Per-tenant rate limiter (ADR-SECURITY-004); nil when
+	// ONEOPS_RATE_LIMIT_ENABLED=false, which s.rateLimit treats as pass-through.
+	limiter *rateLimiter
 }
 
 // SetGovernance wires the Governance Engine behind the constitutional-operation
@@ -125,7 +129,7 @@ func NewServer(
 	metrics *observability.Metrics,
 	ready func(context.Context) error,
 ) *Server {
-	return &Server{
+	s := &Server{
 		cfg:      cfg,
 		log:      log,
 		repo:     repo,
@@ -134,6 +138,10 @@ func NewServer(
 		metrics:  metrics,
 		health:   newHealth(ready),
 	}
+	if cfg.RateLimitEnabled {
+		s.limiter = newRateLimiter(float64(cfg.RateLimitRPS), cfg.RateLimitBurst, rateLimiterIdleTTL)
+	}
+	return s
 }
 
 // SetInvariantGate installs the check that decides whether the tenant-data
@@ -196,6 +204,11 @@ func (s *Server) routes() *chi.Mux {
 		// diagnosed.
 		rt.Use(s.invariantGate)
 		rt.Use(s.authenticate)
+		// Per-tenant rate limiting runs after authentication so the tenant is
+		// always resolved (ADR-SECURITY-004): a runaway or abusive tenant is
+		// throttled without being able to starve any other tenant's share of
+		// this instance's capacity.
+		rt.Use(s.rateLimit)
 		rt.With(s.requirePermission(auth.PermRead)).Get("/artifacts", s.listArtifacts)
 		rt.With(s.requirePermission(auth.PermRead)).Get("/artifacts/{id}", s.getArtifact)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/artifacts", s.createArtifact)
