@@ -6,7 +6,7 @@ LDFLAGS := -s -w -X $(PKG)/pkg/version.Version=$(VERSION) -X $(PKG)/pkg/version.
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down build run test test-integration cover lint fmt vet tidy docker migrate-hash migrate-validate clean db-backup db-restore dr-drill db-reset web web-test contract-breaking
+.PHONY: help up down build graph run test test-integration cover lint fmt vet tidy docker migrate-hash migrate-validate clean db-backup db-restore dr-drill db-reset web web-test contract-breaking
 
 MIGRATIONS_DIR := internal/store/migrate/sql
 ATLAS := docker run --rm -v "$(PWD)":/src -w /src arigaio/atlas:latest
@@ -46,6 +46,9 @@ down: ## Stop local dependencies and remove volumes
 
 build: ## Build the control-plane binary into ./bin
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/controlplane ./cmd/controlplane
+
+graph: ## Derive the knowledge graph into pkg.json (generated, never committed)
+	@go run ./cmd/kg build
 
 run: ## Run the control plane locally
 	@$(DOTENV) go run ./cmd/controlplane

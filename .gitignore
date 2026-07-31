@@ -3,6 +3,11 @@
 coverage.out
 coverage.html
 
+# The knowledge graph is generated, never committed (ADR-PKG-001). It is
+# derived from the whole tree, so every change regenerates it and every
+# concurrent pull request would conflict on it. `make graph` rewrites it.
+/pkg.json
+
 # database dumps — never commit data
 /backups/
 *.dump
