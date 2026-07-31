@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "commit": "",
+  "nodes": [
+    {
+      "id": "package:example.test/fixture/alpha",
+      "kind": "package",
+      "attrs": {
+        "dir": "alpha",
+        "name": "alpha"
+      },
+      "evidence": [
+        {
+          "source": "alpha",
+          "rule": "E1.package"
+        }
+      ],
+      "origin": "derived",
+      "confidence": "certain"
+    },
+    {
+      "id": "package:example.test/fixture/beta",
+      "kind": "package",
+      "attrs": {
+        "dir": "beta",
+        "name": "beta"
+      },
+      "evidence": [
+        {
+          "source": "beta",
+          "rule": "E1.package"
+        }
+      ],
+      "origin": "derived",
+      "confidence": "certain"
+    },
+    {
+      "id": "package:example.test/fixture/gamma",
+      "kind": "package",
+      "attrs": {
+        "dir": "gamma",
+        "name": "gamma"
+      },
+      "evidence": [
+        {
+          "source": "gamma",
+          "rule": "E1.package"
+        }
+      ],
+      "origin": "derived",
+      "confidence": "certain"
+    },
+    {
+      "id": "package:example.test/fixture/testonly",
+      "kind": "package",
+      "attrs": {
+        "dir": "testonly",
+        "name": "testonly"
+      },
+      "evidence": [
+        {
+          "source": "testonly",
+          "rule": "E1.package"
+        }
+      ],
+      "origin": "derived",
+      "confidence": "certain"
+    }
+  ],
+  "edges": [
+    {
+      "from": "package:example.test/fixture/alpha",
+      "to": "package:example.test/fixture/beta",
+      "kind": "imports",
+      "evidence": [
+        {
+          "source": "alpha",
+          "rule": "E1.import"
+        }
+      ],
+      "origin": "derived",
+      "confidence": "certain"
+    },
+    {
+      "from": "package:example.test/fixture/gamma",
+      "to": "package:example.test/fixture/alpha",
+      "kind": "imports",
+      "evidence": [
+        {
+          "source": "gamma",
+          "rule": "E1.import"
+        }
+      ],
+      "origin": "derived",
+      "confidence": "certain"
+    },
+    {
+      "from": "package:example.test/fixture/gamma",
+      "to": "package:example.test/fixture/beta",
+      "kind": "imports",
+      "evidence": [
+        {
+          "source": "gamma",
+          "rule": "E1.import"
+        }
+      ],
+      "origin": "derived",
+      "confidence": "certain"
+    }
+  ]
+}
