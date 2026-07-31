@@ -11,7 +11,7 @@ import (
 	"github.com/rpsg/oneops/internal/domain"
 )
 
-const tenantColumns = `tenant_id, slug, name, external_id, status, row_version, created_at, updated_at`
+const tenantColumns = `tenant_id, slug, name, external_id, allowed_issuers, status, row_version, created_at, updated_at`
 
 // TenantStore is the PostgreSQL implementation of domain.TenantRepository.
 type TenantStore struct {
@@ -31,7 +31,7 @@ func scanTenant(s scanner) (*domain.Tenant, error) {
 		status string
 	)
 	if err := s.Scan(
-		&t.TenantID, &t.Slug, &t.Name, &t.ExternalID, &status,
+		&t.TenantID, &t.Slug, &t.Name, &t.ExternalID, &t.AllowedIssuers, &status,
 		&t.RowVersion, &t.CreatedAt, &t.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -44,20 +44,28 @@ func scanTenant(s scanner) (*domain.Tenant, error) {
 // server error: both are unique by index and both are caller-supplied.
 func (s *TenantStore) Create(ctx context.Context, t *domain.Tenant) (*domain.Tenant, error) {
 	var created *domain.Tenant
+	// A nil slice must reach the NOT NULL text[] column as an empty array, not
+	// NULL; empty is the safe default (default IdP only).
+	issuers := t.AllowedIssuers
+	if issuers == nil {
+		issuers = []string{}
+	}
 	err := withAdminAudit(ctx, s.pool,
 		func() []domain.AdminAct {
 			return []domain.AdminAct{{
 				Operation: domain.AdminTenantCreated,
 				Subject:   domain.AdminSubject{TenantID: t.TenantID},
-				Detail:    map[string]any{"slug": t.Slug, "external_id": t.ExternalID},
+				Detail: map[string]any{
+					"slug": t.Slug, "external_id": t.ExternalID, "allowed_issuers": issuers,
+				},
 			}}
 		},
 		func(tx pgx.Tx) error {
 			row := tx.QueryRow(ctx, `
-				INSERT INTO tenant (tenant_id, slug, name, external_id, status)
-				VALUES ($1, $2, $3, $4, $5)
+				INSERT INTO tenant (tenant_id, slug, name, external_id, allowed_issuers, status)
+				VALUES ($1, $2, $3, $4, $5, $6)
 				RETURNING `+tenantColumns,
-				t.TenantID, t.Slug, t.Name, t.ExternalID, string(t.Status))
+				t.TenantID, t.Slug, t.Name, t.ExternalID, issuers, string(t.Status))
 
 			var scanErr error
 			created, scanErr = scanTenant(row)
@@ -168,6 +176,52 @@ func (s *TenantStore) SetStatus(
 			}
 			if scanErr != nil {
 				return fmt.Errorf("set tenant status: %w", scanErr)
+			}
+			return nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// SetAllowedIssuers replaces a tenant's issuer binding under optimistic
+// concurrency, through the same administrative-audit chokepoint every other
+// tenant mutation uses. An empty slice is stored as an empty array, restoring
+// the safe default (default IdP only).
+func (s *TenantStore) SetAllowedIssuers(
+	ctx context.Context, tenantID string, rowVersion int64, issuers []string,
+) (*domain.Tenant, error) {
+	if issuers == nil {
+		issuers = []string{}
+	}
+	var t *domain.Tenant
+	err := withAdminAudit(ctx, s.pool,
+		func() []domain.AdminAct {
+			return []domain.AdminAct{{
+				Operation: domain.AdminTenantIssuersChanged,
+				Subject:   domain.AdminSubject{TenantID: tenantID},
+				Detail:    map[string]any{"allowed_issuers": issuers},
+			}}
+		},
+		func(tx pgx.Tx) error {
+			row := tx.QueryRow(ctx, `
+				UPDATE tenant
+				   SET allowed_issuers = $3, row_version = row_version + 1, updated_at = now()
+				 WHERE tenant_id = $1 AND row_version = $2
+				RETURNING `+tenantColumns,
+				tenantID, rowVersion, issuers)
+
+			var scanErr error
+			t, scanErr = scanTenant(row)
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				if _, getErr := s.Get(ctx, tenantID); getErr != nil {
+					return getErr
+				}
+				return domain.ErrVersionMismatch
+			}
+			if scanErr != nil {
+				return fmt.Errorf("set tenant allowed issuers: %w", scanErr)
 			}
 			return nil
 		})

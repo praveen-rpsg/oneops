@@ -69,6 +69,28 @@ func TestMultiIdPSelectsByIssuer(t *testing.T) {
 	}
 }
 
+// Verify carries the VERIFIED issuer out in the claims, so a downstream
+// issuer-to-tenant binding rests on a checked value (ADR-IDENTITY-003).
+func TestVerifyCarriesVerifiedIssuer(t *testing.T) {
+	v := multiVerifier(t)
+
+	a, err := v.Verify(mintFor(t, idpAIssuer, idpAAud, idpASecret, nil))
+	if err != nil {
+		t.Fatalf("verify idp A: %v", err)
+	}
+	if a.Issuer != idpAIssuer {
+		t.Errorf("claims.Issuer = %q, want %q", a.Issuer, idpAIssuer)
+	}
+
+	b, err := v.Verify(mintFor(t, idpBIssuer, idpBAud, idpBSecret, nil))
+	if err != nil {
+		t.Fatalf("verify idp B: %v", err)
+	}
+	if b.Issuer != idpBIssuer {
+		t.Errorf("claims.Issuer = %q, want %q", b.Issuer, idpBIssuer)
+	}
+}
+
 func TestMultiIdPRejectsCrossAudience(t *testing.T) {
 	v := multiVerifier(t)
 

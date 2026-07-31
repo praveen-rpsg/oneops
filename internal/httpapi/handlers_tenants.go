@@ -18,32 +18,57 @@ import (
 func (s *Server) SetTenants(repo domain.TenantRepository) { s.tenants = repo }
 
 type tenantDTO struct {
-	TenantID   string    `json:"tenant_id"`
-	Slug       string    `json:"slug"`
-	Name       string    `json:"name"`
-	ExternalID string    `json:"external_id,omitempty"`
-	Status     string    `json:"status"`
-	RowVersion int64     `json:"row_version"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	TenantID       string    `json:"tenant_id"`
+	Slug           string    `json:"slug"`
+	Name           string    `json:"name"`
+	ExternalID     string    `json:"external_id,omitempty"`
+	AllowedIssuers []string  `json:"allowed_issuers"`
+	Status         string    `json:"status"`
+	RowVersion     int64     `json:"row_version"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func toTenantDTO(t *domain.Tenant) tenantDTO {
+	issuers := t.AllowedIssuers
+	if issuers == nil {
+		issuers = []string{}
+	}
 	return tenantDTO{
 		TenantID: t.TenantID, Slug: t.Slug, Name: t.Name,
-		ExternalID: t.ExternalID, Status: string(t.Status),
+		ExternalID: t.ExternalID, AllowedIssuers: issuers, Status: string(t.Status),
 		RowVersion: t.RowVersion, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
 	}
 }
 
 type createTenantRequest struct {
-	Slug       string `json:"slug"`
-	Name       string `json:"name"`
-	ExternalID string `json:"external_id"`
+	Slug           string   `json:"slug"`
+	Name           string   `json:"name"`
+	ExternalID     string   `json:"external_id"`
+	AllowedIssuers []string `json:"allowed_issuers"`
 }
 
+// patchTenantRequest carries an optional status change and/or an optional
+// allowed_issuers replacement. AllowedIssuers is a pointer so an absent field
+// (leave unchanged) is distinguishable from an explicit empty list (reset to
+// the safe default: default IdP only).
 type patchTenantRequest struct {
-	Status string `json:"status"`
+	Status         string    `json:"status"`
+	AllowedIssuers *[]string `json:"allowed_issuers"`
+}
+
+// normalizeIssuers trims each issuer and drops blank entries, so a caller
+// cannot smuggle an empty string into the binding (which AllowsIssuer would
+// never match anyway) and so the stored set is clean. A nil or all-blank input
+// yields an empty set, which is the safe default: only the default IdP.
+func normalizeIssuers(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, iss := range in {
+		if s := strings.TrimSpace(iss); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // listTenants returns every registered tenant.
@@ -79,11 +104,12 @@ func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
 	t := &domain.Tenant{
 		// Identifiers are minted here rather than accepted from the caller, so a
 		// client cannot choose an id that collides with the system tenant.
-		TenantID:   ulid.Make().String(),
-		Slug:       strings.ToLower(strings.TrimSpace(req.Slug)),
-		Name:       strings.TrimSpace(req.Name),
-		ExternalID: strings.TrimSpace(req.ExternalID),
-		Status:     domain.TenantActive,
+		TenantID:       ulid.Make().String(),
+		Slug:           strings.ToLower(strings.TrimSpace(req.Slug)),
+		Name:           strings.TrimSpace(req.Name),
+		ExternalID:     strings.TrimSpace(req.ExternalID),
+		AllowedIssuers: normalizeIssuers(req.AllowedIssuers),
+		Status:         domain.TenantActive,
 	}
 	if err := t.Validate(); err != nil {
 		s.mapError(w, r, err)
@@ -119,6 +145,43 @@ func (s *Server) patchTenant(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "invalid request", "malformed JSON body")
 		return
 	}
+
+	// An allowed_issuers replacement is handled on its own path: it is the one
+	// mutation the registry exposes besides suspension, it runs through the same
+	// audited store method, and it is guarded by the row version. When the body
+	// carries allowed_issuers, that is the operation — status is not required.
+	if req.AllowedIssuers != nil {
+		issuers := normalizeIssuers(*req.AllowedIssuers)
+		if err := domain.ValidateAllowedIssuers(issuers); err != nil {
+			s.mapError(w, r, err)
+			return
+		}
+		current, err := s.tenants.Get(r.Context(), id)
+		if errors.Is(err, domain.ErrNotFound) {
+			writeProblem(w, r, http.StatusNotFound, "not found", "no such tenant")
+			return
+		}
+		if err != nil {
+			s.mapError(w, r, err)
+			return
+		}
+		updated, err := s.tenants.SetAllowedIssuers(r.Context(), id, current.RowVersion, issuers)
+		if errors.Is(err, domain.ErrNotFound) {
+			writeProblem(w, r, http.StatusNotFound, "not found", "no such tenant")
+			return
+		}
+		if errors.Is(err, domain.ErrVersionMismatch) {
+			writeProblem(w, r, http.StatusConflict, "conflict", "tenant was modified concurrently")
+			return
+		}
+		if err != nil {
+			s.mapError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, toTenantDTO(updated))
+		return
+	}
+
 	status := domain.TenantStatus(strings.TrimSpace(req.Status))
 	if !status.Valid() {
 		s.mapError(w, r, domain.NewValidationError("status", "must be one of: active, suspended"))

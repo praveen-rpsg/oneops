@@ -233,6 +233,90 @@ func TestTenantStore_DatabaseRejectsMalformedSlug(t *testing.T) {
 	}
 }
 
+// allowed_issuers round-trips through the text[] column, and an unset binding
+// reads back as an empty (non-nil) set — the safe default, default IdP only
+// (ADR-IDENTITY-003).
+func TestTenantStore_AllowedIssuersRoundTrip(t *testing.T) {
+	s := tenantStore(t)
+	ctx := adminTestCtx()
+
+	// Default: no issuers supplied -> empty set, not NULL.
+	def, err := s.Create(ctx, newTenant("issuers-default", "ext-issuers-default"))
+	if err != nil {
+		t.Fatalf("create default: %v", err)
+	}
+	if def.AllowedIssuers == nil || len(def.AllowedIssuers) != 0 {
+		t.Fatalf("default allowed_issuers = %#v, want empty non-nil", def.AllowedIssuers)
+	}
+	if !def.AllowsIssuer("https://oneops.local", "https://oneops.local") {
+		t.Error("empty binding must allow the default issuer")
+	}
+	if def.AllowsIssuer("https://idp-b.example", "https://oneops.local") {
+		t.Error("empty binding must NOT allow a non-default issuer")
+	}
+
+	// Explicit binding round-trips.
+	bound := newTenant("issuers-bound", "ext-issuers-bound")
+	bound.AllowedIssuers = []string{"https://idp-b.example"}
+	created, err := s.Create(ctx, bound)
+	if err != nil {
+		t.Fatalf("create bound: %v", err)
+	}
+	got, err := s.Get(ctx, created.TenantID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(got.AllowedIssuers) != 1 || got.AllowedIssuers[0] != "https://idp-b.example" {
+		t.Fatalf("allowed_issuers = %#v, want [https://idp-b.example]", got.AllowedIssuers)
+	}
+	if got.AllowsIssuer("https://oneops.local", "https://oneops.local") {
+		t.Error("an explicit set must not implicitly include the default issuer")
+	}
+	if !got.AllowsIssuer("https://idp-b.example", "https://oneops.local") {
+		t.Error("the bound issuer must be allowed")
+	}
+}
+
+// SetAllowedIssuers is optimistic-concurrency guarded and audited, exactly like
+// SetStatus. It resets to the safe default on an empty slice.
+func TestTenantStore_SetAllowedIssuersOptimistic(t *testing.T) {
+	s := tenantStore(t)
+	ctx := adminTestCtx()
+
+	created, err := s.Create(ctx, newTenant("bind-me", "ext-bind"))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	updated, err := s.SetAllowedIssuers(ctx, created.TenantID, created.RowVersion,
+		[]string{"https://idp-b.example"})
+	if err != nil {
+		t.Fatalf("set allowed issuers: %v", err)
+	}
+	if updated.RowVersion != 2 || len(updated.AllowedIssuers) != 1 {
+		t.Fatalf("unexpected update: %+v", updated)
+	}
+
+	// Stale version refused.
+	if _, err := s.SetAllowedIssuers(ctx, created.TenantID, created.RowVersion, nil); !errors.Is(err, domain.ErrVersionMismatch) {
+		t.Fatalf("stale version = %v, want ErrVersionMismatch", err)
+	}
+
+	// Reset to default (empty) works and reads back empty non-nil.
+	reset, err := s.SetAllowedIssuers(ctx, created.TenantID, updated.RowVersion, nil)
+	if err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if reset.AllowedIssuers == nil || len(reset.AllowedIssuers) != 0 {
+		t.Fatalf("reset allowed_issuers = %#v, want empty non-nil", reset.AllowedIssuers)
+	}
+
+	// Unknown tenant is 404, not a version conflict.
+	if _, err := s.SetAllowedIssuers(ctx, "no-such-tenant", 1, nil); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("unknown tenant = %v, want ErrNotFound", err)
+	}
+}
+
 // Status is constrained in the schema as well as the domain.
 func TestTenantStore_DatabaseRejectsUnknownStatus(t *testing.T) {
 	s := tenantStore(t)

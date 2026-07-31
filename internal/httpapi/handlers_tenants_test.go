@@ -101,6 +101,24 @@ func (f *fakeTenants) SetStatus(
 	return t, nil
 }
 
+func (f *fakeTenants) SetAllowedIssuers(
+	_ context.Context, id string, rv int64, issuers []string,
+) (*domain.Tenant, error) {
+	t, ok := f.byID[id]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	if t.RowVersion != rv {
+		return nil, domain.ErrVersionMismatch
+	}
+	if issuers == nil {
+		issuers = []string{}
+	}
+	t.AllowedIssuers = issuers
+	t.RowVersion++
+	return t, nil
+}
+
 func activeTenant(id, ext, slug string) *domain.Tenant {
 	return &domain.Tenant{
 		TenantID: id, ExternalID: ext, Slug: slug, Name: slug,
@@ -248,6 +266,99 @@ func TestCreateTenant(t *testing.T) {
 	// The id is minted server-side so a caller cannot collide with "system".
 	if got.TenantID == "" || got.TenantID == domain.SystemTenantID {
 		t.Errorf("tenant id should be server-minted and distinct: %q", got.TenantID)
+	}
+}
+
+func TestCreateTenantWithAllowedIssuers(t *testing.T) {
+	srv, _ := newTestServer(false)
+	srv.SetTenants(newFakeTenants())
+
+	body := `{"slug":"acme","name":"Acme","external_id":"ext-acme","allowed_issuers":["https://idp-b.example"," "]}`
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPost, "/v1/admin/tenants", strings.NewReader(body)))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	var got tenantDTO
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	// The blank entry is normalised out; only the real issuer remains.
+	if len(got.AllowedIssuers) != 1 || got.AllowedIssuers[0] != "https://idp-b.example" {
+		t.Fatalf("allowed_issuers = %#v, want [https://idp-b.example]", got.AllowedIssuers)
+	}
+}
+
+// A create with no allowed_issuers yields an empty (non-null) array — the safe
+// default the client can read back and reason about.
+func TestCreateTenantDefaultsAllowedIssuersToEmpty(t *testing.T) {
+	srv, _ := newTestServer(false)
+	srv.SetTenants(newFakeTenants())
+
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPost, "/v1/admin/tenants",
+		strings.NewReader(`{"slug":"acme","name":"Acme"}`)))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"allowed_issuers":[]`) {
+		t.Errorf("expected an empty allowed_issuers array: %s", rec.Body.String())
+	}
+}
+
+func TestPatchTenantAllowedIssuers(t *testing.T) {
+	srv, _ := newTestServer(false)
+	srv.SetTenants(newFakeTenants(activeTenant("t1", "ext-1", "acme")))
+
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPatch, "/v1/admin/tenants/t1",
+		strings.NewReader(`{"allowed_issuers":["https://idp-b.example"]}`)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch issuers = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var got tenantDTO
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if len(got.AllowedIssuers) != 1 || got.AllowedIssuers[0] != "https://idp-b.example" {
+		t.Fatalf("allowed_issuers = %#v, want [https://idp-b.example]", got.AllowedIssuers)
+	}
+}
+
+// An explicit empty array resets a tenant to the safe default (default IdP only).
+func TestPatchTenantResetsAllowedIssuers(t *testing.T) {
+	srv, _ := newTestServer(false)
+	bound := activeTenant("t1", "ext-1", "acme")
+	bound.AllowedIssuers = []string{"https://idp-b.example"}
+	srv.SetTenants(newFakeTenants(bound))
+
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPatch, "/v1/admin/tenants/t1",
+		strings.NewReader(`{"allowed_issuers":[]}`)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reset issuers = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"allowed_issuers":[]`) {
+		t.Errorf("expected an empty allowed_issuers array: %s", rec.Body.String())
+	}
+}
+
+// Patching an unknown tenant's issuers is a 404, not a silent success.
+func TestPatchTenantAllowedIssuersUnknownIsNotFound(t *testing.T) {
+	srv, _ := newTestServer(false)
+	srv.SetTenants(newFakeTenants())
+
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPatch, "/v1/admin/tenants/nope",
+		strings.NewReader(`{"allowed_issuers":["https://idp-b.example"]}`)))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown tenant = %d, want 404", rec.Code)
 	}
 }
 

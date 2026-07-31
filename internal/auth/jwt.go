@@ -21,6 +21,12 @@ type Claims struct {
 	Subject string
 	Roles   []string
 	Tenant  string
+	// Issuer is the VERIFIED `iss` of the token — the value jwt.Parse validated
+	// against the matched IdP, not merely the one peeked to select the key. The
+	// authentication boundary uses it to enforce that the token's issuer is
+	// authorised for the tenant it claims (ADR-IDENTITY-003), which is what
+	// stops one configured IdP from authenticating another tenant.
+	Issuer string
 }
 
 // IDPConfig describes one trusted identity provider: enterprise SSO means
@@ -135,7 +141,14 @@ func (v *Verifier) Verify(raw string) (*Claims, error) {
 	if tenant == "" {
 		tenant, _ = mc["tid"].(string)
 	}
-	return &Claims{Subject: sub, Roles: parseRoles(mc["roles"]), Tenant: tenant}, nil
+	// The issuer carried out is the one jwt.Parse validated (WithIssuer(iss)
+	// above required the token's own `iss` to equal it), not the unverified
+	// peeked value — so a downstream authorization decision rests on a checked
+	// claim.
+	verifiedIss, _ := mc.GetIssuer()
+	return &Claims{
+		Subject: sub, Roles: parseRoles(mc["roles"]), Tenant: tenant, Issuer: verifiedIss,
+	}, nil
 }
 
 // peekIssuer reads the `iss` claim without verifying the signature, so the

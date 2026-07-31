@@ -1916,7 +1916,7 @@ components:
           description: Present only when a further page exists.
     Tenant:
       type: object
-      required: [tenant_id, slug, name, status, row_version, created_at, updated_at]
+      required: [tenant_id, slug, name, allowed_issuers, status, row_version, created_at, updated_at]
       properties:
         tenant_id:
           type: string
@@ -1933,6 +1933,16 @@ components:
             Okta org id). Bearer tokens are resolved against this, never against
             tenant_id, so the IdP can change without rewriting foreign keys.
             Empty until an identity provider is bound.
+        allowed_issuers:
+          type: array
+          items: { type: string }
+          description: >-
+            Issuers (JWT iss) permitted to authenticate this tenant. An EMPTY
+            array means the tenant may authenticate ONLY via the default IdP
+            (ONEOPS_JWT_ISSUER) — safe by default and backward compatible. A
+            tenant that brings its own additional IdP must list that issuer here;
+            enforcement is fail-closed at the authentication boundary
+            (ADR-IDENTITY-003).
         status:
           type: string
           enum: [active, suspended]
@@ -1960,6 +1970,14 @@ components:
         external_id:
           type: string
           description: Optional. Must be unique across tenants when non-empty.
+        allowed_issuers:
+          type: array
+          items: { type: string }
+          description: >-
+            Optional. Issuers permitted to authenticate this tenant. Omit or
+            leave empty for the safe default (default IdP only, ONEOPS_JWT_ISSUER).
+            List an additional IdP's issuer to let it authenticate this tenant
+            (ADR-IDENTITY-003).
     User:
       type: object
       required: [user_id, email, display_name, status, row_version, created_at, updated_at]
@@ -2045,11 +2063,20 @@ components:
           enum: [active, suspended]
     PatchTenantRequest:
       type: object
-      required: [status]
+      description: >-
+        Supply a status change, or an allowed_issuers replacement. When
+        allowed_issuers is present it is the operation and status is not read; an
+        empty array resets the tenant to the safe default (default IdP only).
       properties:
         status:
           type: string
           enum: [active, suspended]
+        allowed_issuers:
+          type: array
+          items: { type: string }
+          description: >-
+            Replacement set of issuers permitted to authenticate this tenant.
+            Empty resets to the default IdP only (ADR-IDENTITY-003).
     GovernanceArchiveRequest:
       type: object
       required: [target_retention]
