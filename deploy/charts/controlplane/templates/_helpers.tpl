@@ -17,3 +17,15 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/name: {{ include "controlplane.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
+
+{{- define "controlplane.secretName" -}}
+{{- if .Values.existingSecret -}}
+{{ .Values.existingSecret }}
+{{- else -}}
+{{ include "controlplane.fullname" . }}
+{{- end -}}
+{{- end -}}
+
+{{- define "controlplane.metricsServiceName" -}}
+{{- printf "%s-metrics" (include "controlplane.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
