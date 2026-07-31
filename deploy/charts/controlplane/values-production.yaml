@@ -1,0 +1,71 @@
+# Production overlay: `helm template|install controlplane deploy/charts/controlplane \
+#   -f deploy/charts/controlplane/values-production.yaml`
+#
+# Documents the intended prod posture. Cluster-specific values below
+# (ingress className/host/annotations, monitoring/ingress namespace
+# selectors, existingSecret name, prometheusRule release label) are
+# ASSUMPTIONS for a generic cluster — override per-environment.
+
+env:
+  ONEOPS_ENV: production
+  ONEOPS_HTTP_ADDR: ":8080"
+  # Metrics stay on their own listener, never merged onto the public
+  # address — config.go refuses to boot in production otherwise.
+  ONEOPS_METRICS_ADDR: ":9090"
+
+# Sensitive env comes from a Secret provisioned out of band (sealed-secrets,
+# external-secrets, vault-agent, ...). The chart does not create it.
+existingSecret: "oneops-controlplane-credentials"
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercent: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+  # ASSUMPTION: ingress-nginx in namespace "ingress-nginx", Prometheus in
+  # namespace "monitoring". Override to match the target cluster.
+  ingressNamespaceSelector:
+    kubernetes.io/metadata.name: ingress-nginx
+  monitoringNamespaceSelector:
+    kubernetes.io/metadata.name: monitoring
+
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+
+ingress:
+  enabled: true
+  # ASSUMPTION: nginx ingress class and cert-manager issuing to the given
+  # secret. Override className/annotations/host/tls for the target cluster.
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  host: controlplane.oneops.example.com
+  tls:
+    enabled: true
+    secretName: oneops-controlplane-tls
+
+prometheusRule:
+  enabled: true
+  # ASSUMPTION: kube-prometheus-stack convention, where the Prometheus CR's
+  # ruleSelector matches `release: <helm release name of the stack>`.
+  # Override to match the target cluster's Prometheus Operator install.
+  labels:
+    release: kube-prometheus-stack
+  slo:
+    # Same three-nines objective as the default; production is where it's
+    # enforced. Tighten here (not in values.yaml) if a stricter SLO is
+    # committed to for this environment.
+    availabilityObjective: "99.9"
+    latencySLOSeconds: 1.0
+    auditVerifyStalenessSeconds: 600
+    webhookFailureRatio: 0.05
+    policyFailureRatio: 0.05

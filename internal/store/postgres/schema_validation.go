@@ -120,11 +120,12 @@ var immutableAuditTables = []struct {
 	// (pg_trigger.tgenabled = 'A'). Origin-mode guards are suppressed by
 	// session_replication_role = 'replica', so for a table that has been
 	// hardened, a silent downgrade to 'O' re-opens that bypass and must be
-	// reported. audit_event is 'O' today and is hardened by its own change;
-	// until then, demanding 'A' of it would report a false problem at boot.
+	// reported. audit_event was hardened by 20260809000001 (ADR-AUDIT-008):
+	// both its guards, and both on every partition, are ENABLE ALWAYS, so a
+	// downgrade to 'O' is now a reported problem rather than the status quo.
 	alwaysRequired bool
 }{
-	{"audit_event", "trg_audit_event_no_row_mutate", "trg_audit_event_no_truncate", false},
+	{"audit_event", "trg_audit_event_no_row_mutate", "trg_audit_event_no_truncate", true},
 	{"admin_audit_event", "trg_admin_audit_event_no_row_mutate", "trg_admin_audit_event_no_truncate", true},
 }
 

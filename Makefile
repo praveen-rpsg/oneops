@@ -6,7 +6,7 @@ LDFLAGS := -s -w -X $(PKG)/pkg/version.Version=$(VERSION) -X $(PKG)/pkg/version.
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down build graph run test test-integration cover lint fmt vet tidy docker migrate-hash migrate-validate clean db-backup db-restore dr-drill db-reset web web-test contract-breaking
+.PHONY: help up down build graph run test test-integration cover lint fmt vet tidy docker migrate-hash migrate-validate clean db-backup db-restore dr-drill db-reset web web-test contract-breaking loadtest
 
 MIGRATIONS_DIR := internal/store/migrate/sql
 ATLAS := docker run --rm -v "$(PWD)":/src -w /src arigaio/atlas:latest
@@ -96,6 +96,32 @@ tidy: ## Tidy go modules
 
 test-integration: ## Run integration tests (TEST_DATABASE_URL, from .env if present)
 	@$(DOTENV) go test ./... -tags=integration -race -cover
+
+# T2-F: repeatable load harness for the /v1 API (throughput + latency
+# percentiles + status-code breakdown, including 429s ahead of T2-D landing).
+# Lives outside cmd/ under the loadtest build tag — see loadtest/main.go and
+# docs/observability/PERFORMANCE-BASELINE.md — so it never ships in the
+# control-plane binary and never has to satisfy the operational-binary guard
+# in internal/arch/wiring_test.go, which is built for a different kind of
+# program. Point it at a running instance with LOADTEST_BASE_URL; the JWT
+# fields must match the target's ONEOPS_JWT_ISSUER/AUDIENCE/HMAC_KEY.
+LOADTEST_BASE_URL     ?= http://localhost:8080
+LOADTEST_WORKERS      ?= 20
+LOADTEST_DURATION     ?= 30s
+LOADTEST_SEED         ?= 20
+LOADTEST_JWT_ISSUER   ?= https://oneops.local
+LOADTEST_JWT_AUDIENCE ?= oneops
+LOADTEST_JWT_SECRET   ?= dev-insecure-secret-change-me
+
+loadtest: ## Run the /v1 read/write load harness against LOADTEST_BASE_URL (see docs/observability/PERFORMANCE-BASELINE.md)
+	go run -tags loadtest ./loadtest \
+		-base-url=$(LOADTEST_BASE_URL) \
+		-workers=$(LOADTEST_WORKERS) \
+		-duration=$(LOADTEST_DURATION) \
+		-seed=$(LOADTEST_SEED) \
+		-jwt-issuer=$(LOADTEST_JWT_ISSUER) \
+		-jwt-audience=$(LOADTEST_JWT_AUDIENCE) \
+		-jwt-secret=$(LOADTEST_JWT_SECRET)
 
 docker: ## Build the container image
 	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t oneops/controlplane:$(VERSION) .

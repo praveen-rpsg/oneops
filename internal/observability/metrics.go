@@ -14,10 +14,11 @@ import (
 
 // Metrics owns the Prometheus registry and HTTP instrumentation.
 type Metrics struct {
-	reg      *prometheus.Registry
-	reqTotal *prometheus.CounterVec
-	reqDur   *prometheus.HistogramVec
-	inflight prometheus.Gauge
+	reg         *prometheus.Registry
+	reqTotal    *prometheus.CounterVec
+	reqDur      *prometheus.HistogramVec
+	inflight    prometheus.Gauge
+	rateLimited prometheus.Counter
 }
 
 // NewMetrics builds and registers the metric collectors.
@@ -40,10 +41,19 @@ func NewMetrics() *Metrics {
 			Name: "http_requests_in_flight",
 			Help: "In-flight HTTP requests.",
 		}),
+		// No tenant label: cardinality is bounded by tenant count, which is
+		// unbounded over the platform's lifetime (ADR-SECURITY-004).
+		rateLimited: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "oneops_rate_limited_total",
+			Help: "Total requests rejected by the per-tenant rate limiter.",
+		}),
 	}
-	reg.MustRegister(m.reqTotal, m.reqDur, m.inflight)
+	reg.MustRegister(m.reqTotal, m.reqDur, m.inflight, m.rateLimited)
 	return m
 }
+
+// IncRateLimited records a request rejected by the per-tenant rate limiter.
+func (m *Metrics) IncRateLimited() { m.rateLimited.Inc() }
 
 // Handler serves the Prometheus exposition endpoint.
 func (m *Metrics) Handler() http.Handler {

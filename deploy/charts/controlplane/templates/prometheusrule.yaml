@@ -1,0 +1,234 @@
+{{- if .Values.prometheusRule.enabled }}
+{{- $objective := .Values.prometheusRule.slo.availabilityObjective | float64 }}
+{{- $errorBudget := divf (subf 100.0 $objective) 100.0 }}
+{{- $fastBurn := printf "%.6f" (mulf $errorBudget 14.4) }}
+{{- $slowBurn := printf "%.6f" (mulf $errorBudget 6.0) }}
+# Multi-window multi-burn-rate thresholds (Google SRE workbook, "Alerting on
+# SLOs"): fast burn consumes 2% of the 30d error budget in 1h, slow burn
+# consumes 5% in 6h. Both derive from the same {{ $objective }}% objective, so
+# tightening prometheusRule.slo.availabilityObjective tightens both alerts.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "controlplane.fullname" . }}-rules
+  labels:
+    {{- include "controlplane.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    # --- SLI recording rules -------------------------------------------------
+    # Pre-aggregated so the burn-rate alerts below are cheap to evaluate and so
+    # the same series back an SLO dashboard without recomputing the aggregation.
+    - name: {{ include "controlplane.fullname" . }}.slo.recording
+      rules:
+        - record: oneops:http_requests_error_ratio:rate5m
+          expr: |
+            sum(rate(http_requests_total{status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total[5m]))
+        - record: oneops:http_requests_error_ratio:rate30m
+          expr: |
+            sum(rate(http_requests_total{status=~"5.."}[30m]))
+            /
+            sum(rate(http_requests_total[30m]))
+        - record: oneops:http_requests_error_ratio:rate1h
+          expr: |
+            sum(rate(http_requests_total{status=~"5.."}[1h]))
+            /
+            sum(rate(http_requests_total[1h]))
+        - record: oneops:http_requests_error_ratio:rate6h
+          expr: |
+            sum(rate(http_requests_total{status=~"5.."}[6h]))
+            /
+            sum(rate(http_requests_total[6h]))
+        - record: oneops:http_request_duration_seconds:p99rate5m
+          expr: |
+            histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+
+    # --- Availability + latency SLO alerts -----------------------------------
+    - name: {{ include "controlplane.fullname" . }}.slo.alerts
+      rules:
+        - alert: OneOpsAvailabilitySLOFastBurn
+          expr: |
+            oneops:http_requests_error_ratio:rate5m > {{ $fastBurn }}
+            and
+            oneops:http_requests_error_ratio:rate1h > {{ $fastBurn }}
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Availability error budget burning fast (page)"
+            description: >-
+              1h HTTP 5xx ratio is {{`{{ $value | humanizePercentage }}`}},
+              which burns the {{ $objective }}% availability objective's 30d
+              error budget in under ~2 days at this rate. Confirmed over both the
+              5m and 1h windows to rule out a single spike.
+            runbook_url: "docs/runbooks/audit-integrity.md#3-alerts-suggested"
+
+        - alert: OneOpsAvailabilitySLOSlowBurn
+          expr: |
+            oneops:http_requests_error_ratio:rate30m > {{ $slowBurn }}
+            and
+            oneops:http_requests_error_ratio:rate6h > {{ $slowBurn }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Availability error budget burning slowly (ticket)"
+            description: >-
+              6h HTTP 5xx ratio is {{`{{ $value | humanizePercentage }}`}},
+              which burns the {{ $objective }}% availability objective's 30d
+              error budget in under ~5 days at this rate. Confirmed over both
+              the 30m and 6h windows to rule out a single spike.
+            runbook_url: "docs/runbooks/audit-integrity.md#3-alerts-suggested"
+
+        - alert: OneOpsLatencySLOBreach
+          expr: |
+            oneops:http_request_duration_seconds:p99rate5m > {{ .Values.prometheusRule.slo.latencySLOSeconds }}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "p99 request latency above the SLO target"
+            description: >-
+              p99 HTTP request latency over the last 5m is
+              {{`{{ $value | humanizeDuration }}`}}, above the
+              {{ .Values.prometheusRule.slo.latencySLOSeconds }}s target.
+            runbook_url: "docs/deployment.md#health--readiness"
+
+    # --- Domain-critical alerts (audit integrity, invariants, platform) -----
+    - name: {{ include "controlplane.fullname" . }}.domain.critical
+      rules:
+        - alert: OneOpsAuditIntegrityBroken
+          expr: oneops_audit_integrity_ok == 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "Audit-chain integrity break detected — page immediately"
+            description: >-
+              oneops_audit_integrity_ok is {{`{{ $value }}`}} (0 = the last
+              verification sweep found a chain break or a transport error).
+              The audit chain is tamper-evident and append-only; a break is a
+              constitutional integrity event, not a routine error.
+            runbook_url: "docs/runbooks/audit-integrity.md#4-respond-to-an-integrity-break-p1"
+
+        - alert: OneOpsInvariantBreached
+          expr: oneops_invariant_breached > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "A continuously-verified platform invariant is breached — instance is refusing tenant traffic"
+            description: >-
+              oneops_invariant_breached is {{`{{ $value }}`}} (ADR-SECURITY-002).
+              While this holds, /readyz returns 503 and background workers are
+              stopped; the instance is fail-closed, not down — but the fleet is
+              losing serving capacity for every replica in this state.
+            runbook_url: "docs/runbooks/audit-integrity.md"
+
+        - alert: OneOpsAuditVerifierStale
+          expr: |
+            time() - oneops_audit_last_verification_timestamp_seconds > {{ .Values.prometheusRule.slo.auditVerifyStalenessSeconds }}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Audit-integrity verification sweep has not completed recently"
+            description: >-
+              It has been {{`{{ $value | humanizeDuration }}`}} since the last
+              completed verification sweep, more than
+              {{ .Values.prometheusRule.slo.auditVerifyStalenessSeconds }}s.
+              The scheduler may be stuck, disabled, or the pod may be
+              unhealthy; a stale verifier means a real break could go
+              undetected.
+            runbook_url: "docs/runbooks/audit-integrity.md#1-what-runs"
+
+        - alert: OneOpsDependencyDown
+          expr: oneops_dependency_up == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "A required dependency is reporting unhealthy"
+            description: >-
+              oneops_dependency_up for dependency={{`{{ $labels.dependency }}`}}
+              has been 0 for 2m. Readiness fails on dependency loss, so
+              affected instances are removed from the load balancer.
+            runbook_url: "docs/deployment.md#health--readiness"
+
+        - alert: OneOpsStartupFailures
+          expr: increase(oneops_startup_failures_total[15m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Startup failures observed in the last 15m"
+            description: >-
+              {{`{{ $value }}`}} startup failure(s) in the last 15m. Usually
+              transient during a rollout (dependency not yet ready); sustained
+              increases indicate a bad config or migration on the new version.
+            runbook_url: "docs/deployment.md#startup-sequence-automatic"
+
+        - alert: OneOpsShutdownTimeouts
+          expr: increase(oneops_shutdown_timeouts_total[15m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Graceful-shutdown timeouts observed in the last 15m"
+            description: >-
+              {{`{{ $value }}`}} shutdown timeout(s) in the last 15m: a
+              replica did not drain in-flight work/workers before the
+              terminationGracePeriod. In-flight requests may have been cut
+              off; check for a deploy that is also slow to become ready.
+            runbook_url: "docs/deployment.md#startup-sequence-automatic"
+
+    # --- Delivery + automation alerts ----------------------------------------
+    - name: {{ include "controlplane.fullname" . }}.delivery.automation
+      rules:
+        - alert: OneOpsWebhookFailureRatioHigh
+          expr: |
+            sum(rate(oneops_webhook_failures_total[15m]))
+            /
+            (sum(rate(oneops_webhook_deliveries_total[15m])) + sum(rate(oneops_webhook_failures_total[15m])))
+            > {{ .Values.prometheusRule.slo.webhookFailureRatio }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Webhook delivery failure ratio is high"
+            description: >-
+              {{`{{ $value | humanizePercentage }}`}} of webhook delivery
+              attempts failed over the last 15m, above the
+              {{ .Values.prometheusRule.slo.webhookFailureRatio }} threshold.
+            runbook_url: "docs/runbooks/event-delivery.md#suggested-alerts"
+
+        - alert: OneOpsWebhookDeadLettersGrowing
+          expr: oneops_webhook_deadletters > 0
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Webhook deliveries are dead-lettering and not draining"
+            description: >-
+              oneops_webhook_deadletters has been {{`{{ $value }}`}} (non-zero)
+              for 15m: these deliveries will not be retried automatically and
+              require operator action.
+            runbook_url: "docs/runbooks/event-delivery.md#common-tasks"
+
+        - alert: OneOpsPolicyFailureRatioHigh
+          expr: |
+            sum(rate(oneops_policy_failures_total[15m]))
+            /
+            sum(rate(oneops_policy_executions_total[15m]))
+            > {{ .Values.prometheusRule.slo.policyFailureRatio }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Policy-automation failure ratio is high"
+            description: >-
+              {{`{{ $value | humanizePercentage }}`}} of policy executions
+              failed over the last 15m, above the
+              {{ .Values.prometheusRule.slo.policyFailureRatio }} threshold.
+            runbook_url: "docs/runbooks/policy-automation.md#suggested-alerts"
+{{- end }}

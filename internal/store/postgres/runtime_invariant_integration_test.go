@@ -192,6 +192,15 @@ func TestRuntimeInvariant_AuditImmutabilityDropIsDetectableButUnwatched(t *testi
 	if _, rerr := priv.Exec(context.Background(), victimDDL); rerr != nil {
 		t.Fatalf("RESTORE FAILED for %s — repair before trusting this database: %v", victim, rerr)
 	}
+	// pg_get_triggerdef() does not emit the ENABLE ALWAYS firing mode, so the
+	// restore above recreates the guard in origin mode. audit_event now requires
+	// ENABLE ALWAYS (ADR-AUDIT-008); without this re-arm the schema is left
+	// downgraded and every later test that first validates clean fails. The
+	// parent ALTER recurses to the partition.
+	if _, rerr := priv.Exec(context.Background(),
+		`ALTER TABLE audit_event ENABLE ALWAYS TRIGGER `+victim); rerr != nil {
+		t.Fatalf("RE-ARM FAILED for %s — repair before trusting this database: %v", victim, rerr)
+	}
 	if err != nil {
 		t.Fatalf("post-drop validate: %v", err)
 	}

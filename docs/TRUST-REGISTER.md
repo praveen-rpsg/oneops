@@ -53,6 +53,7 @@ fail-closed startup validator.
 | 30 | **A load-bearing invariant expressed as a boolean argument** (the chain-head `FOR UPDATE` — on which the gapless committed prefix and audit-derived ownership both rest — was `ReadChainHead(…, forUpdate bool)`, guarded by an integration test with no architecture tier; proven live that without it two transactions both claim the same seq and the second governance event is lost) | **The locking read is a distinct method (`ReadChainHeadForUpdate`), so the unsafe form cannot be produced by forgetting an argument; a tree-derived sweep forbids the non-locking read in production and requires every append path to take the lock** | ✓ | arch, int | **ADR-AUDIT-006** |
 | 31 | **A disaster-recovery drill that can destroy production** (`dr-drill.sh` took its target from the operator-supplied `DR_DRILL_DB` and ran `DROP DATABASE IF EXISTS $DRILL_DB` with **zero** expressions comparing it to the live database, so `DR_DRILL_DB=oneops` dropped production; scripts were outside the operational-tooling guard, which walked only `cmd/`) | **The drill refuses when its target is the database named in `ONEOPS_DB_URL`; `scripts/` gains the same registry guard as `cmd/`, and any script issuing `DROP DATABASE` must carry the refusal** | ✓ | arch | **ADR-TENANCY-010** |
 | 32 | **A cursor restored ahead of its log** (`webhook_cursor`/`policy_cursor` are watermarks, so a cursor past its chain head silently skips every event in between — recorded by ADR-CONCURRENCY-004 as "noted future hardening" and never built, leaving a **documented** open instance of the restore-inconsistency class) | **`CursorValidator` reports any cursor ahead of its chain head, or with no chain head at all, and is registered in `platformInvariants` so it gains the boot gate and the continuous sentinel together** | ✓ | int, arch | **ADR-TENANCY-011** |
+| 33 | **The constitutional audit chain rewritable and erasable via the replication-role bypass** (`audit_event`'s append-only triggers were created in origin mode, so `SET session_replication_role='replica'` suppressed them — proven live 2026-07-30 the owning pool rewrote all 22 rows, and again here that one UPDATE rewrote a row and `TRUNCATE audit_event_default` erased a partition, no error; separately `oneops_app` held UPDATE/DELETE on the append-only table by default grant) | **Both guards `ENABLE ALWAYS` on the parent AND every partition (the statement-level TRUNCATE trigger does not propagate, so each partition is armed explicitly), plus explicit `REVOKE UPDATE/DELETE/TRUNCATE` from `PUBLIC` and `oneops_app` on parent and partitions; the arming is a schema invariant, so a downgrade to origin is reported DOWNGRADED at boot and by the sentinel** | ✓ | int, startup | **ADR-AUDIT-008** |
 
 ## Class status
 
@@ -692,6 +693,58 @@ evidence, residual risks, status. New investigations add their boundary here.
   it is *correct*. `Requeue` is confined to the webhook — the work the caller was
   given — and does not re-derive the event owner from the audit log; that check
   remains at send time in the dispatcher, where the outbound effect happens.
+
+### Constitutional audit chain — armed always (ADR-AUDIT-008)
+
+- **Property.** The constitutional audit chain (`audit_event`) cannot be rewritten
+  or erased through the `session_replication_role='replica'` bypass, and the
+  request-path role cannot write it beyond appending. Both properties are
+  enforced structurally and the arming is re-verified continuously.
+- **Threat model.** (a) The owning pool / an operator / a DBA session sets
+  `session_replication_role='replica'` and UPDATEs, DELETEs, or TRUNCATEs a
+  partition — origin-mode triggers were suppressed, proven live (all 22 rows
+  rewritten 2026-07-30; a row rewritten and a partition erased again here).
+  (b) The request-path role holding UPDATE/DELETE by the blanket grant.
+  (c) A partition escaping the statement-level TRUNCATE guard, which PostgreSQL
+  does not propagate from the parent. (d) A silent downgrade of a hardened guard
+  back to origin mode.
+- **Root authority.** The triggers' firing mode in the catalogue
+  (`pg_trigger.tgenabled`) and the privilege grants, read by the *same*
+  `SchemaValidator` the boot gate and the sentinel use. `ENABLE ALWAYS` fires
+  regardless of replication role; the REVOKE removes privilege the append flow
+  never uses (the chain-head lock is on `audit_chain_head`, not `audit_event`).
+- **Failure assumptions.** An operator with DDL rights can still disable or drop
+  the triggers or re-grant the privileges; that is detected, not prevented. A
+  future partition inherits neither the TRUNCATE guard nor the revoke and must be
+  armed by the migration that adds it.
+- **Recovery assumptions.** None specific; the guard is per-statement. Restore
+  consistency is unchanged (ADR-TENANCY-006) — a restore/`pg_restore
+  --disable-triggers` runs as the owning role and is the exact insider path this
+  arming now refuses for `audit_event`.
+- **Operational assumptions.** The privileged pool (workers, migrations) is the
+  only role that can set `session_replication_role` at all; `oneops_app` cannot.
+  The append path uses `oneops_app` and needs only SELECT+INSERT here.
+- **Startup validation.** `audit_event.alwaysRequired = true`: the boot gate
+  refuses a schema whose guards are absent, DISABLED, or DOWNGRADED to origin, on
+  the parent or any partition.
+- **Runtime validation.** The sentinel (ADR-SECURITY-002/003) re-runs the same
+  check every interval and fails closed on a downgrade.
+- **Evidence.** Before: `UPDATE 1`; `TRUNCATE TABLE` (partition erased). After,
+  same role and statements: both refused with `audit_event is append-only`, row
+  survives. Trigger modes: parent + partition, both guards, all `'A'`. Privileges:
+  `oneops_app` = SELECT+INSERT only.
+- **Residual risks.** **Detection, not prevention, for the DDL path** — a
+  privileged operator can still disable/drop the guards or re-grant; the window
+  is bounded by the sentinel interval, not zero. **The guard proves presence and
+  arming, not correctness** — it does not prove the hash chain verifies (that is
+  the verifier's job) nor that the trigger body is right. **Not a tenant-facing
+  fix** — the tenant path was already closed. Future partitions must be armed by
+  their own migration; a missed one is reported, not silently unguarded.
+- **Status.** ✓ Closed. Enforced by
+  `postgres.TestAuditEvent_GuardsSurviveReplicationRoleBypass`,
+  `postgres.TestAuditEvent_RequestPathRoleHoldsOnlyAppendAndRead`,
+  `postgres.TestAuditEvent_DowngradedGuardIsDetected`, and
+  `SchemaValidator.validateAuditImmutability` at boot and in the sentinel.
 
 ## How to add an entry
 

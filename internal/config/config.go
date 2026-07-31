@@ -76,6 +76,15 @@ type Config struct {
 	// true only for a deployment whose delivery targets are legitimately on a
 	// private network and whose tenants are trusted to address them.
 	WebhookAllowPrivateTargets bool
+
+	// Per-tenant rate limiting (ADR-SECURITY-004): an in-memory, per-instance
+	// token bucket keyed by tenant. With N replicas the effective global limit
+	// for a tenant is approximately N times RateLimitRPS/RateLimitBurst — there
+	// is no cross-instance state. RateLimitEnabled=false is a pass-through, for
+	// a clean rollback.
+	RateLimitEnabled bool
+	RateLimitRPS     int
+	RateLimitBurst   int
 }
 
 // IsProduction reports whether the service runs in a production environment,
@@ -151,6 +160,10 @@ func Load() (*Config, error) {
 
 		WebhookRetentionHours:      getEnvInt("ONEOPS_WEBHOOK_RETENTION_HOURS", 720),
 		WebhookAllowPrivateTargets: getEnvBool("ONEOPS_WEBHOOK_ALLOW_PRIVATE_TARGETS", false),
+
+		RateLimitEnabled: getEnvBool("ONEOPS_RATE_LIMIT_ENABLED", true),
+		RateLimitRPS:     getEnvInt("ONEOPS_RATE_LIMIT_RPS", 20),
+		RateLimitBurst:   getEnvInt("ONEOPS_RATE_LIMIT_BURST", 40),
 	}
 	if c.ShutdownGrace < 0 {
 		return nil, fmt.Errorf("ONEOPS_SHUTDOWN_GRACE_SECONDS must be >= 0, got %d", c.ShutdownGrace)
@@ -169,6 +182,11 @@ func Load() (*Config, error) {
 	}
 	if c.VerifyIntervalSeconds < 0 || c.VerifyTimeoutSeconds < 0 || c.VerifyRetryAttempts < 0 {
 		return nil, fmt.Errorf("audit verify settings must be >= 0")
+	}
+	if c.RateLimitEnabled && (c.RateLimitRPS <= 0 || c.RateLimitBurst <= 0) {
+		return nil, fmt.Errorf(
+			"rate limiting enabled but ONEOPS_RATE_LIMIT_RPS/ONEOPS_RATE_LIMIT_BURST must be > 0 (rps=%d burst=%d)",
+			c.RateLimitRPS, c.RateLimitBurst)
 	}
 	if err := c.validateProduction(); err != nil {
 		return nil, err

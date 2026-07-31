@@ -5,7 +5,9 @@ metadata:
   labels:
     {{- include "controlplane.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "controlplane.selectorLabels" . | nindent 6 }}
@@ -39,6 +41,22 @@ spec:
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}
+            # Sensitive vars always come from a Secret via secretKeyRef, never
+            # inline. If .Values.existingSecret is set (production), that
+            # Secret is referenced directly. Otherwise templates/secret.yaml
+            # generates one from .Values.secretEnv's insecure dev defaults,
+            # so a plain `helm install` still boots but the plaintext lives
+            # in a Secret object, not the Deployment spec.
+            - name: ONEOPS_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "controlplane.secretName" . }}
+                  key: ONEOPS_DB_URL
+            - name: ONEOPS_JWT_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "controlplane.secretName" . }}
+                  key: ONEOPS_JWT_HMAC_KEY
           livenessProbe:
             httpGet:
               path: /healthz
