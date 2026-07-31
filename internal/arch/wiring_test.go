@@ -528,6 +528,7 @@ func TestProducersHaveNoOutboundCapability(t *testing.T) {
 // encoding a security decision in a script.
 var registeredBinaries = map[string]string{
 	"controlplane": "the platform; all privileged writes go through the shared security framework",
+	"kg":           "read-only derivation over the working tree; opens no database connection and writes only pkg.json",
 }
 
 // registeredScripts is the same control for operational *scripts*.

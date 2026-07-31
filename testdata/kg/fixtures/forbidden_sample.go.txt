@@ -1,0 +1,26 @@
+// Known-bad Go source, held as data so it is never compiled and never swept.
+//
+// guard_safety_test.go runs both of its detectors against this file and
+// requires both to fire. Without it the harness is two negative assertions over
+// a package that currently contains one doc comment — it would pass just as
+// happily if the detectors were blind. This is the per-subject anti-vacuity the
+// architecture guards use everywhere else (Constitution Law 14.2).
+//
+// The .txt suffix keeps it out of the build and out of goFilesUnder.
+
+package sample
+
+import "context"
+
+const q = "SELECT id, email FROM app_user WHERE status = $1"
+
+func other() string {
+	return `INSERT INTO admin_audit_event (chain_id, seq) VALUES ($1, $2)`
+}
+
+type worker struct{}
+
+func (w *worker) Run(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
+}
