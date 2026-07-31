@@ -276,6 +276,14 @@ func TestSchema_DroppedAuditGuardIsDetected(t *testing.T) {
 				FOR EACH ROW EXECUTE FUNCTION audit_event_immutable()`); err != nil {
 			t.Fatalf("restore guard: %v", err)
 		}
+		// Re-arm ENABLE ALWAYS: audit_event is hardened (ADR-AUDIT-008), so a
+		// plain CREATE (origin mode) would leave it DOWNGRADED and every sibling
+		// test sharing this schema would then read a validator problem. The
+		// parent recurses to the partition's cloned row-mutate trigger.
+		if _, err := priv.Exec(ctx,
+			`ALTER TABLE audit_event ENABLE ALWAYS TRIGGER trg_audit_event_no_row_mutate`); err != nil {
+			t.Fatalf("re-arm guard: %v", err)
+		}
 	})
 
 	// With the guard gone, audit ownership is now rewritable — the exploit.
