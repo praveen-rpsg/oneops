@@ -23,6 +23,7 @@ import (
 	"github.com/rpsg/oneops/internal/events"
 	"github.com/rpsg/oneops/internal/governance"
 	"github.com/rpsg/oneops/internal/httpapi"
+	"github.com/rpsg/oneops/internal/notification"
 	"github.com/rpsg/oneops/internal/observability"
 	"github.com/rpsg/oneops/internal/ops"
 	"github.com/rpsg/oneops/internal/policy"
@@ -106,7 +107,25 @@ func run(logger *slog.Logger) error {
 
 	repo := postgres.NewConfigObjectRepo(appPool)
 	idem := postgres.NewIdempotencyStore(appPool)
-	verifier := auth.NewVerifier(cfg.JWTIssuer, cfg.JWTAudience, cfg.JWTHMACKey, cfg.JWKSURL)
+
+	// Enterprise SSO: the default IdP (ONEOPS_JWT_ISSUER/...) plus any
+	// tenant-brought IdPs from ONEOPS_ADDITIONAL_IDPS, each verified with its
+	// own issuer, audience and keys. config.Load already validated this set
+	// (no duplicate issuers, every entry has a key source), so a construction
+	// error here would be a bug in that validation, not a runtime condition.
+	idpConfigs := make([]auth.IDPConfig, 0, 1+len(cfg.AdditionalIDPs))
+	idpConfigs = append(idpConfigs, auth.IDPConfig{
+		Issuer: cfg.JWTIssuer, Audience: cfg.JWTAudience, HMACKey: cfg.JWTHMACKey, JWKSURL: cfg.JWKSURL,
+	})
+	for _, extra := range cfg.AdditionalIDPs {
+		idpConfigs = append(idpConfigs, auth.IDPConfig{
+			Issuer: extra.Issuer, Audience: extra.Audience, HMACKey: extra.HMACKey, JWKSURL: extra.JWKSURL,
+		})
+	}
+	verifier, err := auth.NewMultiVerifier(idpConfigs)
+	if err != nil {
+		return fmt.Errorf("build auth verifier: %w", err)
+	}
 	metrics := observability.NewMetrics()
 	execMetrics := ops.NewExecutiveMetrics(metrics.Registry())
 
@@ -235,7 +254,16 @@ func run(logger *slog.Logger) error {
 	}
 	engine.SetReplacementTester(replacementTest)
 
+	// Multi-approver approval quorum (ADR-GOV-005). Wiring is additive: it
+	// changes no existing operation for any tenant whose
+	// governance_required_approvals stays at its default of 1. Without it the
+	// engine refuses Approval outright (ErrApprovalRecorderUnavailable) rather
+	// than approving on an unenforced quorum.
+	approvalStore := postgres.NewApprovalStore(appPool)
+	engine.SetApprovalRecorder(approvalStore)
+
 	srv.SetGovernance(engine)
+	srv.SetApprovals(approvalStore)
 
 	httpServer := srv.HTTPServer()
 
@@ -368,7 +396,30 @@ func run(logger *slog.Logger) error {
 	// Policy HTTP actions POST to operator-supplied URLs too, so they share the
 	// SSRF-safe client (ADR-SECURITY-001).
 	policyActionClient := safehttp.Client(15*time.Second, cfg.WebhookAllowPrivateTargets)
-	policyRegistry := policy.DefaultRegistry(policyActionClient, nil, nil, nil, logger)
+
+	// Notification Service: persisted, tracked delivery of the platform's own
+	// outbound notifications, replacing the fire-and-forget policy.Notifier call
+	// with a real record (status, attempts, last error). Split for the same
+	// reason as the webhook and policy stores above: the delivery worker
+	// processes every tenant, while the read-only admin API must be confined to
+	// the caller's tenant.
+	notificationStore := postgres.NewNotificationStore(pool)
+	notificationAdminStore := postgres.NewNotificationStore(appPool)
+	notificationMetrics := notification.NewPromMetrics(metrics.Registry())
+	notificationSvc := notification.NewService(notificationStore)
+	// The webhook channel POSTs to operator-supplied URLs too, so it shares the
+	// SSRF-safe client (ADR-SECURITY-001). No EmailSender is wired yet anywhere
+	// in this service (policy.DefaultRegistry's own email action is also nil
+	// below), so the email channel fails its attempts until one is configured.
+	notificationHTTPClient := safehttp.Client(15*time.Second, cfg.WebhookAllowPrivateTargets)
+	notificationWorker := notification.NewWorker(notificationStore, nil, notificationHTTPClient, notificationMetrics, logger, notification.WorkerConfig{})
+	workers = append(workers, notificationWorker.Run)
+	srv.SetNotifications(notificationAdminStore)
+	// policy.Notifier is backed by the Notification Service: a policy's
+	// "notification" action now produces a tracked Notification row instead of
+	// the previous fire-and-forget log line.
+	policyNotifier := notification.NewPolicyNotifier(notificationSvc)
+	policyRegistry := policy.DefaultRegistry(policyActionClient, nil, nil, policyNotifier, logger)
 	policyConsumer := policy.NewConsumer(auditStore, policyStore, policyStore, policyStore, policyMetrics, logger, policy.ConsumerConfig{})
 	// auditStore is the authoritative event-owner resolver, exactly as for the
 	// webhook dispatcher: the executor re-derives the triggering event's owner
@@ -438,6 +489,12 @@ func run(logger *slog.Logger) error {
 	// Tenant-owned and under row-level security, so the tenant-scoped pool is
 	// correct and no exemption is needed.
 	srv.SetMemberships(postgres.NewMembershipStore(appPool))
+	// Team is tenant-owned and under row-level security, exactly like
+	// membership above, so no exemption is needed here either.
+	srv.SetTeams(postgres.NewTeamStore(appPool))
+	// Setting is tenant-owned and under row-level security, exactly like team
+	// above, so no exemption is needed here either.
+	srv.SetSettings(postgres.NewSettingStore(appPool))
 
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.

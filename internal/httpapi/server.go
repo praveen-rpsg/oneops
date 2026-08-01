@@ -83,6 +83,26 @@ type Server struct {
 	adminAudit  domain.AdminAuditReader
 	memberships domain.MembershipRepository
 
+	// Team registry; nil until SetTeams. team is TENANT-OWNED, like membership
+	// above, so nothing here needs an exemption from row-level security.
+	teams domain.TeamRepository
+
+	// Notification registry (read-only); nil until SetNotifications.
+	// notification is TENANT-OWNED, like team above, so nothing here needs an
+	// exemption from row-level security.
+	notifications notificationRegistry
+
+	// Setting registry; nil until SetSettings. setting is TENANT-OWNED, like
+	// team above, so nothing here needs an exemption from row-level security.
+	settings domain.SettingRepository
+
+	// Multi-approver quorum read side (ADR-GOV-005); nil until SetApprovals.
+	// approval_record is TENANT-OWNED, like setting above. The write side is
+	// wired into the Governance Engine directly (governance.ApprovalRecorder),
+	// not here — recording an approval is a constitutional mutation, listing
+	// who has approved so far is a read.
+	approvals domain.ApprovalRepository
+
 	// Organisation registry; nil until SetOrganizations. organization is global
 	// for the same reason (ADR-IDENTITY-002 §3.1): tenant_id is discovered BY
 	// reading this mapping, so the mapping cannot be scoped by it.
@@ -240,6 +260,8 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermRead)).Get("/governance/{id}/audit", s.getAuditChain)
 		rt.With(s.requirePermission(auth.PermRead)).Get("/governance/{id}/audit/events", s.getAuditEvents)
 		rt.With(s.requirePermission(auth.PermRead)).Get("/governance/{id}/verification", s.getVerification)
+		// Multi-approver quorum (ADR-GOV-005) — who has approved so far.
+		rt.With(s.requirePermission(auth.PermRead)).Get("/governance/{id}/approvals", s.getGovernanceApprovals)
 
 		// Administration & Operations — read-only except the explicit integrity
 		// run (which reuses the existing scheduler). All require admin permission.
@@ -308,6 +330,36 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/memberships", s.listMemberships)
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/memberships", s.grantMembership)
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/memberships/{id}", s.revokeMembership)
+
+		// Team administration. Team is TENANT-OWNED, exactly like membership
+		// above and for the same reason: it is in TenantOwnedTables and carries
+		// row-level security, so the permission tier is tenant administration,
+		// not requirePlatformAdmin.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/teams", s.listTeams)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/teams", s.createTeam)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/teams/{id}", s.getTeam)
+		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/teams/{id}", s.patchTeam)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/teams/{id}/members", s.listTeamMembers)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/teams/{id}/members", s.addTeamMember)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/teams/{id}/members/{userId}", s.removeTeamMember)
+
+		// Notification administration (read-only). notification is TENANT-OWNED,
+		// exactly like team above, so the permission tier is tenant
+		// administration, not requirePlatformAdmin. There is no create/patch
+		// route: notifications are produced only by the policy Notifier (and any
+		// future producer), never directly over HTTP.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/notifications", s.listNotifications)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/notifications/{id}", s.getNotification)
+
+		// Setting administration. setting is TENANT-OWNED, exactly like team
+		// and notification above, so the permission tier is tenant
+		// administration, not requirePlatformAdmin. There is one PUT per key
+		// rather than a bulk PATCH: each key carries its own optimistic-lock
+		// row_version, and a bulk write could consume several versions while
+		// reporting only one outcome — the same reason patchTeam refuses to
+		// change name and status in one call.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/settings", s.listSettings)
+		rt.With(s.requirePermission(auth.PermAdmin)).Put("/admin/settings/{key}", s.putSetting)
 
 		// Event delivery — webhook administration (admin permission).
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/webhooks", s.listWebhooks)

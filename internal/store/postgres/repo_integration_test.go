@@ -91,7 +91,8 @@ func truncateAll(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
 		configuration_object, configuration_metadata, artifact_version,
 		idempotency_key, dependency_edge,
 		webhook, webhook_delivery, webhook_cursor, webhook_replay_job,
-		policy, policy_execution, policy_cursor
+		policy, policy_execution, policy_cursor,
+		notification
 		CASCADE`
 	if _, err := pool.Exec(ctx, stmt); err != nil {
 		t.Fatalf("truncate: %v", err)

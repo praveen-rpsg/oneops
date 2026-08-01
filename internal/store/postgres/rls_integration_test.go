@@ -5,7 +5,9 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
@@ -388,6 +390,191 @@ func TestRLS_WebhooksAreTenantIsolated(t *testing.T) {
 	if !found {
 		t.Error("the owning tenant must still see its own webhook")
 	}
+}
+
+// Team is tenant data, not platform data, exactly like membership: a team
+// name and its membership list describe one customer's organisational
+// structure and must not be visible to another tenant's connection.
+func TestRLS_TeamsAreTenantIsolated(t *testing.T) {
+	priv := testPool(t)
+	ctx := adminTestCtx()
+
+	orgs := NewOrganizationStore(priv)
+	a, err := orgs.Create(ctx, mustNewOrg(t, "rls-team-a"))
+	if err != nil {
+		t.Fatalf("create org a: %v", err)
+	}
+	b, err := orgs.Create(ctx, mustNewOrg(t, "rls-team-b"))
+	if err != nil {
+		t.Fatalf("create org b: %v", err)
+	}
+	u := newTestUser(t)
+	if _, err := NewUserStore(priv).Create(ctx, u); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	scoped := tenantScopedPool(t)
+	store := NewTeamStore(scoped)
+
+	aCtx := domain.WithTenant(ctx, &domain.Tenant{TenantID: a.TenantID, Status: domain.TenantActive})
+	teamA, err := domain.NewTeam(a.OrgID, a.TenantID, "Alpha Secret Team")
+	if err != nil {
+		t.Fatalf("build team a: %v", err)
+	}
+	created, err := store.Create(aCtx, teamA)
+	if err != nil {
+		t.Fatalf("tenant a creates team: %v", err)
+	}
+	m, err := domain.NewTeamMembership(created.TeamID, a.TenantID, u.UserID)
+	if err != nil {
+		t.Fatalf("build membership: %v", err)
+	}
+	if _, err := store.AddMember(aCtx, m); err != nil {
+		t.Fatalf("tenant a adds member: %v", err)
+	}
+
+	// Tenant B must not see tenant A's team when listing its own organisation...
+	bCtx := domain.WithTenant(ctx, &domain.Tenant{TenantID: b.TenantID, Status: domain.TenantActive})
+	listAsB, err := store.ListByOrg(bCtx, a.OrgID, 50, "")
+	if err != nil {
+		t.Fatalf("list as tenant b: %v", err)
+	}
+	if len(listAsB) != 0 {
+		t.Fatalf("tenant b listed %d of tenant a's teams under a's org_id — isolation is not enforced", len(listAsB))
+	}
+
+	// ...nor fetch it directly by id...
+	if _, err := store.Get(bCtx, created.TeamID); err == nil {
+		t.Fatal("tenant b could fetch tenant a's team by id")
+	}
+
+	// ...nor read its membership.
+	membersAsB, err := store.ListMembers(bCtx, created.TeamID, 50, "")
+	if err != nil {
+		t.Fatalf("list members as tenant b: %v", err)
+	}
+	if len(membersAsB) != 0 {
+		t.Fatalf("tenant b read %d of tenant a's team members — isolation is not enforced", len(membersAsB))
+	}
+
+	// The owning tenant still sees its own team and member, so the refusals
+	// above are about isolation and not about a path that never works.
+	own, err := store.ListByOrg(aCtx, a.OrgID, 50, "")
+	if err != nil {
+		t.Fatalf("owner list: %v", err)
+	}
+	found := false
+	for _, tm := range own {
+		if tm.TeamID == created.TeamID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the owning tenant must still see its own team")
+	}
+}
+
+// Notification is tenant data, not platform data, exactly like webhook and
+// team: it can carry an operator recipient address and message content that
+// must not leak across the tenant boundary.
+func TestRLS_NotificationsAreTenantIsolated(t *testing.T) {
+	priv := testPool(t)
+	ctx := adminTestCtx()
+
+	tenants := NewTenantStore(priv)
+	a, err := tenants.Create(ctx, newTenant("rls-notif-a", "ext-rls-notif-a"))
+	if err != nil {
+		t.Fatalf("create tenant a: %v", err)
+	}
+	b, err := tenants.Create(ctx, newTenant("rls-notif-b", "ext-rls-notif-b"))
+	if err != nil {
+		t.Fatalf("create tenant b: %v", err)
+	}
+
+	scoped := tenantScopedPool(t)
+	store := NewNotificationStore(scoped)
+
+	aCtx := domain.WithTenant(ctx, a)
+	n, err := domain.NewNotification(a.TenantID, domain.NotificationInApp, "alice-secret", "s", "b")
+	if err != nil {
+		t.Fatalf("build notification: %v", err)
+	}
+	created, err := store.Enqueue(aCtx, n)
+	if err != nil {
+		t.Fatalf("tenant a enqueues: %v", err)
+	}
+
+	// Tenant B must not see it in a list...
+	bCtx := domain.WithTenant(ctx, b)
+	listAsB, err := store.List(bCtx, "", 50, "")
+	if err != nil {
+		t.Fatalf("list as tenant b: %v", err)
+	}
+	for _, item := range listAsB {
+		if item.NotificationID == created.NotificationID {
+			t.Fatal("tenant b listed tenant a's notification — isolation is not enforced")
+		}
+	}
+
+	// ...nor fetch it directly by id...
+	if _, err := store.Get(bCtx, created.NotificationID); err == nil {
+		t.Fatal("tenant b could fetch tenant a's notification by id")
+	}
+
+	// ...nor claim it for delivery through the tenant-scoped connection (the
+	// worker itself uses the privileged pool precisely so it is NOT scoped this
+	// way, but a scoped connection must still see nothing to claim).
+	dueAsB, err := store.ClaimDue(bCtx, time.Now().UTC(), time.Minute, 10)
+	if err != nil {
+		t.Fatalf("claim as tenant b: %v", err)
+	}
+	for _, d := range dueAsB {
+		if d.NotificationID == created.NotificationID {
+			t.Fatal("tenant b's scoped connection claimed tenant a's notification")
+		}
+	}
+
+	// The owning tenant still sees its own.
+	own, err := store.List(aCtx, "", 50, "")
+	if err != nil {
+		t.Fatalf("owner list: %v", err)
+	}
+	found := false
+	for _, item := range own {
+		if item.NotificationID == created.NotificationID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the owning tenant must still see its own notification")
+	}
+
+	// The privileged worker pool sees both tenants' notifications, because
+	// delivery is cross-tenant by design.
+	dueAsWorker, err := NewNotificationStore(priv).ClaimDue(ctx, time.Now().UTC(), time.Minute, 100)
+	if err != nil {
+		t.Fatalf("claim as worker: %v", err)
+	}
+	foundAsWorker := false
+	for _, d := range dueAsWorker {
+		if d.NotificationID == created.NotificationID {
+			foundAsWorker = true
+		}
+	}
+	if !foundAsWorker {
+		t.Error("the privileged delivery worker must be able to claim any tenant's due notification")
+	}
+}
+
+// mustNewOrg builds a valid organisation for RLS fixtures with a collision-free
+// slug.
+func mustNewOrg(t *testing.T, prefix string) *domain.Organization {
+	t.Helper()
+	o, err := domain.NewOrganization(prefix, strings.ToLower(prefix+"-"+ulid.Make().String()[:10]))
+	if err != nil {
+		t.Fatalf("new organisation: %v", err)
+	}
+	return o
 }
 
 // Policies carry conditions and action configuration, which can embed

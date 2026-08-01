@@ -46,6 +46,17 @@ var serverGeneratedIdentifiers = map[string]string{
 	"invitation_pkey":        "invitation_id is server-minted",
 	"uq_invitation_token":    "token_hash is the hash of a server-generated token; the client never chooses it",
 	"uq_membership_org_user": "org_id stands 1:1 with a tenant so the pair cannot span tenants; user_id is server-minted",
+
+	// Team (extends ADR-IDENTITY-002 §2.3's shape to a non-authorisation grouping).
+	"team_pkey":                    "team_id is server-minted",
+	"team_membership_pkey":         "team_membership_id is server-minted",
+	"uq_team_membership_team_user": "team_id is server-minted and already belongs to exactly one tenant; user_id is server-minted",
+
+	// Notification Service. No create route accepts a client-supplied id.
+	"notification_pkey": "notification_id is server-minted (a ULID); no create route accepts one from a client",
+
+	// Multi-approver approval quorum (ADR-GOV-005).
+	"approval_record_pkey": "approval_id is server-minted (a ULID via domain.NewApprovalRecord); no create route accepts one from a client",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

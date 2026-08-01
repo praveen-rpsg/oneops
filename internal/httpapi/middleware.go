@@ -200,6 +200,28 @@ func (s *Server) resolveTenant(
 		writeProblem(w, r, http.StatusForbidden, "forbidden", "tenant is suspended")
 		return nil
 	}
+	// Issuer-to-tenant binding (ADR-IDENTITY-003), fail closed. A genuinely
+	// signed token from any configured IdP resolves a tenant purely by its
+	// external id; without this check a second IdP could authenticate a tenant
+	// it was never authorised for, admitting a request into that tenant's
+	// row-level-security boundary. The verified issuer must be one the tenant
+	// allows — a member of AllowedIssuers, or the default issuer when the tenant
+	// has bound none. An empty binding is safe by default: only the default IdP.
+	//
+	// The rejection is deliberately shaped exactly like the unknown-tenant 403
+	// above so the response is not an oracle for which tenants exist or which
+	// issuers a tenant has bound.
+	claims, _ := ClaimsFrom(ctx)
+	issuer := ""
+	if claims != nil {
+		issuer = claims.Issuer
+	}
+	if !t.AllowsIssuer(issuer, s.cfg.JWTIssuer) {
+		s.log.Warn("auth rejected: issuer not allowed for tenant",
+			"tenant_id", t.TenantID, "request_id", RequestIDFrom(r.Context()))
+		writeProblem(w, r, http.StatusForbidden, "forbidden", "tenant not recognised")
+		return nil
+	}
 	return domain.WithTenant(ctx, t)
 }
 

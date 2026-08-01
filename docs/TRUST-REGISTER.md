@@ -53,6 +53,7 @@ fail-closed startup validator.
 | 30 | **A load-bearing invariant expressed as a boolean argument** (the chain-head `FOR UPDATE` — on which the gapless committed prefix and audit-derived ownership both rest — was `ReadChainHead(…, forUpdate bool)`, guarded by an integration test with no architecture tier; proven live that without it two transactions both claim the same seq and the second governance event is lost) | **The locking read is a distinct method (`ReadChainHeadForUpdate`), so the unsafe form cannot be produced by forgetting an argument; a tree-derived sweep forbids the non-locking read in production and requires every append path to take the lock** | ✓ | arch, int | **ADR-AUDIT-006** |
 | 31 | **A disaster-recovery drill that can destroy production** (`dr-drill.sh` took its target from the operator-supplied `DR_DRILL_DB` and ran `DROP DATABASE IF EXISTS $DRILL_DB` with **zero** expressions comparing it to the live database, so `DR_DRILL_DB=oneops` dropped production; scripts were outside the operational-tooling guard, which walked only `cmd/`) | **The drill refuses when its target is the database named in `ONEOPS_DB_URL`; `scripts/` gains the same registry guard as `cmd/`, and any script issuing `DROP DATABASE` must carry the refusal** | ✓ | arch | **ADR-TENANCY-010** |
 | 32 | **A cursor restored ahead of its log** (`webhook_cursor`/`policy_cursor` are watermarks, so a cursor past its chain head silently skips every event in between — recorded by ADR-CONCURRENCY-004 as "noted future hardening" and never built, leaving a **documented** open instance of the restore-inconsistency class) | **`CursorValidator` reports any cursor ahead of its chain head, or with no chain head at all, and is registered in `platformInvariants` so it gains the boot gate and the continuous sentinel together** | ✓ | int, arch | **ADR-TENANCY-011** |
+| 34 | **A genuine token from one configured IdP authenticates ANY tenant it claims** (multi-IdP verification accepts a validly-signed token from any trusted issuer, and `resolveTenant` resolves the claimed tenant purely by `external_id` — `domain.Tenant` carried no issuer — so an actor operating any additional IdP minted a real `{iss:idp-B, tenant:<tenant X ext-id>}` token and ran inside tenant X's RLS boundary; single-IdP is not affected) | **Each tenant is bound to the issuer(s) allowed to authenticate it (`tenant.allowed_issuers`); the VERIFIED issuer is carried in `Claims.Issuer` and `resolveTenant` fails closed unless `AllowsIssuer` holds — empty binding ⇒ default IdP only (safe-by-default, backward compatible)** | ✓ | unit, int | **ADR-IDENTITY-003** |
 | 33 | **The constitutional audit chain rewritable and erasable via the replication-role bypass** (`audit_event`'s append-only triggers were created in origin mode, so `SET session_replication_role='replica'` suppressed them — proven live 2026-07-30 the owning pool rewrote all 22 rows, and again here that one UPDATE rewrote a row and `TRUNCATE audit_event_default` erased a partition, no error; separately `oneops_app` held UPDATE/DELETE on the append-only table by default grant) | **Both guards `ENABLE ALWAYS` on the parent AND every partition (the statement-level TRUNCATE trigger does not propagate, so each partition is armed explicitly), plus explicit `REVOKE UPDATE/DELETE/TRUNCATE` from `PUBLIC` and `oneops_app` on parent and partitions; the arming is a schema invariant, so a downgrade to origin is reported DOWNGRADED at boot and by the sentinel** | ✓ | int, startup | **ADR-AUDIT-008** |
 
 ## Class status
@@ -745,6 +746,50 @@ evidence, residual risks, status. New investigations add their boundary here.
   `postgres.TestAuditEvent_RequestPathRoleHoldsOnlyAppendAndRead`,
   `postgres.TestAuditEvent_DowngradedGuardIsDetected`, and
   `SchemaValidator.validateAuditImmutability` at boot and in the sentinel.
+
+### Issuer-to-tenant binding — a token's issuer must be authorised for its tenant (ADR-IDENTITY-003)
+
+- **Property.** A genuinely-signed token from a configured IdP authenticates a
+  tenant only if that IdP's issuer is authorised for that tenant. The issuer used
+  in the decision is the verified `iss`, and the check is at the single place a
+  claim becomes a tenant (`resolveTenant`), so it covers every `/v1` path.
+- **Threat model.** Multi-IdP verification (OPS-S047a) trusts a set of issuers.
+  Before this change the middleware resolved the claimed tenant purely by
+  `external_id` with no issuer check, so an actor operating *any* configured
+  additional IdP could mint a valid `{iss:idp-B, tenant:<tenant X ext-id>}` token
+  and run inside tenant X's row-level-security boundary — a cross-tenant
+  authorization bypass. Single-IdP deployments are not exposed: the one trusted
+  issuer is the authority for every tenant claim.
+- **Root authority.** `tenant.allowed_issuers` (operator-supplied) and the
+  verified `iss`. Empty set ⇒ the default issuer (`ONEOPS_JWT_ISSUER`) only.
+- **Failure assumptions.** An operator may misconfigure `allowed_issuers`, or
+  trust a hostile IdP; the binding authorises exactly what is configured and does
+  not judge issuer trustworthiness. An empty issuer or empty default matches
+  nothing (fail closed).
+- **Recovery assumptions.** None specific; the check is per-request and
+  stateless. Existing tenants (empty set) keep working with the default IdP, so
+  the rollout is non-breaking.
+- **Operational assumptions.** `allowed_issuers` is set through the audited tenant
+  admin path (create / `tenant.issuers_changed` patch). Direct SQL bypasses this
+  as it bypasses every application control.
+- **Startup validation.** None specific (the binding is per-request).
+- **Runtime validation.** `resolveTenant` requires
+  `AllowsIssuer(claims.Issuer, cfg.JWTIssuer)` after resolving an active tenant;
+  a mismatch is a 403 shaped identically to the unknown-tenant refusal.
+- **Evidence.** Live exploit (before): idp-B token claiming tenant X admitted —
+  `GET /v1/artifacts` = 200, inside X's boundary; reverting the check reproduces
+  `= 200, want 403`. Live fix (after): 403, boundary not entered; default IdP for
+  an empty-binding tenant = 200; tenant Y listing idp-B admits idp-B = 200; idp-B
+  admitted for Y and refused for X in one server. Store round-trip and the
+  audited, row-version-guarded `SetAllowedIssuers` verified on PostgreSQL (:5435).
+- **Residual risks.** **The guard proves the binding is enforced, not that the
+  operator's binding is correct** — it trusts `allowed_issuers`. Not IdP-endpoint
+  authentication. Tenant-level only (no per-user/per-subject issuer rules). SAML
+  and dynamic IdP registration out of scope.
+- **Status.** ✓ Closed. Enforced by `httpapi.TestIssuerBinding_*` (exploit bites
+  on revert), `auth.TestVerifyCarriesVerifiedIssuer`, `domain.TestTenantAllowsIssuer`,
+  and `postgres.TestTenantStore_AllowedIssuersRoundTrip` /
+  `postgres.TestTenantStore_SetAllowedIssuersOptimistic`.
 
 ## How to add an entry
 

@@ -512,6 +512,27 @@ paths:
         '401': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/governance/{id}/approvals:
+    get:
+      summary: Who has approved this configuration object so far (ADR-GOV-005)
+      description: >
+        Multi-approver quorum status: every distinct approval recorded for
+        this object against the tenant's configured
+        governance_required_approvals threshold. Read-only; recording an
+        approval is POST .../approve.
+      operationId: getGovernanceApprovals
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/GovId' }
+      responses:
+        '200':
+          description: Approval quorum status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceApprovalsResponse' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
 
   # Administration & Operations — read-only except the explicit integrity run.
   # All require admin permission. No constitutional behavior is exposed here.
@@ -1016,6 +1037,288 @@ paths:
         '409': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/teams:
+    get:
+      summary: List an organization's teams
+      description: >-
+        Team is tenant-owned and under row-level security, exactly like
+        Membership, so the result is confined to the caller's tenant by the
+        database. An org_id belonging to another tenant returns an empty page,
+        not a refusal. Paging is keyset over `team_id`, which is a ULID and
+        therefore ordered by creation.
+      operationId: listTeams
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: org_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last team_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of teams
+          content: { application/json: { schema: { $ref: '#/components/schemas/TeamList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Register a team within an organization
+      description: >-
+        The tenant is taken from the bound connection and never from the
+        request, so a caller cannot plant a team inside another boundary
+        (the same rule grantMembership enforces).
+      operationId: createTeam
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTeamRequest' }
+      responses:
+        '201':
+          description: The team
+          content: { application/json: { schema: { $ref: '#/components/schemas/Team' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/teams/{id}:
+    get:
+      summary: Get a team by identifier
+      operationId: getTeam
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The team
+          content: { application/json: { schema: { $ref: '#/components/schemas/Team' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Rename a team or perform a lifecycle transition
+      description: >-
+        Supply exactly one of name or status per call — the same rule
+        PatchUserRequest enforces, and for the same reason: the two go through
+        different repository methods, so a request that changed both would
+        consume two row versions and leave the outcome of one unreported.
+      operationId: patchTeam
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchTeamRequest' }
+      responses:
+        '200':
+          description: The updated team
+          content: { application/json: { schema: { $ref: '#/components/schemas/Team' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/teams/{id}/members:
+    get:
+      summary: List a team's members
+      operationId: listTeamMembers
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last team_membership_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of team members
+          content: { application/json: { schema: { $ref: '#/components/schemas/TeamMembershipList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Add a member to a team
+      description: >-
+        Idempotent: a user already on the team is returned unchanged rather
+        than rejected as a conflict. Team membership is not an authorisation
+        fact — Membership alone grants access to an organization's boundary —
+        so this does not affect what the user may do, only who a team groups.
+      operationId: addTeamMember
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddTeamMemberRequest' }
+      responses:
+        '201':
+          description: The team membership
+          content: { application/json: { schema: { $ref: '#/components/schemas/TeamMembership' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/teams/{id}/members/{userId}:
+    delete:
+      summary: Remove a member from a team
+      description: >-
+        A real delete, unlike Membership.Revoke: team membership carries no
+        status because it authorises nothing on its own, so there is no
+        administrative record whose subject the row must survive for.
+      operationId: removeTeamMember
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: The member was removed
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/notifications:
+    get:
+      summary: List the caller's tenant's notifications
+      description: >-
+        Notification is tenant-owned and under row-level security, exactly
+        like Team, so the result is confined to the caller's tenant by the
+        database. There is no create route here: a Notification is produced
+        only by a policy's "notification" action (or a future producer),
+        never directly over HTTP. Paging is keyset over `notification_id`,
+        which is a ULID and therefore ordered by creation.
+      operationId: listNotifications
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [pending, sent, failed] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last notification_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of notifications
+          content: { application/json: { schema: { $ref: '#/components/schemas/NotificationList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/notifications/{id}:
+    get:
+      summary: Get a notification by identifier
+      operationId: getNotification
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The notification
+          content: { application/json: { schema: { $ref: '#/components/schemas/Notification' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/settings:
+    get:
+      summary: Get the caller's tenant's effective settings
+      description: >-
+        Setting is tenant-owned and under row-level security, exactly like
+        Team, so the result reflects only the caller's tenant. Every key
+        defined in the platform's SettingDefinition registry is returned once,
+        resolved to its stored override if the tenant has one, otherwise to
+        its default — there is no way to see a key that is not in the
+        registry, and no way for the registry to omit one silently.
+      operationId: listSettings
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: The tenant's effective settings
+          content: { application/json: { schema: { $ref: '#/components/schemas/SettingList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/settings/{key}:
+    put:
+      summary: Create or update the caller's tenant's override of one setting
+      description: >-
+        `key` must name an entry in the platform's SettingDefinition registry;
+        an unknown key or a value that fails that definition's validation
+        (wrong type, out of range, not an allowed enum value) is refused with
+        422 before anything is written. `row_version` is 0 to create a new
+        override, or the version last read from GET /admin/settings to update
+        one — the same optimistic-locking discipline PatchTeamRequest uses.
+      operationId: putSetting
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PutSettingRequest' }
+      responses:
+        '200':
+          description: The updated effective setting
+          content: { application/json: { schema: { $ref: '#/components/schemas/Setting' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/organizations:
     get:
       summary: List organizations, or resolve one by slug
@@ -1504,6 +1807,108 @@ components:
       properties:
         org_id: { type: string }
         user_id: { type: string }
+    Team:
+      type: object
+      properties:
+        team_id: { type: string }
+        org_id: { type: string }
+        name: { type: string, maxLength: 200 }
+        status: { type: string, enum: [active, archived] }
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TeamList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Team' }
+    CreateTeamRequest:
+      type: object
+      required: [org_id, name]
+      properties:
+        org_id: { type: string }
+        name: { type: string, maxLength: 200 }
+    PatchTeamRequest:
+      type: object
+      required: [row_version]
+      description: Supply exactly one of name or status.
+      properties:
+        row_version: { type: integer, format: int64, minimum: 1 }
+        name: { type: string, maxLength: 200 }
+        status:
+          type: string
+          enum: [active, archived]
+    TeamMembership:
+      type: object
+      properties:
+        team_membership_id: { type: string }
+        team_id: { type: string }
+        user_id: { type: string }
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TeamMembershipList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/TeamMembership' }
+    AddTeamMemberRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id: { type: string }
+    Setting:
+      type: object
+      description: >-
+        `value` and `default` are rendered as the type the key's definition
+        declares — a boolean for a bool setting, a number for an int setting —
+        never as the string every value is stored as internally.
+      properties:
+        key: { type: string }
+        type: { type: string, enum: [bool, int, string, enum] }
+        description: { type: string }
+        value: {}
+        default: {}
+        overridden: { type: boolean }
+        row_version: { type: integer, format: int64 }
+        updated_at: { type: string, format: date-time }
+    SettingList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Setting' }
+    PutSettingRequest:
+      type: object
+      required: [value, row_version]
+      properties:
+        value: {}
+        row_version:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 0 to create a new override; the row_version last read to update one.
+    Notification:
+      type: object
+      properties:
+        notification_id: { type: string }
+        channel: { type: string, enum: [email, webhook, inapp] }
+        recipient: { type: string, maxLength: 320 }
+        subject: { type: string, maxLength: 200 }
+        body: { type: string, maxLength: 10000 }
+        status: { type: string, enum: [pending, sent, failed] }
+        attempts: { type: integer }
+        last_error: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    NotificationList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Notification' }
     AdminAuditRecord:
       type: object
       properties:
@@ -1532,7 +1937,7 @@ components:
           description: Present only when a further page exists.
     Tenant:
       type: object
-      required: [tenant_id, slug, name, status, row_version, created_at, updated_at]
+      required: [tenant_id, slug, name, allowed_issuers, status, row_version, created_at, updated_at]
       properties:
         tenant_id:
           type: string
@@ -1549,6 +1954,16 @@ components:
             Okta org id). Bearer tokens are resolved against this, never against
             tenant_id, so the IdP can change without rewriting foreign keys.
             Empty until an identity provider is bound.
+        allowed_issuers:
+          type: array
+          items: { type: string }
+          description: >-
+            Issuers (JWT iss) permitted to authenticate this tenant. An EMPTY
+            array means the tenant may authenticate ONLY via the default IdP
+            (ONEOPS_JWT_ISSUER) — safe by default and backward compatible. A
+            tenant that brings its own additional IdP must list that issuer here;
+            enforcement is fail-closed at the authentication boundary
+            (ADR-IDENTITY-003).
         status:
           type: string
           enum: [active, suspended]
@@ -1576,6 +1991,14 @@ components:
         external_id:
           type: string
           description: Optional. Must be unique across tenants when non-empty.
+        allowed_issuers:
+          type: array
+          items: { type: string }
+          description: >-
+            Optional. Issuers permitted to authenticate this tenant. Omit or
+            leave empty for the safe default (default IdP only, ONEOPS_JWT_ISSUER).
+            List an additional IdP's issuer to let it authenticate this tenant
+            (ADR-IDENTITY-003).
     User:
       type: object
       required: [user_id, email, display_name, status, row_version, created_at, updated_at]
@@ -1661,11 +2084,20 @@ components:
           enum: [active, suspended]
     PatchTenantRequest:
       type: object
-      required: [status]
+      description: >-
+        Supply a status change, or an allowed_issuers replacement. When
+        allowed_issuers is present it is the operation and status is not read; an
+        empty array resets the tenant to the safe default (default IdP only).
       properties:
         status:
           type: string
           enum: [active, suspended]
+        allowed_issuers:
+          type: array
+          items: { type: string }
+          description: >-
+            Replacement set of issuers permitted to authenticate this tenant.
+            Empty resets to the default IdP only (ADR-IDENTITY-003).
     GovernanceArchiveRequest:
       type: object
       required: [target_retention]
@@ -1698,6 +2130,34 @@ components:
         row_version: { type: integer, format: int64 }
         state: { $ref: '#/components/schemas/GovernanceState' }
         audit: { $ref: '#/components/schemas/GovernanceAudit' }
+        approvals: { $ref: '#/components/schemas/GovernanceApprovalStatus' }
+    GovernanceApprovalStatus:
+      type: object
+      description: >
+        Multi-approver quorum status (ADR-GOV-005). Present only on the
+        response to POST .../approve. met is false, and the sibling state
+        field's lifecycle is unchanged, until count >= required.
+      properties:
+        count: { type: integer, description: Distinct approvers recorded so far, including this call. }
+        required: { type: integer, description: The tenant's configured governance_required_approvals. }
+        met: { type: boolean }
+        summary: { type: string, example: "approvals: 1 of required 2" }
+    GovernanceApprover:
+      type: object
+      properties:
+        approver_user_id: { type: string }
+        approved_at: { type: string, format: date-time }
+    GovernanceApprovalsResponse:
+      type: object
+      description: Who has recorded a distinct approval of a governance object so far, against its tenant's configured quorum (ADR-GOV-005).
+      properties:
+        cfg_id: { type: string }
+        approvers:
+          type: array
+          items: { $ref: '#/components/schemas/GovernanceApprover' }
+        count: { type: integer }
+        required: { type: integer }
+        met: { type: boolean }
     GovernanceStateResponse:
       type: object
       properties:

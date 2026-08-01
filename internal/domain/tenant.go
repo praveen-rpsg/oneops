@@ -43,14 +43,47 @@ type Tenant struct {
 	// tokens are resolved against this, never against TenantID, so the platform
 	// keeps its own identifiers when the IdP changes.
 	ExternalID string
-	Status     TenantStatus
-	RowVersion int64
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	// AllowedIssuers are the identity-provider issuers (JWT `iss`) permitted to
+	// authenticate this tenant. An EMPTY set means the tenant may authenticate
+	// ONLY via the default IdP (ONEOPS_JWT_ISSUER) — safe by default and
+	// backward compatible, since every tenant that predates multi-IdP support
+	// has an empty set and keeps working with the default issuer. A tenant that
+	// brings its own additional IdP must list that IdP's issuer here. Enforced
+	// fail-closed at the authentication boundary by AllowsIssuer
+	// (ADR-IDENTITY-003).
+	AllowedIssuers []string
+	Status         TenantStatus
+	RowVersion     int64
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // Active reports whether the tenant may serve requests.
 func (t *Tenant) Active() bool { return t.Status == TenantActive }
+
+// AllowsIssuer reports whether a token issued by issuer may authenticate this
+// tenant, given the platform's default issuer.
+//
+// The empty-set rule is the whole point: a tenant with no explicit binding may
+// authenticate only via the default IdP. This is what keeps single-IdP
+// deployments and every pre-existing tenant working without configuration while
+// closing the multi-IdP cross-tenant bypass — an additional IdP can authenticate
+// a tenant only once that tenant has explicitly listed it. It fails closed: an
+// empty issuer, or a default issuer that is itself empty, matches nothing.
+func (t *Tenant) AllowsIssuer(issuer, defaultIssuer string) bool {
+	if issuer == "" {
+		return false
+	}
+	if len(t.AllowedIssuers) == 0 {
+		return defaultIssuer != "" && issuer == defaultIssuer
+	}
+	for _, a := range t.AllowedIssuers {
+		if a == issuer {
+			return true
+		}
+	}
+	return false
+}
 
 // Validate enforces the invariants the database also enforces, so a bad request
 // fails with a field-level 422 rather than a constraint-violation 500.
@@ -68,6 +101,22 @@ func (t *Tenant) Validate() error {
 	if !t.Status.Valid() {
 		return newValidation("status", "must be one of: active, suspended")
 	}
+	if err := ValidateAllowedIssuers(t.AllowedIssuers); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateAllowedIssuers rejects a binding that could not enforce anything: an
+// empty or blank issuer string would either match no token (dead entry) or, if
+// treated loosely, widen the set. Keeping the set clean is what lets AllowsIssuer
+// stay a simple membership test.
+func ValidateAllowedIssuers(issuers []string) error {
+	for _, iss := range issuers {
+		if strings.TrimSpace(iss) == "" {
+			return newValidation("allowed_issuers", "must not contain an empty issuer")
+		}
+	}
 	return nil
 }
 
@@ -82,6 +131,9 @@ type TenantRepository interface {
 	List(ctx context.Context) ([]*Tenant, error)
 	// SetStatus suspends or reactivates a tenant, guarded by rowVersion.
 	SetStatus(ctx context.Context, tenantID string, rowVersion int64, status TenantStatus) (*Tenant, error)
+	// SetAllowedIssuers replaces a tenant's issuer binding, guarded by
+	// rowVersion. An empty slice restores the safe default (default IdP only).
+	SetAllowedIssuers(ctx context.Context, tenantID string, rowVersion int64, issuers []string) (*Tenant, error)
 }
 
 // tenantContextKey scopes the resolved tenant in a request context.

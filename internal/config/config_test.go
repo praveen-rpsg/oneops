@@ -103,3 +103,80 @@ func TestLoadAllowsRateLimitDisabledWithZeroValues(t *testing.T) {
 		t.Fatalf("unexpected error with rate limiting disabled: %v", err)
 	}
 }
+
+// An empty ONEOPS_ADDITIONAL_IDPS must not change a single-IdP deployment's
+// behavior at all — this is the backward-compat contract for enterprise SSO.
+func TestLoadDefaultsToNoAdditionalIDPs(t *testing.T) {
+	t.Setenv("ONEOPS_ADDITIONAL_IDPS", "")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(c.AdditionalIDPs) != 0 {
+		t.Errorf("AdditionalIDPs = %+v, want empty", c.AdditionalIDPs)
+	}
+}
+
+func TestLoadParsesAdditionalIDPs(t *testing.T) {
+	t.Setenv("ONEOPS_ADDITIONAL_IDPS", `[
+		{"issuer":"https://idp-a.example","audience":"aud-a","jwks_url":"https://idp-a.example/jwks"},
+		{"issuer":"https://idp-b.example","audience":"aud-b","hmac_key":"idp-b-secret"}
+	]`)
+
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(c.AdditionalIDPs) != 2 {
+		t.Fatalf("AdditionalIDPs = %+v, want 2 entries", c.AdditionalIDPs)
+	}
+	if c.AdditionalIDPs[0].Issuer != "https://idp-a.example" || c.AdditionalIDPs[0].JWKSURL == "" {
+		t.Errorf("idp A parsed wrong: %+v", c.AdditionalIDPs[0])
+	}
+	if c.AdditionalIDPs[1].HMACKey != "idp-b-secret" {
+		t.Errorf("idp B parsed wrong: %+v", c.AdditionalIDPs[1])
+	}
+}
+
+func TestLoadRejectsMalformedAdditionalIDPs(t *testing.T) {
+	t.Setenv("ONEOPS_ADDITIONAL_IDPS", `not-json`)
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for malformed ONEOPS_ADDITIONAL_IDPS")
+	}
+}
+
+func TestLoadRejectsAdditionalIdPMissingAudience(t *testing.T) {
+	t.Setenv("ONEOPS_ADDITIONAL_IDPS", `[{"issuer":"https://idp-a.example","jwks_url":"https://idp-a.example/jwks"}]`)
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for an additional IdP missing an audience")
+	}
+}
+
+func TestLoadRejectsAdditionalIdPMissingKeys(t *testing.T) {
+	t.Setenv("ONEOPS_ADDITIONAL_IDPS", `[{"issuer":"https://idp-a.example","audience":"aud-a"}]`)
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for an additional IdP with neither jwks_url nor hmac_key")
+	}
+}
+
+func TestLoadRejectsDuplicateAdditionalIdPIssuers(t *testing.T) {
+	t.Setenv("ONEOPS_ADDITIONAL_IDPS", `[
+		{"issuer":"https://idp-a.example","audience":"aud-a","hmac_key":"s1"},
+		{"issuer":"https://idp-a.example","audience":"aud-a2","hmac_key":"s2"}
+	]`)
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for duplicate issuers across additional IdPs")
+	}
+}
+
+// An additional IdP cannot silently shadow the default: colliding with
+// ONEOPS_JWT_ISSUER is a duplicate issuer, same as colliding with another
+// additional IdP.
+func TestLoadRejectsAdditionalIdPCollidingWithDefaultIssuer(t *testing.T) {
+	t.Setenv("ONEOPS_JWT_ISSUER", "https://oneops.local")
+	t.Setenv("ONEOPS_ADDITIONAL_IDPS", `[{"issuer":"https://oneops.local","audience":"other","hmac_key":"s1"}]`)
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for an additional IdP reusing the default issuer")
+	}
+}

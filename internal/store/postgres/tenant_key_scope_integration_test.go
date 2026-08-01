@@ -71,6 +71,22 @@ var keyScopeJustifications = map[string]string{
 	"invitation.invitation_pkey":        "invitation_id is platform-generated; clients never supply it",
 	"invitation.uq_invitation_token":    "token_hash is the hash of a server-generated token — a client cannot choose the value (ADR-IDENTITY-002 §2.4)",
 	"membership.uq_membership_org_user": "keyed by org_id, which stands 1:1 with a tenant (ADR-IDENTITY-001 §4), so the pair is confined to one tenant by construction; user_id is platform-generated",
+
+	// Team (extends the same shape to a non-authorisation grouping).
+	"team.team_pkey":                               "team_id is platform-generated; clients never supply it",
+	"team_membership.team_membership_pkey":         "team_membership_id is platform-generated; clients never supply it",
+	"team_membership.uq_team_membership_team_user": "team_id is platform-generated and already belongs to exactly one tenant; user_id is platform-generated",
+
+	// Notification Service. There is no create-with-id HTTP route at all —
+	// notification_id is minted by domain.NewNotification and never accepted
+	// from a request — so this is not merely un-collidable, it is unreachable
+	// from outside the platform.
+	"notification.notification_pkey": "notification_id is platform-generated (a ULID); clients never supply it and there is no create route that accepts one",
+
+	// Multi-approver approval quorum (ADR-GOV-005). uq_approval_tenant_governance_approver
+	// already contains tenant_id and needs no justification here; only the
+	// surrogate PK does.
+	"approval_record.approval_record_pkey": "approval_id is platform-generated (a ULID via domain.NewApprovalRecord); clients never supply it and there is no create route that accepts one",
 }
 
 func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {

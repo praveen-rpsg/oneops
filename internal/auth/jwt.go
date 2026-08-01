@@ -21,18 +21,50 @@ type Claims struct {
 	Subject string
 	Roles   []string
 	Tenant  string
+	// Issuer is the VERIFIED `iss` of the token — the value jwt.Parse validated
+	// against the matched IdP, not merely the one peeked to select the key. The
+	// authentication boundary uses it to enforce that the token's issuer is
+	// authorised for the tenant it claims (ADR-IDENTITY-003), which is what
+	// stops one configured IdP from authenticating another tenant.
+	Issuer string
 }
 
-// Verifier validates bearer tokens. It supports HS256 (shared secret, for
-// local/dev and tests) and RS256 (via a JWKS endpoint, for OIDC providers).
-type Verifier struct {
-	issuer   string
+// IDPConfig describes one trusted identity provider: enterprise SSO means
+// different tenants bring their own IdP, each with its own issuer, expected
+// audience, and key source (HS256 shared secret for dev/test, or RS256 via a
+// JWKS endpoint for a real OIDC provider).
+type IDPConfig struct {
+	Issuer   string
+	Audience string
+	HMACKey  string
+	JWKSURL  string
+	// Client is the HTTP client used for this IdP's JWKS fetch. nil means the
+	// SSRF-guarded default (ADR-SECURITY-003); tests inject their own to
+	// reach a local server.
+	Client *http.Client
+}
+
+// idp holds one IDPConfig resolved into verification material.
+type idp struct {
 	audience string
 	hmacKey  []byte
 	jwks     *jwksCache
 }
 
-// NewVerifier builds a Verifier. hmacKey enables HS256; jwksURL enables RS256.
+// Verifier validates bearer tokens against a set of trusted identity
+// providers, selected by the token's `iss` claim. It supports HS256 (shared
+// secret, for local/dev and tests) and RS256 (via a JWKS endpoint, for OIDC
+// providers).
+type Verifier struct {
+	// idps is keyed by issuer. A token whose issuer has no entry here is
+	// rejected outright — there is no default IdP to fall through to, so
+	// adding an IdP can only narrow what is accepted, never widen it.
+	idps map[string]*idp
+}
+
+// NewVerifier builds a single-IdP Verifier. hmacKey enables HS256; jwksURL
+// enables RS256. This is the backward-compatible entry point for a single
+// trusted issuer.
 func NewVerifier(issuer, audience, hmacKey, jwksURL string) *Verifier {
 	return NewVerifierWithClient(issuer, audience, hmacKey, jwksURL, nil)
 }
@@ -41,22 +73,57 @@ func NewVerifier(issuer, audience, hmacKey, jwksURL string) *Verifier {
 // fetch. A nil client means the SSRF-guarded default; tests supply their own to
 // reach a local server (ADR-SECURITY-003).
 func NewVerifierWithClient(issuer, audience, hmacKey, jwksURL string, doer *http.Client) *Verifier {
-	v := &Verifier{issuer: issuer, audience: audience}
-	if hmacKey != "" {
-		v.hmacKey = []byte(hmacKey)
-	}
-	if jwksURL != "" {
-		v.jwks = newJWKSCache(jwksURL, doer)
+	v, err := NewMultiVerifier([]IDPConfig{{
+		Issuer: issuer, Audience: audience, HMACKey: hmacKey, JWKSURL: jwksURL, Client: doer,
+	}})
+	if err != nil {
+		// A single IDPConfig can only fail construction on a duplicate
+		// issuer, which is impossible with exactly one entry.
+		panic(err)
 	}
 	return v
 }
 
-// Verify parses and validates a raw token and returns its claims.
+// NewMultiVerifier builds a Verifier trusting every IdP in configs, keyed by
+// issuer. Duplicate issuers and configs missing an issuer are rejected so a
+// misconfiguration cannot silently shadow another IdP.
+func NewMultiVerifier(configs []IDPConfig) (*Verifier, error) {
+	idps := make(map[string]*idp, len(configs))
+	for _, c := range configs {
+		if c.Issuer == "" {
+			return nil, fmt.Errorf("idp config missing issuer")
+		}
+		if _, exists := idps[c.Issuer]; exists {
+			return nil, fmt.Errorf("duplicate issuer %q", c.Issuer)
+		}
+		e := &idp{audience: c.Audience}
+		if c.HMACKey != "" {
+			e.hmacKey = []byte(c.HMACKey)
+		}
+		if c.JWKSURL != "" {
+			e.jwks = newJWKSCache(c.JWKSURL, c.Client)
+		}
+		idps[c.Issuer] = e
+	}
+	return &Verifier{idps: idps}, nil
+}
+
+// Verify parses and validates a raw token and returns its claims. The token's
+// `iss` claim selects which IdP verifies it; issuer, audience, signature and
+// expiration are all checked against that IdP alone, never a default.
 func (v *Verifier) Verify(raw string) (*Claims, error) {
-	parsed, err := jwt.Parse(raw, v.keyfunc,
+	iss, err := peekIssuer(raw)
+	if err != nil {
+		return nil, fmt.Errorf("token verification failed: %w", err)
+	}
+	e, ok := v.idps[iss]
+	if !ok {
+		return nil, fmt.Errorf("token verification failed: unrecognized issuer %q", iss)
+	}
+	parsed, err := jwt.Parse(raw, e.keyfunc,
 		jwt.WithValidMethods([]string{"HS256", "RS256"}),
-		jwt.WithIssuer(v.issuer),
-		jwt.WithAudience(v.audience),
+		jwt.WithIssuer(iss),
+		jwt.WithAudience(e.audience),
 		jwt.WithExpirationRequired(),
 	)
 	if err != nil {
@@ -74,22 +141,46 @@ func (v *Verifier) Verify(raw string) (*Claims, error) {
 	if tenant == "" {
 		tenant, _ = mc["tid"].(string)
 	}
-	return &Claims{Subject: sub, Roles: parseRoles(mc["roles"]), Tenant: tenant}, nil
+	// The issuer carried out is the one jwt.Parse validated (WithIssuer(iss)
+	// above required the token's own `iss` to equal it), not the unverified
+	// peeked value — so a downstream authorization decision rests on a checked
+	// claim.
+	verifiedIss, _ := mc.GetIssuer()
+	return &Claims{
+		Subject: sub, Roles: parseRoles(mc["roles"]), Tenant: tenant, Issuer: verifiedIss,
+	}, nil
 }
 
-func (v *Verifier) keyfunc(t *jwt.Token) (any, error) {
+// peekIssuer reads the `iss` claim without verifying the signature, so the
+// verifier can pick the right IdP's keys before checking anything else. The
+// signature, audience and expiration of whatever issuer this names are still
+// fully verified afterwards by Verify — this only ever narrows key selection,
+// it establishes no trust.
+func peekIssuer(raw string) (string, error) {
+	claims := jwt.MapClaims{}
+	if _, _, err := jwt.NewParser().ParseUnverified(raw, claims); err != nil {
+		return "", fmt.Errorf("parse token: %w", err)
+	}
+	iss, _ := claims.GetIssuer()
+	if iss == "" {
+		return "", fmt.Errorf("missing issuer claim")
+	}
+	return iss, nil
+}
+
+func (e *idp) keyfunc(t *jwt.Token) (any, error) {
 	switch t.Method.Alg() {
 	case "HS256":
-		if len(v.hmacKey) == 0 {
+		if len(e.hmacKey) == 0 {
 			return nil, fmt.Errorf("HS256 tokens not accepted")
 		}
-		return v.hmacKey, nil
+		return e.hmacKey, nil
 	case "RS256":
-		if v.jwks == nil {
+		if e.jwks == nil {
 			return nil, fmt.Errorf("RS256 tokens not accepted")
 		}
 		kid, _ := t.Header["kid"].(string)
-		return v.jwks.key(kid)
+		return e.jwks.key(kid)
 	default:
 		return nil, fmt.Errorf("unexpected signing method %q", t.Method.Alg())
 	}

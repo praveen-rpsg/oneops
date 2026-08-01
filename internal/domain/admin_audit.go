@@ -31,17 +31,20 @@ const (
 	AdminOrgStatusChanged    AdminOperation = "organization.status_changed"
 	AdminTenantCreated       AdminOperation = "tenant.created"
 	AdminTenantStatusChanged AdminOperation = "tenant.status_changed"
-	AdminInvitationCreated   AdminOperation = "invitation.created"
-	AdminInvitationRedeemed  AdminOperation = "invitation.redeemed"
-	AdminInvitationRevoked   AdminOperation = "invitation.revoked"
-	AdminMembershipGranted   AdminOperation = "membership.granted"
-	AdminMembershipRevoked   AdminOperation = "membership.revoked"
+	// AdminTenantIssuersChanged records a change to a tenant's allowed_issuers
+	// binding — which IdP issuers may authenticate the tenant (ADR-IDENTITY-003).
+	AdminTenantIssuersChanged AdminOperation = "tenant.issuers_changed"
+	AdminInvitationCreated    AdminOperation = "invitation.created"
+	AdminInvitationRedeemed   AdminOperation = "invitation.redeemed"
+	AdminInvitationRevoked    AdminOperation = "invitation.revoked"
+	AdminMembershipGranted    AdminOperation = "membership.granted"
+	AdminMembershipRevoked    AdminOperation = "membership.revoked"
 )
 
 var adminOperations = map[AdminOperation]bool{
 	AdminUserCreated: true, AdminUserProfileUpdated: true, AdminUserStatusChanged: true,
 	AdminOrgCreated: true, AdminOrgStatusChanged: true,
-	AdminTenantCreated: true, AdminTenantStatusChanged: true,
+	AdminTenantCreated: true, AdminTenantStatusChanged: true, AdminTenantIssuersChanged: true,
 	AdminInvitationCreated: true, AdminInvitationRedeemed: true, AdminInvitationRevoked: true,
 	AdminMembershipGranted: true, AdminMembershipRevoked: true,
 }

@@ -79,6 +79,29 @@ func TestValidateProduction_NoOpOutsideProd(t *testing.T) {
 	}
 }
 
+// An additional IdP left on the shared insecure development HMAC key is the
+// same defect as the default IdP being left on it — production must reject
+// it the same way.
+func TestValidateProduction_RejectsInsecureAdditionalIdP(t *testing.T) {
+	c := &Config{
+		Env:         "production",
+		AuthEnabled: true,
+		JWTHMACKey:  "a-real-strong-secret",
+		DatabaseURL: "postgres://u:p@db.internal:5432/oneops?sslmode=require",
+		MetricsAddr: ":9090",
+		AdditionalIDPs: []IDPSpec{
+			{Issuer: "https://idp-a.example", Audience: "aud-a", HMACKey: devJWTHMACKey},
+		},
+	}
+	err := c.validateProduction()
+	if err == nil {
+		t.Fatal("expected production to reject an additional IdP on the insecure dev HMAC key")
+	}
+	if !strings.Contains(err.Error(), "ONEOPS_ADDITIONAL_IDPS") {
+		t.Errorf("error %q missing mention of ONEOPS_ADDITIONAL_IDPS", err.Error())
+	}
+}
+
 func TestIsProduction(t *testing.T) {
 	for _, env := range []string{"prod", "production", "PROD", " Production "} {
 		if !(&Config{Env: env}).IsProduction() {

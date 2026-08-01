@@ -117,7 +117,7 @@ func TestJWKSFetchIsSSRFGuarded(t *testing.T) {
 
 	// No client injected: the guarded default applies.
 	v := NewVerifier(testIss, testAud, "", srv.URL)
-	_, err := v.jwks.key("any-kid")
+	_, err := v.idps[testIss].jwks.key("any-kid")
 	if err == nil {
 		t.Fatal("the default JWKS fetch reached a loopback address — the SSRF guard is not applied")
 	}

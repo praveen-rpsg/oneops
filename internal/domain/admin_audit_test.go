@@ -9,7 +9,7 @@ import (
 //
 // ck_admin_audit_operation is the same list, enforced in the database; this is
 // the pre-check that turns a would-be constraint violation into a readable
-// refusal. It must accept exactly the twelve administrative operations and
+// refusal. It must accept exactly the administrative operations and
 // nothing else — an operation from the disjoint ConfigurationOperation
 // vocabulary must not pass, since the two stores must never record the same
 // fact twice.
@@ -18,7 +18,7 @@ func TestAdminOperationValid(t *testing.T) {
 	valid := []AdminOperation{
 		AdminUserCreated, AdminUserProfileUpdated, AdminUserStatusChanged,
 		AdminOrgCreated, AdminOrgStatusChanged,
-		AdminTenantCreated, AdminTenantStatusChanged,
+		AdminTenantCreated, AdminTenantStatusChanged, AdminTenantIssuersChanged,
 		AdminInvitationCreated, AdminInvitationRedeemed, AdminInvitationRevoked,
 		AdminMembershipGranted, AdminMembershipRevoked,
 	}

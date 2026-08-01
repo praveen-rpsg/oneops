@@ -134,3 +134,47 @@ func TestTenantIDFromDefaultsToSystem(t *testing.T) {
 		t.Errorf("TenantIDFrom(empty tenant) = %q, want %q", id, SystemTenantID)
 	}
 }
+
+// AllowsIssuer encodes the safe-by-default binding: an empty set means the
+// default IdP only, an explicit set is exact membership, and every degenerate
+// input fails closed (ADR-IDENTITY-003).
+func TestTenantAllowsIssuer(t *testing.T) {
+	const def = "https://oneops.local"
+	cases := []struct {
+		name    string
+		allowed []string
+		issuer  string
+		want    bool
+	}{
+		{"empty set allows the default issuer", nil, def, true},
+		{"empty set refuses a non-default issuer", nil, "https://idp-b.example", false},
+		{"empty issuer is refused even with empty set", nil, "", false},
+		{"empty default with empty set refuses all", nil, "", false},
+		{"explicit set allows a listed issuer", []string{"https://idp-b.example"}, "https://idp-b.example", true},
+		{"explicit set refuses an unlisted issuer", []string{"https://idp-b.example"}, "https://idp-c.example", false},
+		{"explicit set does NOT implicitly include the default", []string{"https://idp-b.example"}, def, false},
+		{"explicit set refuses an empty issuer", []string{"https://idp-b.example"}, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tn := &Tenant{AllowedIssuers: c.allowed}
+			d := def
+			if c.name == "empty default with empty set refuses all" {
+				d = ""
+			}
+			if got := tn.AllowsIssuer(c.issuer, d); got != c.want {
+				t.Errorf("AllowsIssuer(%q, %q) with %v = %v, want %v",
+					c.issuer, d, c.allowed, got, c.want)
+			}
+		})
+	}
+}
+
+func TestValidateAllowedIssuersRejectsBlank(t *testing.T) {
+	if err := ValidateAllowedIssuers([]string{"https://idp-b.example", "  "}); err == nil {
+		t.Error("a blank issuer entry must be rejected")
+	}
+	if err := ValidateAllowedIssuers([]string{"https://idp-b.example"}); err != nil {
+		t.Errorf("a clean set must validate: %v", err)
+	}
+}

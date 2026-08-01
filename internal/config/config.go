@@ -3,6 +3,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -43,6 +44,12 @@ type Config struct {
 	JWTAudience string
 	JWTHMACKey  string // HS256 dev/test secret; empty => RS256/JWKS
 	JWKSURL     string // RS256 public keys (OIDC)
+
+	// AdditionalIDPs are trusted identity providers beyond the default
+	// (JWTIssuer/JWTAudience/...) — enterprise SSO, where different tenants
+	// bring their own IdP. Configured via ONEOPS_ADDITIONAL_IDPS; empty is the
+	// common case and changes nothing about the default IdP's behavior.
+	AdditionalIDPs []IDPSpec
 
 	// OIDC client identity for the browser console. The server never uses it —
 	// it is published at /auth/config so a per-deployment console can configure
@@ -87,6 +94,18 @@ type Config struct {
 	RateLimitBurst   int
 }
 
+// IDPSpec is one entry of ONEOPS_ADDITIONAL_IDPS: a trusted identity provider
+// beyond the default. Each needs an issuer, an audience, and at least one key
+// source — a JWKSURL for RS256 (a real IdP), or an HMACKey for HS256
+// (dev/test only; production rejects the shared insecure default the same
+// way it does for the default IdP, see validateProduction).
+type IDPSpec struct {
+	Issuer   string `json:"issuer"`
+	Audience string `json:"audience"`
+	JWKSURL  string `json:"jwks_url,omitempty"`
+	HMACKey  string `json:"hmac_key,omitempty"`
+}
+
 // IsProduction reports whether the service runs in a production environment,
 // where insecure development defaults are rejected at startup.
 func (c *Config) IsProduction() bool {
@@ -108,6 +127,12 @@ func (c *Config) validateProduction() error {
 	if c.AuthEnabled && c.JWTHMACKey == devJWTHMACKey {
 		problems = append(problems, "ONEOPS_JWT_HMAC_KEY is the insecure development default")
 	}
+	for _, idp := range c.AdditionalIDPs {
+		if idp.HMACKey == devJWTHMACKey {
+			problems = append(problems, fmt.Sprintf(
+				"ONEOPS_ADDITIONAL_IDPS entry %q uses the insecure development HMAC key", idp.Issuer))
+		}
+	}
 	if !c.AuthEnabled {
 		problems = append(problems, "ONEOPS_AUTH_ENABLED must not be false in production")
 	}
@@ -126,6 +151,32 @@ func (c *Config) validateProduction() error {
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("insecure production configuration: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// validateAdditionalIDPs rejects a multi-IdP configuration that could not be
+// built into a working Verifier: a missing issuer/audience, an IdP with no
+// key source, or an issuer that collides with another additional IdP or with
+// the default IdP (ONEOPS_JWT_ISSUER). This mirrors the checks
+// auth.NewMultiVerifier makes at construction, so a bad config fails fast at
+// Load rather than at first request.
+func (c *Config) validateAdditionalIDPs() error {
+	if len(c.AdditionalIDPs) == 0 {
+		return nil
+	}
+	seen := map[string]bool{c.JWTIssuer: true}
+	for _, idp := range c.AdditionalIDPs {
+		if idp.Issuer == "" || idp.Audience == "" {
+			return fmt.Errorf("ONEOPS_ADDITIONAL_IDPS entry missing issuer or audience")
+		}
+		if idp.JWKSURL == "" && idp.HMACKey == "" {
+			return fmt.Errorf("ONEOPS_ADDITIONAL_IDPS entry %q needs a jwks_url or hmac_key", idp.Issuer)
+		}
+		if seen[idp.Issuer] {
+			return fmt.Errorf("ONEOPS_ADDITIONAL_IDPS has duplicate issuer %q", idp.Issuer)
+		}
+		seen[idp.Issuer] = true
 	}
 	return nil
 }
@@ -165,6 +216,11 @@ func Load() (*Config, error) {
 		RateLimitRPS:     getEnvInt("ONEOPS_RATE_LIMIT_RPS", 20),
 		RateLimitBurst:   getEnvInt("ONEOPS_RATE_LIMIT_BURST", 40),
 	}
+	if raw := getEnv("ONEOPS_ADDITIONAL_IDPS", ""); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &c.AdditionalIDPs); err != nil {
+			return nil, fmt.Errorf("ONEOPS_ADDITIONAL_IDPS is not valid JSON: %w", err)
+		}
+	}
 	if c.ShutdownGrace < 0 {
 		return nil, fmt.Errorf("ONEOPS_SHUTDOWN_GRACE_SECONDS must be >= 0, got %d", c.ShutdownGrace)
 	}
@@ -179,6 +235,9 @@ func Load() (*Config, error) {
 	}
 	if c.AuthEnabled && c.JWTHMACKey == "" && c.JWKSURL == "" {
 		return nil, fmt.Errorf("auth enabled but neither ONEOPS_JWT_HMAC_KEY nor ONEOPS_JWKS_URL is set")
+	}
+	if err := c.validateAdditionalIDPs(); err != nil {
+		return nil, err
 	}
 	if c.VerifyIntervalSeconds < 0 || c.VerifyTimeoutSeconds < 0 || c.VerifyRetryAttempts < 0 {
 		return nil, fmt.Errorf("audit verify settings must be >= 0")
