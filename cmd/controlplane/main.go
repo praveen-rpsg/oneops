@@ -427,7 +427,24 @@ func run(logger *slog.Logger) error {
 	// event, rather than trusting the event snapshot in the queued execution
 	// row (ADR-TENANCY-003).
 	policyExecutor := policy.NewExecutor(policyStore, policyStore, auditStore, policyRegistry, policyMetrics, logger, policy.ExecutorConfig{})
-	workers = append(workers, policyConsumer.Run, policyExecutor.Run)
+	// Reconciliation sweep (closes the W2 executor's permanent-stall gap,
+	// ADR-POLICY-001 §3): advanceRun enqueues a composed run's next step
+	// AFTER its predecessor's success already committed, so a worker that
+	// crashes in that window leaves the run wedged forever — ClaimDue never
+	// reselects a succeeded row. The Reconciler periodically re-derives any
+	// run in that state through the same advanceRunSteps path advanceRun
+	// itself uses, so a webhook-of-actions run cannot wedge permanently on a
+	// mid-flight crash. Same pool as the consumer/executor above (every
+	// tenant's runs), same leader gate below (exactly one sweeper).
+	policyReconciler := policy.NewReconciler(policyStore, policyStore, logger, policy.ReconcilerConfig{})
+	// Gate evaluation (W3, ADR-POLICY-002): the same sweep resolves a run's
+	// paused "approval" gates before re-deriving stalled runs, so a gate this
+	// pass flips to passed is picked up by the very same pass's stalled-run
+	// scan. Built over the admin pool (every tenant, no RLS binding), the same
+	// posture policyStore itself has here — tenant scoping is explicit in
+	// every query, never implicit (ADR-TENANCY-003).
+	policyReconciler.SetApprovalGate(postgres.NewApprovalGateStore(pool))
+	workers = append(workers, policyConsumer.Run, policyExecutor.Run, policyReconciler.Run)
 	srv.SetPolicies(policyAdminStore, func(ctx context.Context, p policy.Policy) (policy.ExecutionStatus, error) {
 		ex := policy.Execution{
 			ID: "poltest_" + p.ID, PolicyID: p.ID, Status: policy.ExecPending,

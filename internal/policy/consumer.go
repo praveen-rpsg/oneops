@@ -146,15 +146,28 @@ func (c *Consumer) Evaluate(ev Event, pols []Policy, now time.Time) []Execution 
 	for _, p := range domain.FanOut(ev, pols, func(p Policy) bool {
 		return p.Enabled && p.Condition.Matches(ev)
 	}) {
-		{
+		if len(p.Steps) > 0 {
+			// A composed Sequence: mint the run and enqueue step 0 only — the
+			// executor advances through the rest as each step succeeds
+			// (ADR-POLICY-001 §3, W2). The run id reuses ExecutionID's shape
+			// (a pure function of the policy and the triggering event's
+			// position) so a re-processed event mints the same run rather
+			// than starting a second one.
+			runID := ExecutionID(p.ID, ev.CfgID, ev.Seq)
 			out = append(out, Execution{
-				// Deterministic id makes production idempotent: a re-processed
-				// event collides rather than running the action twice
-				// (ADR-CONCURRENCY-003).
-				ID: ExecutionID(p.ID, ev.CfgID, ev.Seq), PolicyID: p.ID, Event: ev, Status: ExecPending,
+				ID: ExecutionID(runID, stepTag, 0), PolicyID: p.ID, Event: ev, Status: ExecPending,
 				NextAttemptAt: now, CreatedAt: now,
+				RunID: runID, StepIndex: 0,
 			})
+			continue
 		}
+		out = append(out, Execution{
+			// Deterministic id makes production idempotent: a re-processed
+			// event collides rather than running the action twice
+			// (ADR-CONCURRENCY-003).
+			ID: ExecutionID(p.ID, ev.CfgID, ev.Seq), PolicyID: p.ID, Event: ev, Status: ExecPending,
+			NextAttemptAt: now, CreatedAt: now,
+		})
 	}
 	return out
 }

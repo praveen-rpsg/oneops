@@ -41,4 +41,58 @@ type ExecutionStore interface {
 	// worker stopped between claiming and running (ADR-CONCURRENCY-006).
 	ReleaseClaim(ctx context.Context, id string, claimToken time.Time) error
 	ListByPolicy(ctx context.Context, policyID string, limit int) ([]Execution, error)
+	// ListByRun returns every Execution sharing runID, ordered by StepIndex —
+	// the persistence side of RunProgress (ADR-POLICY-001). There is no
+	// run-progress table: a run's Executions ARE its progress.
+	ListByRun(ctx context.Context, runID string) ([]Execution, error)
+	// SetGate records a step's Decision gate resolution. The executor calls it
+	// with GatePending immediately after a gated step's action succeeds,
+	// pausing the run at that step (ADR-POLICY-001 §3); a future gate
+	// evaluator (W3) is what flips it to GatePassed. Unfenced by a claim
+	// token: gate resolution is a separate write from the execution's own
+	// claim/retry lifecycle, and by the time it is called the step's own
+	// outcome is already durably recorded as succeeded.
+	SetGate(ctx context.Context, id string, gate GateState) error
+	// ListStalledRuns returns the ids of composed runs whose frontier step
+	// succeeded with a resolved gate (none, or passed) but whose immediate
+	// successor step has no Execution row at all — the permanent-stall gap a
+	// worker crash between MarkResult(succeeded) and Enqueue(next step)
+	// leaves behind, since ClaimDue only ever reselects pending/failed/
+	// stuck-running rows, never a succeeded one. It over-includes a run whose
+	// frontier is genuinely its LAST step (nothing left to enqueue): that is
+	// harmless, because the caller (Reconciler) re-derives the run's real
+	// cursor via RunProgress before acting, and a run RunProgress already
+	// reports Complete is always a no-op. Never returns a single-action
+	// execution's run (run_id is NULL for those) or a run parked on a
+	// pending gate.
+	ListStalledRuns(ctx context.Context, limit int) ([]string, error)
+	// ListPendingGates returns the Executions currently paused at an
+	// unresolved Decision gate — a succeeded step whose Gate is GatePending
+	// — the read side of gate EVALUATION (ADR-POLICY-002), exactly as
+	// ListStalledRuns is the read side of run advancement. At most one such
+	// row exists per run at a time: only the frontier step is ever set to
+	// GatePending.
+	ListPendingGates(ctx context.Context, limit int) ([]Execution, error)
+}
+
+// ApprovalGate is the read-only quorum check an "approval" Gate consults
+// (ADR-POLICY-002): how many distinct approvers have recorded an approval of
+// the governance object that triggered the composed run (the run's own
+// Event.CfgID), and how many the tenant's governance_required_approvals
+// Setting currently requires (ADR-GOV-005). It reads exactly the data the
+// Governance Engine's own ApprovalRecorder/EffectiveRequiredApprovals
+// already decide Approval on — this is a second, read-only caller of that
+// data, never a second quorum implementation.
+//
+// The gate evaluator (reconciler.go) runs on the same admin/background pool
+// PolicyStore's own background instance uses (main.go) — every tenant's
+// runs, not one request's bound connection — so tenantID is an explicit
+// argument on every call rather than relied on from RLS (ADR-TENANCY-003).
+type ApprovalGate interface {
+	// CountDistinct returns the number of distinct approvers recorded for
+	// (tenantID, governanceID).
+	CountDistinct(ctx context.Context, tenantID, governanceID string) (int, error)
+	// RequiredApprovals returns tenantID's configured Approval quorum
+	// threshold, falling back to the Setting's own default when unset.
+	RequiredApprovals(ctx context.Context, tenantID string) (int, error)
 }

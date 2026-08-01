@@ -1578,6 +1578,19 @@ paths:
           description: Test result
           content: { application/json: { schema: { $ref: '#/components/schemas/PolicyTestResult' } } }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/admin/policies/{id}/runs/{runId}:
+    get:
+      summary: Inspect a composed run's progress (ADR-POLICY-001)
+      operationId: getPolicyRun
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: runId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Run progress
+          content: { application/json: { schema: { $ref: '#/components/schemas/PolicyRun' } } }
+        '404': { $ref: '#/components/responses/Problem' }
 
   # Execution timeline (admin) — a read-only operational read model composed from
   # existing persisted data. It participates in no execution.
@@ -2428,6 +2441,23 @@ components:
       properties:
         type: { type: string, enum: [http, email, command, notification] }
         config: { type: object }
+    PolicyGate:
+      type: object
+      description: >-
+        The Decision that must resolve before a composed Sequence advances
+        past the step it guards (ADR-POLICY-001/002). Only "approval" is
+        evaluated today; any other type is left pending, never guessed at.
+      required: [type]
+      properties:
+        type: { type: string }
+        config: { type: object }
+    PolicyStep:
+      type: object
+      description: One step of a Policy's composed Sequence.
+      required: [action]
+      properties:
+        action: { $ref: '#/components/schemas/PolicyAction' }
+        gate: { $ref: '#/components/schemas/PolicyGate' }
     Policy:
       type: object
       properties:
@@ -2436,6 +2466,12 @@ components:
         enabled: { type: boolean }
         condition: { $ref: '#/components/schemas/PolicyCondition' }
         action: { $ref: '#/components/schemas/PolicyAction' }
+        steps:
+          type: array
+          description: >-
+            Ordered, optionally gated Sequence of Actions (ADR-POLICY-001).
+            Empty/absent means "use action as the whole response".
+          items: { $ref: '#/components/schemas/PolicyStep' }
         max_retries: { type: integer }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -2451,6 +2487,7 @@ components:
         enabled: { type: boolean }
         condition: { $ref: '#/components/schemas/PolicyCondition' }
         action: { $ref: '#/components/schemas/PolicyAction' }
+        steps: { type: array, items: { $ref: '#/components/schemas/PolicyStep' } }
         max_retries: { type: integer }
     PatchPolicyRequest:
       type: object
@@ -2459,6 +2496,7 @@ components:
         enabled: { type: boolean }
         condition: { $ref: '#/components/schemas/PolicyCondition' }
         action: { $ref: '#/components/schemas/PolicyAction' }
+        steps: { type: array, items: { $ref: '#/components/schemas/PolicyStep' } }
         max_retries: { type: integer }
     PolicyExecution:
       type: object
@@ -2474,6 +2512,9 @@ components:
         started_at: { type: string, format: date-time }
         ended_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
+        run_id: { type: string, description: "Composed-run id (ADR-POLICY-001); empty for a single-action execution. Pass to GET /admin/policies/{id}/runs/{runId}." }
+        step_index: { type: integer, description: "Step position within a composed run." }
+        gate: { type: string, enum: ["", pending, passed], description: "This step's Decision gate state." }
     PolicyExecutionList:
       type: object
       properties:
@@ -2483,6 +2524,26 @@ components:
       properties:
         status: { type: string }
         error: { type: string }
+    PolicyRunStep:
+      type: object
+      properties:
+        index: { type: integer }
+        status: { type: string, enum: [pending, running, succeeded, failed, dead_letter] }
+        gate: { type: string, enum: [none, pending, passed] }
+        execution_id: { type: string }
+        error: { type: string }
+    PolicyRun:
+      type: object
+      description: >-
+        A composed run's progress — a pure projection over its Execution rows
+        (ADR-POLICY-001), never a stored entity.
+      properties:
+        run_id: { type: string }
+        policy_id: { type: string }
+        steps: { type: array, items: { $ref: '#/components/schemas/PolicyRunStep' } }
+        current_step: { type: integer }
+        complete: { type: boolean }
+        paused_at_gate: { type: boolean }
     TimelineEntry:
       type: object
       properties:

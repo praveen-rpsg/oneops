@@ -123,11 +123,16 @@ type Policy struct {
 	ID string
 	// TenantID owns the policy. Compared against the event's owner by
 	// domain.FanOut before the condition is evaluated.
-	TenantID   string
-	Name       string
-	Enabled    bool
-	Condition  Condition
-	Action     ActionSpec
+	TenantID  string
+	Name      string
+	Enabled   bool
+	Condition Condition
+	Action    ActionSpec
+	// Steps, when non-empty, is this Policy's composed response: an ordered,
+	// gated Sequence of Actions run one at a time instead of the single
+	// Action above (ADR-POLICY-001). Empty Steps means "use Action", exactly
+	// as every Policy behaved before this field existed.
+	Steps      Sequence
 	MaxRetries int
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
@@ -170,6 +175,17 @@ type Execution struct {
 	// out of MarkResult, so its late completion cannot corrupt the reclaimer's
 	// state (ADR-CONCURRENCY-005). Zero on rows never claimed (the admin test path).
 	ClaimedAt time.Time
+	// RunID groups the Executions belonging to one composed Sequence run, one
+	// Execution per step index (ADR-POLICY-001). Empty for a single-action
+	// policy's execution, exactly as before this field existed — RunProgress
+	// is meaningful only for Executions that share one.
+	RunID string
+	// StepIndex is this Execution's position in its run's Sequence. Zero and
+	// unused when RunID is empty.
+	StepIndex int
+	// Gate is this step's Decision gate resolution, set only when the
+	// Sequence step at StepIndex names a Gate. GateNone otherwise.
+	Gate GateState
 }
 
 func contains(xs []string, x string) bool {

@@ -594,10 +594,16 @@ func TestRLS_PoliciesAreTenantIsolated(t *testing.T) {
 
 	sysCtx := domain.WithTenant(ctx, &domain.Tenant{
 		TenantID: domain.SystemTenantID, Status: domain.TenantActive})
+	// The secret policy is a composed Sequence (ADR-POLICY-001), not a
+	// single action — proving the new `steps` column is confined by the same
+	// row-level policy as the rest of the row, not carved out as an
+	// afterthought.
 	if err := store.Create(sysCtx, policy.Policy{
 		ID: "pol_sys_secret", Name: "system-only", Enabled: true, MaxRetries: 3,
-		Action: policy.ActionSpec{Type: "webhook",
-			Config: json.RawMessage(`{"url":"https://system-internal.example.com/policy"}`)},
+		Steps: policy.Sequence{
+			{Action: policy.ActionSpec{Type: "webhook",
+				Config: json.RawMessage(`{"url":"https://system-internal.example.com/policy"}`)}},
+		},
 	}); err != nil {
 		t.Fatalf("system creates policy: %v", err)
 	}
@@ -608,8 +614,18 @@ func TestRLS_PoliciesAreTenantIsolated(t *testing.T) {
 	}
 	for _, p := range list {
 		if p.ID == "pol_sys_secret" {
-			t.Fatalf("tenant %s can see another tenant's policy %q", a.TenantID, p.ID)
+			t.Fatalf("tenant %s can see another tenant's policy %q (including its steps: %+v)",
+				a.TenantID, p.ID, p.Steps)
 		}
+	}
+
+	// The system tenant can still read its own composed sequence back in full.
+	own, err := store.Get(sysCtx, "pol_sys_secret")
+	if err != nil {
+		t.Fatalf("system reads its own policy: %v", err)
+	}
+	if len(own.Steps) != 1 || own.Steps[0].Action.Type != "webhook" {
+		t.Fatalf("owner's own steps must round-trip: %+v", own.Steps)
 	}
 }
 

@@ -170,7 +170,27 @@ func (e *Executor) attempt(ctx context.Context, ex Execution) ExecutionStatus {
 		return ExecDeadLetter
 	}
 
-	runErr := e.runIsolated(ctx, p, ex.Event)
+	// A composed run's step runs the Action named at its position in the
+	// Sequence, not the policy's single Action field — that field is what a
+	// single-action policy (empty Steps, RunID always "") still uses,
+	// unchanged (ADR-POLICY-001).
+	action := p.Action
+	if ex.RunID != "" {
+		if ex.StepIndex < 0 || ex.StepIndex >= len(p.Steps) {
+			// The policy's Steps changed (or shrank) after this run started —
+			// never guess which action to run for a step that no longer
+			// exists. Dead-letter rather than retry a lookup that will never
+			// succeed.
+			_ = e.execs.MarkResult(octx, ex.ID, ex.ClaimedAt, ExecDeadLetter, ex.RetryCount,
+				fmt.Sprintf("run %s: step %d out of range for policy's current %d-step sequence", ex.RunID, ex.StepIndex, len(p.Steps)),
+				start, e.now(), time.Time{})
+			e.metrics.IncFailure()
+			return ExecDeadLetter
+		}
+		action = p.Steps[ex.StepIndex].Action
+	}
+
+	runErr := e.runIsolated(ctx, action, ex.Event)
 	e.metrics.ObserveDuration(e.now().Sub(start))
 
 	if runErr == nil {
@@ -185,6 +205,13 @@ func (e *Executor) attempt(ctx context.Context, ex Execution) ExecutionStatus {
 			// The action ran but its outcome could not be recorded; the row will be
 			// reclaimed and re-run (ADR-CONCURRENCY-006).
 			e.log.Error("policy executor: action ran but outcome not recorded", "execution_id", ex.ID, "err", err)
+			return ExecSucceeded
+		}
+		// The outcome is durably recorded and this worker still owns it (no
+		// fencing error): only now may the run's sequence advance. A step
+		// outside a composed run (RunID empty) has nothing to advance.
+		if ex.RunID != "" {
+			e.advanceRun(octx, p, ex)
 		}
 		return ExecSucceeded
 	}
@@ -208,13 +235,112 @@ func (e *Executor) attempt(ctx context.Context, ex Execution) ExecutionStatus {
 
 // runIsolated runs the action under a recover so a panicking action never
 // escapes the policy subsystem.
-func (e *Executor) runIsolated(ctx context.Context, p Policy, ev Event) (err error) {
+func (e *Executor) runIsolated(ctx context.Context, action ActionSpec, ev Event) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("policy action panicked: %v", r)
 		}
 	}()
-	return e.registry.Run(ctx, p.Action.Type, ev, p.Action.Config)
+	return e.registry.Run(ctx, action.Type, ev, action.Config)
+}
+
+// advanceRun moves a composed Sequence run forward after one of its steps
+// just succeeded and had that outcome durably recorded (ADR-POLICY-001 §3).
+// It reuses the leader-gated executor's own claim/fence/retry machinery for
+// the step it enqueues — this is not a second runtime, only the same
+// ClaimDue/MarkResult cycle applied to the next Execution row.
+//
+// It is a thin wrapper over advanceRunSteps: fetch the run's current
+// Executions, then hand off to the one path that decides and performs the
+// move. That path is also the Reconciler's (reconciler.go) — there is
+// exactly one place a composed run's next step is ever created, reached
+// reactively from here and periodically from the sweep.
+func (e *Executor) advanceRun(ctx context.Context, p Policy, ex Execution) {
+	steps, err := e.execs.ListByRun(ctx, ex.RunID)
+	if err != nil {
+		e.log.Error("policy executor: advance run: list executions", "run_id", ex.RunID, "err", err)
+		return
+	}
+	advanceRunSteps(ctx, e.execs, e.log, e.now, p, ex.RunID, steps)
+}
+
+// advanceRunSteps is the single path that decides and performs a composed
+// run's next move, computed fresh from the run's own Executions (steps) and
+// its Policy's current Sequence — never cached, never assumed. It is called
+// both reactively, immediately after a step's success is recorded
+// (advanceRun above), and periodically by Reconciler.RunOnce recovering a
+// run whose next step was never enqueued because the worker that recorded
+// the predecessor's success crashed before enqueuing it. Both callers
+// converge on the one Enqueue call below, so the permanent-stall gap this
+// closes cannot reopen a second bookkeeping path for it.
+//
+// The cursor (RunProgress.NextStepIndex) is recomputed from steps every call
+// rather than assumed to be any particular step's index+1, so a duplicated
+// or racing call — the same step's success advanced twice, or the sweep and
+// a live worker both reaching the same run — recomputes the same answer
+// instead of drifting, and the deterministic id it enqueues under
+// (ExecutionID(runID, stepTag, stepIndex)) makes a repeated Enqueue a no-op
+// (`ON CONFLICT (id) DO NOTHING`, the same idempotency shape ExecutionID
+// already gives a single-action policy).
+func advanceRunSteps(ctx context.Context, execs ExecutionStore, log *slog.Logger, now func() time.Time, p Policy, runID string, steps []Execution) {
+	next := (RunProgress{RunID: runID, Seq: p.Steps, Steps: steps}).NextStepIndex()
+	if next >= len(p.Steps) {
+		// No next step: the run is complete (or has no steps to check). There
+		// is no run-complete entity to mark — RunProgress.Complete() over
+		// this run's Executions already reports it.
+		return
+	}
+	if cur, ok := executionAtStep(steps, next); ok {
+		if cur.Status != ExecSucceeded {
+			// The cursor's own row already exists and has not succeeded yet
+			// (pending, running, or failed-awaiting-retry): the claim/fence/
+			// retry machinery already owns it. Touching it here — enqueuing
+			// a duplicate or nudging its state — is exactly what would
+			// reintroduce a second work-queue path for the same step.
+			return
+		}
+		// NextStepIndex CAUTION (composition.go): the step that just
+		// succeeded names a Gate that has not resolved to GatePassed. Pause
+		// here — set the gate pending and enqueue nothing. A future gate
+		// evaluator (W3) is what advances the run past this point.
+		//
+		// Self-defending (W2 review nit): NextStepIndex only returns a
+		// succeeded step's own index when that step names a Gate. Refuse to
+		// mark it pending if the Sequence disagrees — an ungated step must
+		// never be wrongly paused because Steps returned a stale set.
+		if p.Steps[cur.StepIndex].Gate == nil {
+			log.Error("policy executor: advance run: succeeded ungated step reported as blocking — refusing to set a gate",
+				"execution_id", cur.ID, "run_id", runID, "step_index", cur.StepIndex)
+			return
+		}
+		if err := execs.SetGate(ctx, cur.ID, GatePending); err != nil {
+			log.Error("policy executor: advance run: set gate pending", "execution_id", cur.ID, "run_id", runID, "err", err)
+		}
+		return
+	}
+	// No row exists yet for the cursor: the genuinely missing next step —
+	// either because this is the reactive path enqueuing it for the first
+	// time, or because the Reconciler found a run wedged exactly here. Its
+	// predecessor (next-1) is what NextStepIndex just proved succeeded with
+	// its gate resolved, so its Event snapshot is the one to propagate:
+	// every step of one run carries the same triggering Event.
+	pred, ok := executionAtStep(steps, next-1)
+	if !ok {
+		// Defensive only: NextStepIndex cannot return a positive next
+		// without a resolved predecessor at next-1 present in steps, and the
+		// Reconciler's candidate query never selects a run with no
+		// Executions at all.
+		log.Error("policy executor: advance run: no predecessor execution for cursor", "run_id", runID, "step_index", next)
+		return
+	}
+	nextEx := Execution{
+		ID: ExecutionID(runID, stepTag, int64(next)), PolicyID: p.ID, Event: pred.Event, Status: ExecPending,
+		NextAttemptAt: now(), CreatedAt: now(),
+		RunID: runID, StepIndex: next,
+	}
+	if err := execs.Enqueue(ctx, []Execution{nextEx}); err != nil {
+		log.Error("policy executor: advance run: enqueue next step", "run_id", runID, "next_step", next, "err", err)
+	}
 }
 
 // backoff computes the delay before the next attempt. retry is normally >= 1

@@ -32,7 +32,7 @@ var (
 
 // tenant_id is read on every path so the consumer's fan-out can compare
 // ownership: it lists policies across all tenants on a privileged connection.
-const policyCols = `id, name, enabled, condition, action_type, action_config, max_retries, created_at, updated_at, tenant_id`
+const policyCols = `id, name, enabled, condition, action_type, action_config, steps, max_retries, created_at, updated_at, tenant_id`
 
 // Create inserts a policy.
 func (s *PolicyStore) Create(ctx context.Context, p policy.Policy) error {
@@ -40,10 +40,14 @@ func (s *PolicyStore) Create(ctx context.Context, p policy.Policy) error {
 	if err != nil {
 		return fmt.Errorf("marshal condition: %w", err)
 	}
+	steps, err := sequenceJSON(p.Steps)
+	if err != nil {
+		return err
+	}
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO policy (`+policyCols+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now(),$8)`,
-		p.ID, p.Name, p.Enabled, cond, p.Action.Type, actionConfig(p.Action.Config), p.MaxRetries,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),now(),$9)`,
+		p.ID, p.Name, p.Enabled, cond, p.Action.Type, actionConfig(p.Action.Config), steps, p.MaxRetries,
 		domain.TenantIDFrom(ctx))
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -99,12 +103,16 @@ func (s *PolicyStore) Update(ctx context.Context, p policy.Policy) error {
 	if err != nil {
 		return fmt.Errorf("marshal condition: %w", err)
 	}
+	steps, err := sequenceJSON(p.Steps)
+	if err != nil {
+		return err
+	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE policy
 		   SET name=$2, enabled=$3, condition=$4, action_type=$5, action_config=$6,
-		       max_retries=$7, updated_at=now()
+		       steps=$7, max_retries=$8, updated_at=now()
 		 WHERE id=$1`,
-		p.ID, p.Name, p.Enabled, cond, p.Action.Type, actionConfig(p.Action.Config), p.MaxRetries)
+		p.ID, p.Name, p.Enabled, cond, p.Action.Type, actionConfig(p.Action.Config), steps, p.MaxRetries)
 	if err != nil {
 		return fmt.Errorf("update policy: %w", err)
 	}
@@ -126,9 +134,12 @@ func (s *PolicyStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-const execCols = `id, policy_id, event_id, event, status, retry_count, error, started_at, ended_at, next_attempt_at, created_at, claimed_at`
+const execCols = `id, policy_id, event_id, event, status, retry_count, error, started_at, ended_at, next_attempt_at, created_at, claimed_at, run_id, step_index, gate`
 
-// Enqueue inserts pending executions (idempotent by id).
+// Enqueue inserts pending executions (idempotent by id). RunID/StepIndex/Gate
+// default to their zero values for a single-action policy's execution,
+// exactly as every execution behaved before those columns existed; a
+// composed Sequence run's steps set them explicitly (ADR-POLICY-001).
 func (s *PolicyStore) Enqueue(ctx context.Context, xs []policy.Execution) error {
 	batch := &pgx.Batch{}
 	for i := range xs {
@@ -139,10 +150,12 @@ func (s *PolicyStore) Enqueue(ctx context.Context, xs []policy.Execution) error 
 		}
 		batch.Queue(`
 			INSERT INTO policy_execution
-				(id, policy_id, event_id, event, status, retry_count, next_attempt_at, created_at)
-			VALUES ($1,$2,$3,$4,$5,0,$6,now())
+				(id, policy_id, event_id, event, status, retry_count, next_attempt_at, created_at,
+				 run_id, step_index, gate)
+			VALUES ($1,$2,$3,$4,$5,0,$6,now(),$7,$8,$9)
 			ON CONFLICT (id) DO NOTHING`,
-			x.ID, x.PolicyID, x.Event.EventID, ev, string(x.Status), x.NextAttemptAt)
+			x.ID, x.PolicyID, x.Event.EventID, ev, string(x.Status), x.NextAttemptAt,
+			nullString(x.RunID), x.StepIndex, string(x.Gate))
 	}
 	br := s.pool.SendBatch(ctx, batch)
 	defer func() { _ = br.Close() }()
@@ -247,6 +260,22 @@ func (s *PolicyStore) MarkResult(ctx context.Context, id string, claimToken time
 	return nil
 }
 
+// SetGate records a step's Decision gate resolution (ADR-POLICY-001 §3).
+// Unfenced by a claim token: it runs after the step's own outcome is already
+// durably recorded (MarkResult succeeded), so there is no in-flight claim left
+// to fence against — it is a plain write to the gate column, not a status
+// transition.
+func (s *PolicyStore) SetGate(ctx context.Context, id string, gate policy.GateState) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE policy_execution SET gate=$2 WHERE id=$1`, id, string(gate))
+	if err != nil {
+		return fmt.Errorf("set execution gate: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
 // ListByPolicy returns a policy's recent executions (newest first).
 func (s *PolicyStore) ListByPolicy(ctx context.Context, policyID string, limit int) ([]policy.Execution, error) {
 	rows, err := s.pool.Query(ctx, `
@@ -292,8 +321,8 @@ func (s *PolicyStore) SetPolicyCursor(ctx context.Context, chainID string, seq i
 
 func scanPolicy(sc rowScanner) (policy.Policy, error) {
 	var p policy.Policy
-	var cond, cfg []byte
-	if err := sc.Scan(&p.ID, &p.Name, &p.Enabled, &cond, &p.Action.Type, &cfg, &p.MaxRetries,
+	var cond, cfg, steps []byte
+	if err := sc.Scan(&p.ID, &p.Name, &p.Enabled, &cond, &p.Action.Type, &cfg, &steps, &p.MaxRetries,
 		&p.CreatedAt, &p.UpdatedAt, &p.TenantID); err != nil {
 		return policy.Policy{}, err
 	}
@@ -303,6 +332,11 @@ func scanPolicy(sc rowScanner) (policy.Policy, error) {
 		}
 	}
 	p.Action.Config = json.RawMessage(cfg)
+	if len(steps) > 0 {
+		if err := json.Unmarshal(steps, &p.Steps); err != nil {
+			return policy.Policy{}, fmt.Errorf("unmarshal steps: %w", err)
+		}
+	}
 	return p, nil
 }
 
@@ -320,14 +354,19 @@ func scanExecutions(rows pgx.Rows) ([]policy.Execution, error) {
 
 func scanExecution(sc rowScanner) (policy.Execution, error) {
 	var x policy.Execution
-	var status string
+	var status, gate string
 	var ev []byte
 	var started, ended, claimedAt *time.Time
+	var runID *string
 	if err := sc.Scan(&x.ID, &x.PolicyID, new(string), &ev, &status, &x.RetryCount, &x.Error,
-		&started, &ended, &x.NextAttemptAt, &x.CreatedAt, &claimedAt); err != nil {
+		&started, &ended, &x.NextAttemptAt, &x.CreatedAt, &claimedAt, &runID, &x.StepIndex, &gate); err != nil {
 		return policy.Execution{}, err
 	}
 	x.Status = policy.ExecutionStatus(status)
+	x.Gate = policy.GateState(gate)
+	if runID != nil {
+		x.RunID = *runID
+	}
 	if len(ev) > 0 {
 		if err := json.Unmarshal(ev, &x.Event); err != nil {
 			return policy.Execution{}, fmt.Errorf("unmarshal event: %w", err)
@@ -350,4 +389,113 @@ func actionConfig(c json.RawMessage) []byte {
 		return []byte("{}")
 	}
 	return c
+}
+
+// sequenceJSON marshals a composed Sequence, defaulting to an empty JSON
+// array so a Policy with no Steps (the overwhelming majority, today all of
+// them) stores the same "[]" a fresh policy table row already defaults to.
+func sequenceJSON(seq policy.Sequence) ([]byte, error) {
+	if len(seq) == 0 {
+		return []byte("[]"), nil
+	}
+	b, err := json.Marshal(seq)
+	if err != nil {
+		return nil, fmt.Errorf("marshal steps: %w", err)
+	}
+	return b, nil
+}
+
+// nullString maps an empty Go string to SQL NULL, so an unused nullable
+// column (run_id, for an execution outside any composed run) stores NULL
+// rather than an empty string two different unrelated rows could collide on.
+func nullString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// ListByRun returns every Execution sharing runID, ordered by StepIndex — the
+// persistence side of policy.RunProgress (ADR-POLICY-001).
+func (s *PolicyStore) ListByRun(ctx context.Context, runID string) ([]policy.Execution, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+execCols+` FROM policy_execution
+		 WHERE run_id=$1 ORDER BY step_index`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list run executions: %w", err)
+	}
+	defer rows.Close()
+	return scanExecutions(rows)
+}
+
+// ListStalledRuns finds composed runs permanently wedged by the gap
+// policy.Reconciler exists to close: a frontier Execution durably succeeded
+// with a resolved gate (none, or already passed) but its immediate
+// successor step (step_index+1) was never enqueued, because the worker that
+// recorded the success crashed before calling Enqueue. ClaimDue never
+// reselects a succeeded row, so nothing else re-discovers this.
+//
+// The NOT EXISTS successor lookup is an equality match on run_id, served by
+// ix_policy_execution_run; step_index is then filtered over the handful of rows
+// one run ever has. The outer candidate relation, however, is scanned and
+// filtered (run_id IS NOT NULL AND status = succeeded AND gate is none or passed)
+// — no index covers that composite predicate, so on a table dominated by
+// single-action rows the planner may seq-scan it. Acceptable and no new index
+// needed because the sweep is periodic (~30s) and LIMIT-bounded; if the
+// execution table grows large enough that this scan bites, add a partial index
+// on (status) WHERE run_id IS NOT NULL.
+//
+// This over-includes a run whose frontier is genuinely its LAST step (there
+// is no step_index+1 because the run is complete, not because one is
+// missing): that is intentional and harmless. The caller re-derives the
+// run's real cursor via policy.RunProgress before acting, and a run
+// RunProgress already reports Complete is always a no-op there — filtering
+// "is this run actually complete" here would require re-deriving the
+// Policy's Sequence length in SQL, duplicating logic RunProgress already
+// owns.
+func (s *PolicyStore) ListStalledRuns(ctx context.Context, limit int) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT e.run_id
+		  FROM policy_execution e
+		 WHERE e.run_id IS NOT NULL
+		   AND e.status = 'succeeded'
+		   AND e.gate IN ('', 'passed')
+		   AND NOT EXISTS (
+		         SELECT 1 FROM policy_execution nx
+		          WHERE nx.run_id = e.run_id AND nx.step_index = e.step_index + 1
+		       )
+		 LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list stalled runs: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var runID string
+		if err := rows.Scan(&runID); err != nil {
+			return nil, fmt.Errorf("scan stalled run: %w", err)
+		}
+		out = append(out, runID)
+	}
+	return out, rows.Err()
+}
+
+// ListPendingGates returns the Executions currently paused at an unresolved
+// Decision gate (ADR-POLICY-002) — a succeeded step whose gate column is
+// 'pending' — ordered by created_at so a test (and an operator) sees a
+// deterministic sequence when several runs are paused at once. Unindexed
+// beyond ix_policy_execution's existing (status) shape for the same reason
+// ListStalledRuns' composite predicate is: paused-gate rows are a small
+// fraction of the table and this sweep is periodic and LIMIT-bounded.
+func (s *PolicyStore) ListPendingGates(ctx context.Context, limit int) ([]policy.Execution, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+execCols+` FROM policy_execution
+		 WHERE run_id IS NOT NULL AND status = 'succeeded' AND gate = 'pending'
+		 ORDER BY created_at
+		 LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list pending gates: %w", err)
+	}
+	defer rows.Close()
+	return scanExecutions(rows)
 }
