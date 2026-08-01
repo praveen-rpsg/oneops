@@ -14,7 +14,9 @@ import (
 )
 
 const (
-	assetColumns    = `asset_id, tenant_id, type, name, attributes, status, row_version, created_at, updated_at`
+	assetColumns = `asset_id, tenant_id, type, name, attributes, status,
+		environment, criticality, owner_team_id, owner_user_id,
+		row_version, created_at, updated_at`
 	assetRelColumns = `relationship_id, tenant_id, from_asset_id, to_asset_id, type, row_version, created_at, updated_at`
 )
 
@@ -60,17 +62,22 @@ func clampAssetPage(limit int) int {
 
 func scanAsset(s scanner) (*domain.Asset, error) {
 	var (
-		a          domain.Asset
-		status     string
-		attrsBytes []byte
+		a           domain.Asset
+		status      string
+		environment string
+		criticality string
+		attrsBytes  []byte
 	)
 	if err := s.Scan(
 		&a.AssetID, &a.TenantID, &a.Type, &a.Name, &attrsBytes, &status,
+		&environment, &criticality, &a.OwnerTeamID, &a.OwnerUserID,
 		&a.RowVersion, &a.CreatedAt, &a.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
 	a.Status = domain.AssetStatus(status)
+	a.Environment = domain.AssetEnvironment(environment)
+	a.Criticality = domain.AssetCriticality(criticality)
 	a.Attributes = map[string]any{}
 	if len(attrsBytes) > 0 {
 		if err := json.Unmarshal(attrsBytes, &a.Attributes); err != nil {
@@ -95,29 +102,101 @@ func scanAssetRelationship(s scanner) (*domain.AssetRelationship, error) {
 	return &r, nil
 }
 
-// Create inserts an asset.
+// Create inserts an asset. When a.OwnerTeamID/a.OwnerUserID is set, both are
+// re-verified against this store's own tenant-scoped connection before the
+// INSERT runs — see verifyOwnerTeamExists/verifyOwnerUserExists.
 func (s *AssetStore) Create(ctx context.Context, a *domain.Asset) (*domain.Asset, error) {
 	if err := a.Validate(); err != nil {
 		return nil, err
+	}
+	if a.OwnerTeamID != nil {
+		if err := s.verifyOwnerTeamExists(ctx, *a.OwnerTeamID); err != nil {
+			return nil, err
+		}
+	}
+	if a.OwnerUserID != nil {
+		if err := s.verifyOwnerUserExists(ctx, *a.OwnerUserID); err != nil {
+			return nil, err
+		}
 	}
 	attrs, err := json.Marshal(a.Attributes)
 	if err != nil {
 		return nil, fmt.Errorf("marshal asset attributes: %w", err)
 	}
 	row := s.pool.QueryRow(ctx, `
-		INSERT INTO asset (asset_id, tenant_id, type, name, attributes, status)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO asset (asset_id, tenant_id, type, name, attributes, status, environment, criticality, owner_team_id, owner_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING `+assetColumns,
-		a.AssetID, a.TenantID, a.Type, a.Name, attrs, string(a.Status))
+		a.AssetID, a.TenantID, a.Type, a.Name, attrs, string(a.Status),
+		string(a.Environment), string(a.Criticality), a.OwnerTeamID, a.OwnerUserID)
 
 	created, err := scanAsset(row)
 	if err != nil {
-		if isUniqueViolation(err) {
+		switch {
+		case isUniqueViolation(err):
 			return nil, domain.ErrConflict
+		case isForeignKeyViolation(err):
+			// Belt-and-suspenders against a TOCTOU between the existence
+			// check above and this INSERT (e.g. the owner was deleted or
+			// its membership revoked in between) — never observed in
+			// practice for team/app_user, which are never hard-deleted, but
+			// this is the same defensive branch CreateRelationship already
+			// takes for asset_relationship's own foreign keys.
+			return nil, domain.ErrNotFound
+		default:
+			return nil, fmt.Errorf("insert asset: %w", err)
 		}
-		return nil, fmt.Errorf("insert asset: %w", err)
 	}
 	return created, nil
+}
+
+// verifyOwnerTeamExists confirms teamID names a team visible to this store's
+// own tenant-scoped, RLS-enforced connection before an asset's
+// owner_team_id is written. team.tenant_id is enforced by row-level security
+// exactly like asset's is, but PostgreSQL's foreign-key trigger on
+// asset.owner_team_id REFERENCES team(team_id) runs with the constraint's
+// own privileges and BYPASSES that policy — the same documented PostgreSQL
+// behaviour ADR-ASSET-001 §6 records for asset_relationship's endpoints,
+// applied here to a second foreign key. A cross-tenant or nonexistent id is
+// filtered out by the same policy every other read in this store is, and
+// reports ErrNotFound either way — indistinguishable from an id that does
+// not exist at all, which is the correct answer either way.
+func (s *AssetStore) verifyOwnerTeamExists(ctx context.Context, teamID string) error {
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM team WHERE team_id = $1)`, teamID,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("check owner team exists: %w", err)
+	}
+	if !exists {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+// verifyOwnerUserExists confirms userID names a person this tenant actually
+// knows before an asset's owner_user_id is written. app_user itself carries
+// no tenant_id — it is GLOBAL by decision, because a person exists before
+// and independently of any membership (ADR-IDENTITY-002 §3.1) — so "visible
+// to this tenant" is not a fact app_user's own table can answer at all;
+// membership is the tenant-owned, row-level-secured table that answers it
+// (an active membership row is proof this tenant knows the user). Without
+// this check, naming an arbitrary platform-wide user id as an owner would
+// record ownership by a person this tenant has never invited, which the
+// owner_user_id -> app_user foreign key alone would happily accept. A user
+// with no active membership reports ErrNotFound, indistinguishable from a
+// user id that does not exist at all.
+func (s *AssetStore) verifyOwnerUserExists(ctx context.Context, userID string) error {
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM membership WHERE user_id = $1 AND status = 'active')`, userID,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("check owner user exists: %w", err)
+	}
+	if !exists {
+		return domain.ErrNotFound
+	}
+	return nil
 }
 
 // Get returns an asset by identifier.
@@ -163,17 +242,19 @@ func (s *AssetStore) List(ctx context.Context, limit int, after string) ([]*doma
 	return out, nil
 }
 
-// Update changes name, attributes and/or status under optimistic locking. A
-// nil name/status or nil attributes map leaves that field unchanged —
-// COALESCE against a NULL bind parameter, the same way a caller signals "not
-// supplied" rather than "clear it".
+// Update changes one or more fields of patch under optimistic locking. A nil
+// pointer/map leaves that field unchanged — COALESCE against a NULL bind
+// parameter, the same way a caller signals "not supplied" rather than
+// "clear it". OwnerTeamID/OwnerUserID are tri-state (see domain.AssetPatch's
+// doc comment): untouched, cleared to NULL, or set to a new id — a new id is
+// re-verified against this store's own tenant-scoped connection exactly as
+// Create re-verifies one, before the UPDATE runs.
 func (s *AssetStore) Update(
-	ctx context.Context, assetID string, rowVersion int64,
-	name *string, attributes map[string]any, status *domain.AssetStatus,
+	ctx context.Context, assetID string, rowVersion int64, patch domain.AssetPatch,
 ) (*domain.Asset, error) {
 	var namePtr *string
-	if name != nil {
-		trimmed := strings.TrimSpace(*name)
+	if patch.Name != nil {
+		trimmed := strings.TrimSpace(*patch.Name)
 		if trimmed == "" {
 			return nil, domain.NewValidationError("name", "must not be empty")
 		}
@@ -184,39 +265,89 @@ func (s *AssetStore) Update(
 	}
 
 	var statusPtr *string
-	if status != nil {
-		if !status.Valid() {
+	if patch.Status != nil {
+		if !patch.Status.Valid() {
 			return nil, domain.NewValidationError("status", "must be one of: active, retired")
 		}
-		v := string(*status)
+		v := string(*patch.Status)
 		statusPtr = &v
 	}
 
+	var envPtr *string
+	if patch.Environment != nil {
+		if !patch.Environment.Valid() {
+			return nil, domain.NewValidationError("environment", "must be one of: production, staging, development, unknown")
+		}
+		v := string(*patch.Environment)
+		envPtr = &v
+	}
+
+	var critPtr *string
+	if patch.Criticality != nil {
+		if !patch.Criticality.Valid() {
+			return nil, domain.NewValidationError("criticality", "must be one of: critical, high, medium, low, unknown")
+		}
+		v := string(*patch.Criticality)
+		critPtr = &v
+	}
+
 	var attrs []byte
-	if attributes != nil {
-		b, err := json.Marshal(attributes)
+	if patch.Attributes != nil {
+		b, err := json.Marshal(patch.Attributes)
 		if err != nil {
 			return nil, fmt.Errorf("marshal asset attributes: %w", err)
 		}
 		attrs = b
 	}
 
+	// touchOwnerTeam/touchOwnerUser is false when the patch field is nil
+	// ("leave unchanged"); true with a nil value clears the owner; true with
+	// a non-nil value sets it, re-verified first.
+	touchOwnerTeam := patch.OwnerTeamID != nil
+	var ownerTeamValue *string
+	if touchOwnerTeam {
+		if trimmed := strings.TrimSpace(*patch.OwnerTeamID); trimmed != "" {
+			if err := s.verifyOwnerTeamExists(ctx, trimmed); err != nil {
+				return nil, err
+			}
+			ownerTeamValue = &trimmed
+		}
+	}
+	touchOwnerUser := patch.OwnerUserID != nil
+	var ownerUserValue *string
+	if touchOwnerUser {
+		if trimmed := strings.TrimSpace(*patch.OwnerUserID); trimmed != "" {
+			if err := s.verifyOwnerUserExists(ctx, trimmed); err != nil {
+				return nil, err
+			}
+			ownerUserValue = &trimmed
+		}
+	}
+
 	row := s.pool.QueryRow(ctx, `
 		UPDATE asset
-		   SET name        = COALESCE($3, name),
-		       attributes  = COALESCE($4, attributes),
-		       status      = COALESCE($5, status),
-		       row_version = row_version + 1,
-		       updated_at  = now()
+		   SET name          = COALESCE($3, name),
+		       attributes    = COALESCE($4, attributes),
+		       status        = COALESCE($5, status),
+		       environment   = COALESCE($6, environment),
+		       criticality   = COALESCE($7, criticality),
+		       owner_team_id = CASE WHEN $8  THEN $9  ELSE owner_team_id END,
+		       owner_user_id = CASE WHEN $10 THEN $11 ELSE owner_user_id END,
+		       row_version   = row_version + 1,
+		       updated_at    = now()
 		 WHERE asset_id = $1 AND row_version = $2
 		RETURNING `+assetColumns,
-		assetID, rowVersion, namePtr, attrs, statusPtr)
+		assetID, rowVersion, namePtr, attrs, statusPtr, envPtr, critPtr,
+		touchOwnerTeam, ownerTeamValue, touchOwnerUser, ownerUserValue)
 
 	a, err := scanAsset(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, s.explainMissedUpdate(ctx, assetID)
 	}
 	if err != nil {
+		if isForeignKeyViolation(err) {
+			return nil, domain.ErrNotFound
+		}
 		return nil, fmt.Errorf("update asset: %w", err)
 	}
 	return a, nil

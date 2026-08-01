@@ -75,6 +75,36 @@ SELECT path FROM walk WHERE closed ORDER BY path`, near, far, table)
 func walkQuery(near, far string) string  { return walkQueryOn("dependency_edge", near, far) }
 func cycleQuery(near, far string) string { return cycleQueryOn("dependency_edge", near, far) }
 
+// walkQueryOnTyped is walkQueryOn restricted to a fixed set of edge types via
+// an `e.type = ANY($2)` predicate in both legs of the recursive CTE. It is
+// the same cycle-safe traversal, not a second implementation: the CMDB
+// service-map projection (domain.TypedGraphTraversal, ADR-ASSET-001 §4) uses
+// it to compose a business_service from only its depends_on/runs_on edges,
+// while the general asset dependency traversal (walkQueryOn, above) still
+// walks every relationship type.
+func walkQueryOnTyped(table, near, far string) string {
+	return fmt.Sprintf(`
+WITH RECURSIVE walk AS (
+    SELECT e.%[2]s AS node_id, 1 AS depth,
+           ARRAY[e.%[1]s, e.%[2]s] AS path,
+           (e.%[2]s = e.%[1]s) AS cyc
+      FROM %[3]s e
+     WHERE e.%[1]s = $1 AND e.type = ANY($2)
+    UNION ALL
+    SELECT e.%[2]s, w.depth + 1, w.path || e.%[2]s,
+           e.%[2]s = ANY(w.path)
+      FROM %[3]s e
+      JOIN walk w ON e.%[1]s = w.node_id
+     WHERE NOT w.cyc AND e.type = ANY($2)
+)
+SELECT node_id, depth FROM (
+    SELECT DISTINCT ON (node_id) node_id, depth
+      FROM walk WHERE NOT cyc
+     ORDER BY node_id, depth
+) t
+ORDER BY depth, node_id`, near, far, table)
+}
+
 func directionColumns(dir domain.Direction) (near, far string) {
 	return columnsFor(dir, "from_cfg", "to_cfg")
 }
@@ -160,6 +190,31 @@ func queryGraphNodes(ctx context.Context, pool *pgxpool.Pool, span trace.Span, s
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "query nodes")
 		return nil, fmt.Errorf("query nodes: %w", err)
+	}
+	defer rows.Close()
+
+	var nodes []domain.TraversalNode
+	for rows.Next() {
+		var n domain.TraversalNode
+		if err := rows.Scan(&n.CfgID, &n.Depth); err != nil {
+			return nil, err
+		}
+		nodes = append(nodes, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return nodes, nil
+}
+
+// queryGraphNodesTyped is queryGraphNodes with an extra `types` bind
+// parameter for walkQueryOnTyped's `e.type = ANY($2)` predicate.
+func queryGraphNodesTyped(ctx context.Context, pool *pgxpool.Pool, span trace.Span, sql, arg string, types []string) ([]domain.TraversalNode, error) {
+	rows, err := pool.Query(ctx, sql, arg, types)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "query typed nodes")
+		return nil, fmt.Errorf("query typed nodes: %w", err)
 	}
 	defer rows.Close()
 

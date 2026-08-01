@@ -98,3 +98,19 @@ type GraphTraversal interface {
 	// given direction. It backs cycle detection; it does not repair cycles.
 	CyclePaths(ctx context.Context, cfgID string, dir Direction) ([]GraphPath, error)
 }
+
+// TypedGraphTraversal is an optional capability of a GraphTraversal
+// implementation: a forward walk restricted to a fixed set of edge types.
+// Only AssetGraphRepo implements it — asset_relationship carries a `type`
+// column that dependency_edge does not — so the CMDB service-map projection
+// (E1.2) can compose a business_service from only its depends_on/runs_on
+// edges without widening the GraphTraversal contract every implementation,
+// including GraphRepo over configuration_object, would otherwise have to
+// satisfy for a concept (edge type) it does not have.
+type TypedGraphTraversal interface {
+	// RecursiveDependenciesOfTypes returns the transitive forward closure
+	// reachable using only edges whose type is in types — deduplicated and
+	// cycle-safe, the same guarantee RecursiveDependencies makes over every
+	// edge type.
+	RecursiveDependenciesOfTypes(ctx context.Context, id string, types []string) ([]TraversalNode, error)
+}

@@ -5,7 +5,10 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+
+	"github.com/oklog/ulid/v2"
 
 	"github.com/rpsg/oneops/internal/domain"
 	"github.com/rpsg/oneops/internal/graph"
@@ -56,8 +59,9 @@ func TestAssetStore_CreateGetUpdateDelete(t *testing.T) {
 
 	newName := "db-primary-02"
 	newStatus := domain.AssetRetired
-	updated, err := store.Update(ctx, created.AssetID, created.RowVersion,
-		&newName, map[string]any{"region": "us-west-2"}, &newStatus)
+	updated, err := store.Update(ctx, created.AssetID, created.RowVersion, domain.AssetPatch{
+		Name: &newName, Attributes: map[string]any{"region": "us-west-2"}, Status: &newStatus,
+	})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -90,12 +94,12 @@ func TestAssetStore_UpdateDetectsVersionConflict(t *testing.T) {
 	}
 
 	renamed := "Host Renamed"
-	if _, err := store.Update(ctx, created.AssetID, created.RowVersion, &renamed, nil, nil); err != nil {
+	if _, err := store.Update(ctx, created.AssetID, created.RowVersion, domain.AssetPatch{Name: &renamed}); err != nil {
 		t.Fatalf("first update: %v", err)
 	}
 
 	stale := "Stale Rename"
-	if _, err := store.Update(ctx, created.AssetID, created.RowVersion, &stale, nil, nil); !errors.Is(err, domain.ErrVersionMismatch) {
+	if _, err := store.Update(ctx, created.AssetID, created.RowVersion, domain.AssetPatch{Name: &stale}); !errors.Is(err, domain.ErrVersionMismatch) {
 		t.Errorf("stale update = %v, want ErrVersionMismatch", err)
 	}
 }
@@ -414,5 +418,250 @@ func TestAssetGraph_TraversalOverCMDB(t *testing.T) {
 	}
 	if len(directDeps) != 2 {
 		t.Errorf("direct dependencies of %s = %v, want exactly db and cache", app.Name, directDeps)
+	}
+}
+
+// assetOwnerFixture builds two tenants — each realised through its own
+// organisation, since Team.OrgID is required — and one user with an active
+// membership in ONLY orgA's tenant. This is exactly the shape the owner
+// cross-tenant defense test needs: a team and a user that tenant B has no
+// way to know about.
+func assetOwnerFixture(t *testing.T) (orgA, orgB *domain.Organization, user *domain.User, teamA *domain.Team) {
+	t.Helper()
+	priv := testPool(t)
+	ctx := adminTestCtx()
+
+	newOrg := func(prefix string) *domain.Organization {
+		o, err := domain.NewOrganization(prefix+" Probe",
+			strings.ToLower(prefix+"-"+ulid.Make().String()[:10]))
+		if err != nil {
+			t.Fatalf("new org %s: %v", prefix, err)
+		}
+		created, err := NewOrganizationStore(priv).Create(ctx, o)
+		if err != nil {
+			t.Fatalf("create org %s: %v", prefix, err)
+		}
+		return created
+	}
+	orgA = newOrg("asset-owner-a")
+	orgB = newOrg("asset-owner-b")
+
+	user = newTestUser(t)
+	if _, err := NewUserStore(priv).Create(ctx, user); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	m, err := domain.NewMembership(orgA.OrgID, orgA.TenantID, user.UserID)
+	if err != nil {
+		t.Fatalf("new membership: %v", err)
+	}
+	if _, err := NewMembershipStore(priv).Grant(ctx, m); err != nil {
+		t.Fatalf("grant membership: %v", err)
+	}
+
+	tm, err := domain.NewTeam(orgA.OrgID, orgA.TenantID, "Owner Team A")
+	if err != nil {
+		t.Fatalf("new team: %v", err)
+	}
+	teamA, err = NewTeamStore(priv).Create(ctx, tm)
+	if err != nil {
+		t.Fatalf("create team: %v", err)
+	}
+	return orgA, orgB, user, teamA
+}
+
+// THE SECURITY-CRITICAL PROPERTY this test exists to prove BITES: tenant B
+// cannot make tenant A's team or tenant A's member its own asset's owner,
+// even though owner_team_id/owner_user_id's foreign keys alone
+// (REFERENCES team/app_user) would not have stopped it — team's row-level
+// security is bypassed by PostgreSQL's FK check exactly the way
+// ADR-ASSET-001 §6 documents for asset_relationship, and app_user carries no
+// tenant_id at all, so only the membership re-check closes that gap.
+func TestAssetStore_OwnerRefsCannotCrossTenants(t *testing.T) {
+	orgA, orgB, user, teamA := assetOwnerFixture(t)
+	scoped := tenantScopedPool(t)
+	store := NewAssetStore(scoped)
+
+	ctxA := domain.WithTenant(context.Background(), &domain.Tenant{TenantID: orgA.TenantID})
+	ctxB := domain.WithTenant(context.Background(), &domain.Tenant{TenantID: orgB.TenantID})
+
+	// Tenant B attempting to own an asset by tenant A's team.
+	byTeam, err := domain.NewAsset(orgB.TenantID, "server", "tenant-b-host-team", nil)
+	if err != nil {
+		t.Fatalf("new asset: %v", err)
+	}
+	if err := byTeam.ApplyClassification("", "", &teamA.TeamID, nil); err != nil {
+		t.Fatalf("apply classification: %v", err)
+	}
+	if _, err := store.Create(ctxB, byTeam); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-tenant owner_team_id create = %v, want ErrNotFound", err)
+	}
+
+	// Tenant B attempting to own an asset by a user who is only a member of
+	// tenant A's organisation.
+	byUser, err := domain.NewAsset(orgB.TenantID, "server", "tenant-b-host-user", nil)
+	if err != nil {
+		t.Fatalf("new asset: %v", err)
+	}
+	if err := byUser.ApplyClassification("", "", nil, &user.UserID); err != nil {
+		t.Fatalf("apply classification: %v", err)
+	}
+	if _, err := store.Create(ctxB, byUser); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-tenant owner_user_id create = %v, want ErrNotFound", err)
+	}
+
+	// No row was created under either attempt: the tenant's own list is empty.
+	pageB, err := store.List(ctxB, 0, "")
+	if err != nil {
+		t.Fatalf("list as tenant b: %v", err)
+	}
+	if len(pageB) != 0 {
+		t.Fatalf("a cross-tenant owner reference produced a row anyway: %+v", pageB)
+	}
+
+	// The same references succeed for tenant A, who can actually see them —
+	// proving the refusal above is the tenant boundary, not a broken check.
+	ownedA, err := domain.NewAsset(orgA.TenantID, "server", "tenant-a-host", nil)
+	if err != nil {
+		t.Fatalf("new asset: %v", err)
+	}
+	if err := ownedA.ApplyClassification("production", "critical", &teamA.TeamID, &user.UserID); err != nil {
+		t.Fatalf("apply classification: %v", err)
+	}
+	created, err := store.Create(ctxA, ownedA)
+	if err != nil {
+		t.Fatalf("same-tenant owner refs were rejected: %v", err)
+	}
+	if created.OwnerTeamID == nil || *created.OwnerTeamID != teamA.TeamID {
+		t.Errorf("owner_team_id not persisted: %+v", created.OwnerTeamID)
+	}
+	if created.OwnerUserID == nil || *created.OwnerUserID != user.UserID {
+		t.Errorf("owner_user_id not persisted: %+v", created.OwnerUserID)
+	}
+
+	// The same defense applies to Update on an asset that genuinely exists,
+	// not just to Create: tenant B owns this asset outright, and still
+	// cannot point its owner_team_id at tenant A's team.
+	unowned, err := domain.NewAsset(orgB.TenantID, "server", "tenant-b-unowned", nil)
+	if err != nil {
+		t.Fatalf("new asset: %v", err)
+	}
+	unowned, err = store.Create(ctxB, unowned)
+	if err != nil {
+		t.Fatalf("create unowned asset: %v", err)
+	}
+	if _, err := store.Update(ctxB, unowned.AssetID, unowned.RowVersion,
+		domain.AssetPatch{OwnerTeamID: &teamA.TeamID}); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-tenant owner_team_id patch = %v, want ErrNotFound", err)
+	}
+	// No partial write: re-reading shows the asset still unowned and at its
+	// original row version.
+	still, err := store.Get(ctxB, unowned.AssetID)
+	if err != nil {
+		t.Fatalf("re-read: %v", err)
+	}
+	if still.OwnerTeamID != nil || still.RowVersion != unowned.RowVersion {
+		t.Errorf("a rejected owner patch was partially applied: %+v", still)
+	}
+}
+
+// A patch that clears an owner (an empty string, distinct from omitting the
+// field) writes NULL rather than leaving the previous owner in place.
+func TestAssetStore_UpdateClearsOwnerReference(t *testing.T) {
+	orgA, _, user, teamA := assetOwnerFixture(t)
+	scoped := tenantScopedPool(t)
+	store := NewAssetStore(scoped)
+	ctx := domain.WithTenant(context.Background(), &domain.Tenant{TenantID: orgA.TenantID})
+
+	a, err := domain.NewAsset(orgA.TenantID, "server", "owned-host", nil)
+	if err != nil {
+		t.Fatalf("new asset: %v", err)
+	}
+	if err := a.ApplyClassification("", "", &teamA.TeamID, &user.UserID); err != nil {
+		t.Fatalf("apply classification: %v", err)
+	}
+	created, err := store.Create(ctx, a)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	empty := ""
+	updated, err := store.Update(ctx, created.AssetID, created.RowVersion, domain.AssetPatch{
+		OwnerTeamID: &empty, OwnerUserID: &empty,
+	})
+	if err != nil {
+		t.Fatalf("clear owners: %v", err)
+	}
+	if updated.OwnerTeamID != nil || updated.OwnerUserID != nil {
+		t.Errorf("owners were not cleared: %+v / %+v", updated.OwnerTeamID, updated.OwnerUserID)
+	}
+}
+
+// The CMDB service-map projection (domain.TypedGraphTraversal) composes a
+// business_service from only its depends_on/runs_on edges — connected_to and
+// member_of edges in the same graph must not leak into the supporting-CI set.
+//
+//	business-svc --depends_on--> checkout-db --runs_on--> host-1
+//	business-svc --connected_to--> lb-1               (excluded: not composition)
+//	business-svc --member_of--> cluster-1              (excluded: not composition)
+func TestAssetGraph_ServiceMapFiltersToCompositionEdges(t *testing.T) {
+	testPool(t)
+	priv := testPool(t)
+	tn := assetTenant(t, NewTenantStore(priv), "asset-service-map")
+
+	scoped := tenantScopedPool(t)
+	store := NewAssetStore(scoped)
+	ctx := domain.WithTenant(context.Background(), tn)
+
+	mk := func(assetType, name string) *domain.Asset {
+		a, err := domain.NewAsset(tn.TenantID, assetType, name, nil)
+		if err != nil {
+			t.Fatalf("new asset %s: %v", name, err)
+		}
+		created, err := store.Create(ctx, a)
+		if err != nil {
+			t.Fatalf("create asset %s: %v", name, err)
+		}
+		return created
+	}
+	link := func(from, to *domain.Asset, kind domain.RelationshipType) {
+		rel, err := domain.NewAssetRelationship(tn.TenantID, from.AssetID, to.AssetID, kind)
+		if err != nil {
+			t.Fatalf("new relationship: %v", err)
+		}
+		if _, err := store.CreateRelationship(ctx, rel); err != nil {
+			t.Fatalf("create relationship %s->%s: %v", from.Name, to.Name, err)
+		}
+	}
+
+	svc := mk("business_service", "business-svc")
+	db := mk("database", "checkout-db")
+	host1 := mk("server", "host-1")
+	lb := mk("network_device", "lb-1")
+	cluster := mk("service", "cluster-1")
+
+	link(svc, db, domain.RelationshipDependsOn)
+	link(db, host1, domain.RelationshipRunsOn)
+	link(svc, lb, domain.RelationshipConnectedTo)
+	link(svc, cluster, domain.RelationshipMemberOf)
+
+	repo := NewAssetGraphRepo(scoped)
+	nodes, err := repo.RecursiveDependenciesOfTypes(ctx, svc.AssetID,
+		[]string{string(domain.RelationshipDependsOn), string(domain.RelationshipRunsOn)})
+	if err != nil {
+		t.Fatalf("service map: %v", err)
+	}
+	got := map[string]bool{}
+	for _, n := range nodes {
+		got[n.CfgID] = true
+	}
+	if !got[db.AssetID] || !got[host1.AssetID] {
+		t.Errorf("service map missing a supporting CI: %+v", nodes)
+	}
+	if got[lb.AssetID] || got[cluster.AssetID] {
+		t.Errorf("service map leaked a non-composition edge: %+v", nodes)
+	}
+	if len(nodes) != 2 {
+		t.Errorf("service map = %d node(s), want exactly 2 (db, host-1): %+v", len(nodes), nodes)
 	}
 }

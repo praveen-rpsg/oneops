@@ -1444,6 +1444,31 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/assets/{id}/service-map:
+    get:
+      summary: Business-service composition — the supporting CIs of a business_service
+      description: >-
+        A projection over the CMDB graph, not a new stored structure: the
+        transitive closure of the target's depends_on/runs_on edges only
+        (connected_to is a network link and member_of is grouping, neither
+        composes a service), computed by the same recursive-CTE traversal
+        engine /dependencies uses (ADR-ASSET-001 §4). The target asset must
+        be of type business_service.
+      operationId: getAssetServiceMap
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The business_service's supporting Configuration Items
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ServiceMapResponse' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
 
   /v1/admin/notifications:
     get:
@@ -2118,6 +2143,22 @@ components:
           type: object
           additionalProperties: true
         status: { type: string, enum: [active, retired] }
+        environment:
+          type: string
+          enum: [production, staging, development, unknown]
+          description: Deployment environment. Feeds NOC health rollups (E1.2).
+        criticality:
+          type: string
+          enum: [critical, high, medium, low, unknown]
+          description: Business-impact tier. Feeds SOC vulnerability prioritization and ITSM routing (E1.2).
+        owner_team_id:
+          type: string
+          nullable: true
+          description: The team accountable for this asset, or absent when unowned.
+        owner_user_id:
+          type: string
+          nullable: true
+          description: The individual accountable for this asset, or absent when unowned.
         row_version: { type: integer, format: int64 }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -2130,16 +2171,35 @@ components:
     CreateAssetRequest:
       type: object
       required: [type, name]
+      description: >-
+        environment/criticality default to "unknown" when omitted (the same
+        default the column carries). owner_team_id/owner_user_id are
+        optional; when set, the id is re-verified against the caller's
+        tenant before the asset is written (ADR-ASSET-001 §6, extended to
+        ownership) — an id the tenant cannot see returns 404.
       properties:
         type: { type: string }
         name: { type: string, maxLength: 200 }
         attributes:
           type: object
           additionalProperties: true
+        environment:
+          type: string
+          enum: [production, staging, development, unknown]
+        criticality:
+          type: string
+          enum: [critical, high, medium, low, unknown]
+        owner_team_id: { type: string }
+        owner_user_id: { type: string }
     PatchAssetRequest:
       type: object
       required: [row_version]
-      description: Supply at least one of name, attributes or status.
+      description: >-
+        Supply at least one of name, attributes, status, environment,
+        criticality, owner_team_id or owner_user_id. owner_team_id/
+        owner_user_id are tri-state: absent leaves ownership unchanged, ""
+        clears it, and a non-empty id sets it (re-verified against the
+        caller's tenant first).
       properties:
         row_version: { type: integer, format: int64, minimum: 1 }
         name: { type: string, maxLength: 200 }
@@ -2149,6 +2209,14 @@ components:
         status:
           type: string
           enum: [active, retired]
+        environment:
+          type: string
+          enum: [production, staging, development, unknown]
+        criticality:
+          type: string
+          enum: [critical, high, medium, low, unknown]
+        owner_team_id: { type: string }
+        owner_user_id: { type: string }
     AssetRelationship:
       type: object
       description: A directed, typed edge of the CMDB graph between two Assets.
@@ -2188,6 +2256,22 @@ components:
         recursive: { type: boolean }
         count: { type: integer }
         nodes:
+          type: array
+          items:
+            type: object
+            properties:
+              asset_id: { type: string }
+              depth: { type: integer }
+    ServiceMapResponse:
+      type: object
+      description: >-
+        The supporting Configuration Items composing a business_service — a
+        projection over the CMDB graph restricted to depends_on/runs_on
+        edges (E1.2).
+      properties:
+        service_id: { type: string }
+        count: { type: integer }
+        supporting_cis:
           type: array
           items:
             type: object

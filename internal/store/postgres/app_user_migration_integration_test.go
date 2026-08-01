@@ -80,6 +80,17 @@ func TestAppUserMigration_AppliesAndRollsBackOnPopulatedDatabase(t *testing.T) {
 		t.Error("ck_user_status accepted a state outside the ratified lifecycle")
 	}
 
+	// asset.owner_team_id/owner_user_id (E1.2) also reference team/app_user,
+	// so that migration's rollback must run first too — the same ordering
+	// protection every other referencing table's rollback documents here.
+	aDown, err := os.ReadFile("../migrate/rollback/20260817000001_asset_service_mapping.down.sql")
+	if err != nil {
+		t.Fatalf("read asset service-mapping rollback: %v", err)
+	}
+	if _, err := tx.Exec(ctx, string(aDown)); err != nil {
+		t.Fatalf("roll back asset owner references before app_user: %v", err)
+	}
+
 	// team_membership also references app_user, so its rollback must run first
 	// too — the same ordering protection membership's rollback documents.
 	tDown, err := os.ReadFile("../migrate/rollback/20260810000001_team.down.sql")

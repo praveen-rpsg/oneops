@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,23 +16,40 @@ type fakeAssets struct {
 	relCreates, relDeletes, relFroms, relTos int
 	lastTenant                               string
 	createRelErr                             error
+	createErr                                error
+	updateErr                                error
+	lastCreated                              *domain.Asset
+	lastPatch                                domain.AssetPatch
+	getType                                  string
 }
 
 func (f *fakeAssets) Create(_ context.Context, a *domain.Asset) (*domain.Asset, error) {
 	f.creates++
 	f.lastTenant = a.TenantID
+	f.lastCreated = a
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
 	return a, nil
 }
 func (f *fakeAssets) Get(context.Context, string) (*domain.Asset, error) {
 	f.gets++
-	return &domain.Asset{AssetID: "a1", Type: "server", Name: "host", Status: domain.AssetActive, RowVersion: 1}, nil
+	ty := f.getType
+	if ty == "" {
+		ty = "server"
+	}
+	return &domain.Asset{AssetID: "a1", Type: ty, Name: "host", Status: domain.AssetActive, RowVersion: 1}, nil
 }
 func (f *fakeAssets) List(context.Context, int, string) ([]*domain.Asset, error) {
 	f.lists++
 	return nil, nil
 }
-func (f *fakeAssets) Update(context.Context, string, int64, *string, map[string]any, *domain.AssetStatus) (*domain.Asset, error) {
+func (f *fakeAssets) Update(_ context.Context, _ string, _ int64, patch domain.AssetPatch) (*domain.Asset, error) {
 	f.patches++
+	f.lastPatch = patch
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
 	return &domain.Asset{AssetID: "a1", Type: "server", Name: "host", Status: domain.AssetActive, RowVersion: 2}, nil
 }
 func (f *fakeAssets) Delete(context.Context, string) error {
@@ -213,5 +231,236 @@ func TestAssets_NotConfiguredReturns501(t *testing.T) {
 
 	if rec.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A create request that never mentions classification still gets the
+// "unknown" default on both axes — the same default the column carries — so
+// a caller that only cares about type/name is never surprised by a required
+// field.
+func TestAssets_CreateDefaultsClassificationToUnknown(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/assets",
+		strings.NewReader(`{"type":"server","name":"host-1"}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	if spy.lastCreated == nil || spy.lastCreated.Environment != domain.AssetEnvironmentUnknown ||
+		spy.lastCreated.Criticality != domain.AssetCriticalityUnknown {
+		t.Errorf("defaults not applied: %+v", spy.lastCreated)
+	}
+}
+
+func TestAssets_CreateRejectsInvalidEnvironmentAndCriticality(t *testing.T) {
+	cases := []struct {
+		name, body string
+	}{
+		{"bad environment", `{"type":"server","name":"host-1","environment":"prod"}`},
+		{"bad criticality", `{"type":"server","name":"host-1","criticality":"urgent"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv, _ := newTestServer(true)
+			srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+			spy := &fakeAssets{}
+			srv.SetAssets(spy)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/admin/assets", strings.NewReader(c.body))
+			req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+			rec := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
+			}
+			if spy.creates != 0 {
+				t.Error("an invalid enum value reached the store")
+			}
+		})
+	}
+}
+
+// The cross-tenant/unknown owner reference defense: the store reports
+// ErrNotFound (the same signal it reports for a genuinely nonexistent id,
+// per ADR-ASSET-001 §6 extended to ownership), and the handler maps it to
+// 404 rather than fabricating a success or a 500.
+func TestAssets_CreateMapsOwnerRefNotFoundTo404(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{createErr: domain.ErrNotFound}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/assets",
+		strings.NewReader(`{"type":"server","name":"host-1","owner_team_id":"other-tenants-team"}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	if spy.creates != 1 {
+		t.Errorf("store reached %d time(s), want 1", spy.creates)
+	}
+}
+
+func TestAssets_PatchMapsOwnerRefNotFoundTo404(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{updateErr: domain.ErrNotFound}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/admin/assets/a1",
+		strings.NewReader(`{"row_version":1,"owner_user_id":"other-tenants-user"}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	if spy.patches != 1 {
+		t.Errorf("store reached %d time(s), want 1", spy.patches)
+	}
+	if spy.lastPatch.OwnerUserID == nil || *spy.lastPatch.OwnerUserID != "other-tenants-user" {
+		t.Errorf("owner_user_id not forwarded to the store: %+v", spy.lastPatch)
+	}
+}
+
+// A "" owner id clears ownership rather than being rejected or ignored — the
+// tri-state AssetPatch.OwnerTeamID/OwnerUserID rule.
+func TestAssets_PatchEmptyStringClearsOwner(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/admin/assets/a1",
+		strings.NewReader(`{"row_version":1,"owner_team_id":""}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if spy.lastPatch.OwnerTeamID == nil || *spy.lastPatch.OwnerTeamID != "" {
+		t.Errorf("clearing owner_team_id was not forwarded as a present, empty value: %+v", spy.lastPatch.OwnerTeamID)
+	}
+}
+
+// fakeTypedAssetGraph is a domain.GraphTraversal that also implements
+// domain.TypedGraphTraversal, mirroring AssetGraphRepo's dual capability.
+type fakeTypedAssetGraph struct {
+	fakeGraph
+	typedCalls int
+	typedTypes []string
+	typedNodes []domain.TraversalNode
+	typedErr   error
+}
+
+func (f *fakeTypedAssetGraph) RecursiveDependenciesOfTypes(_ context.Context, _ string, types []string) ([]domain.TraversalNode, error) {
+	f.typedCalls++
+	f.typedTypes = types
+	if f.typedErr != nil {
+		return nil, f.typedErr
+	}
+	return f.typedNodes, nil
+}
+
+func TestAssetServiceMap_HappyPathWalksOnlyCompositionEdges(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{getType: "business_service"}
+	srv.SetAssets(spy)
+	fg := &fakeTypedAssetGraph{typedNodes: []domain.TraversalNode{{CfgID: "db-1", Depth: 1}, {CfgID: "host-1", Depth: 2}}}
+	srv.SetAssetGraph(fg)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/svc-1/service-map", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if fg.typedCalls != 1 {
+		t.Fatalf("typed traversal called %d time(s), want 1", fg.typedCalls)
+	}
+	want := map[string]bool{"depends_on": true, "runs_on": true}
+	if len(fg.typedTypes) != 2 || !want[fg.typedTypes[0]] || !want[fg.typedTypes[1]] {
+		t.Errorf("walked edge types = %v, want exactly depends_on and runs_on", fg.typedTypes)
+	}
+	var body serviceMapResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.ServiceID != "svc-1" || body.Count != 2 {
+		t.Errorf("unexpected response: %+v", body)
+	}
+}
+
+// A service-map query against an asset that is not a business_service is
+// refused before the graph is ever consulted.
+func TestAssetServiceMap_RejectsNonBusinessServiceAsset(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{getType: "server"}
+	srv.SetAssets(spy)
+	fg := &fakeTypedAssetGraph{}
+	srv.SetAssetGraph(fg)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/host-1/service-map", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	if fg.typedCalls != 0 {
+		t.Error("the graph was consulted for a non-business_service asset")
+	}
+}
+
+func TestAssetServiceMap_NotConfiguredReturns501(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/svc-1/service-map", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A graph wired with a plain domain.GraphTraversal (no typed capability) is
+// a configuration error the endpoint reports as 500, not a silent fallback
+// to an unfiltered walk that would misreport a service's composition.
+func TestAssetServiceMap_UntypedGraphReturns500(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{getType: "business_service"}
+	srv.SetAssets(spy)
+	srv.SetAssetGraph(newFakeGraph()) // domain.GraphTraversal only
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/svc-1/service-map", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500: %s", rec.Code, rec.Body.String())
 	}
 }

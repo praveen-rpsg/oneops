@@ -66,6 +66,24 @@ func newAssetTraversalResponse(root string, dir domain.Direction, recursive bool
 	}
 }
 
+// serviceMapResponse is the payload for GET
+// /v1/admin/assets/{id}/service-map: the supporting CIs composing a
+// business_service, a projection over the CMDB graph restricted to
+// depends_on/runs_on edges (E1.2).
+type serviceMapResponse struct {
+	ServiceID     string           `json:"service_id"`
+	Count         int              `json:"count"`
+	SupportingCIs []assetGraphNode `json:"supporting_cis"`
+}
+
+func newServiceMapResponse(serviceID string, nodes []domain.TraversalNode) serviceMapResponse {
+	out := make([]assetGraphNode, len(nodes))
+	for i, n := range nodes {
+		out[i] = assetGraphNode{AssetID: n.CfgID, Depth: n.Depth}
+	}
+	return serviceMapResponse{ServiceID: serviceID, Count: len(out), SupportingCIs: out}
+}
+
 // cyclePath is a single detected cycle as a closed path of node ids.
 type cyclePath struct {
 	Path []string `json:"path"`
