@@ -132,10 +132,10 @@ that is a founder-level constitutional override + ADR, not a story decision.
 Dependency order matters: you cannot monitor, alert on, ticket against, or secure
 what you cannot model. Assets first; intelligence last.
 
-### E1 — Asset / CMDB foundation  `[~]` ▶ CURRENT
+### E1 — Asset / CMDB foundation  `[~]`
 The typed configuration-item model + relationship graph everything references.
-- [~] E1.1 CI model + relationships + CRUD/graph API (reuses `internal/graph`) — *in review pipeline*
-- [ ] E1.2 Business-service mapping (service → supporting CIs), criticality, environment (prod/stage/dev), ownership
+- [x] E1.1 CI model + relationships + CRUD/graph API (reuses `internal/graph`) — **merged to master** (ADR-ASSET-001; cross-tenant edge defense mutation-proven)
+- [~] E1.2 Business-service mapping (service → supporting CIs), criticality, environment (prod/stage/dev), ownership  ▶ CURRENT
 - [ ] E1.3 CI lifecycle (planned→active→retired), change history, soft-retire
 - [ ] E1.4 Bulk import/export; reconciliation & de-duplication of CIs from multiple sources
 - [ ] E1.5 CMDB health: staleness, orphans, drift detection
