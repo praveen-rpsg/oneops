@@ -135,8 +135,8 @@ what you cannot model. Assets first; intelligence last.
 ### E1 — Asset / CMDB foundation  `[~]`
 The typed configuration-item model + relationship graph everything references.
 - [x] E1.1 CI model + relationships + CRUD/graph API (reuses `internal/graph`) — **merged to master** (ADR-ASSET-001; cross-tenant edge defense mutation-proven)
-- [~] E1.2 Business-service mapping (service → supporting CIs), criticality, environment (prod/stage/dev), ownership  ▶ CURRENT
-- [ ] E1.3 CI lifecycle (planned→active→retired), change history, soft-retire
+- [x] E1.2 Business-service mapping (service → supporting CIs), criticality, environment, ownership — **merged** (owner refs tenant-verified; service-map = typed graph projection)
+- [~] E1.3 CI lifecycle (planned→active→retired), change history, soft-retire  ▶ CURRENT
 - [ ] E1.4 Bulk import/export; reconciliation & de-duplication of CIs from multiple sources
 - [ ] E1.5 CMDB health: staleness, orphans, drift detection
 - **Edge cases:** circular relationships, cross-tenant edges (forbidden), orphaned/duplicate CIs, high-fan-out services, historical point-in-time queries.
