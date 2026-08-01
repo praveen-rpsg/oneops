@@ -207,6 +207,18 @@ func TestOrganizationMigration_AppliesAndRollsBackOnPopulatedDatabase(t *testing
 			"would be exercised against no data")
 	}
 
+	// asset.owner_team_id (E1.2) references team, so that migration's
+	// rollback must run before team's, which must in turn run before
+	// organization's — the same ordering protection membership's rollback
+	// documents.
+	aDown, err := os.ReadFile("../migrate/rollback/20260817000001_asset_service_mapping.down.sql")
+	if err != nil {
+		t.Fatalf("read asset service-mapping rollback: %v", err)
+	}
+	if _, err := tx.Exec(ctx, string(aDown)); err != nil {
+		t.Fatalf("roll back asset owner references before team: %v", err)
+	}
+
 	// team also references organization, so its rollback must run first too —
 	// the same ordering protection membership's rollback documents.
 	tDown, err := os.ReadFile("../migrate/rollback/20260810000001_team.down.sql")

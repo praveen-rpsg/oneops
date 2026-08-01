@@ -113,6 +113,115 @@ func TestAsset_ValidateRejectsUndefinedStatus(t *testing.T) {
 	}
 }
 
+// NewAsset alone (before any classification is applied) already defaults to
+// the "unknown" tier on both axes, exactly as the migration column default
+// does — a caller that only cares about name/type never has to think about
+// environment/criticality at all.
+func TestNewAsset_DefaultsClassificationToUnknown(t *testing.T) {
+	a, err := NewAsset("tn-1", "server", "Host", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Environment != AssetEnvironmentUnknown {
+		t.Errorf("environment = %q, want unknown", a.Environment)
+	}
+	if a.Criticality != AssetCriticalityUnknown {
+		t.Errorf("criticality = %q, want unknown", a.Criticality)
+	}
+	if a.OwnerTeamID != nil || a.OwnerUserID != nil {
+		t.Errorf("a fresh asset must be unowned: %+v", a)
+	}
+}
+
+func TestAssetEnvironment_Valid(t *testing.T) {
+	for _, e := range []AssetEnvironment{AssetEnvironmentProduction, AssetEnvironmentStaging, AssetEnvironmentDevelopment, AssetEnvironmentUnknown} {
+		if !e.Valid() {
+			t.Errorf("%q must be valid", e)
+		}
+	}
+	for _, e := range []AssetEnvironment{"", "PRODUCTION", "prod", "test"} {
+		if e.Valid() {
+			t.Errorf("%q must not be valid — the environment set is closed", e)
+		}
+	}
+}
+
+func TestAssetCriticality_Valid(t *testing.T) {
+	for _, c := range []AssetCriticality{AssetCriticalityCritical, AssetCriticalityHigh, AssetCriticalityMedium, AssetCriticalityLow, AssetCriticalityUnknown} {
+		if !c.Valid() {
+			t.Errorf("%q must be valid", c)
+		}
+	}
+	for _, c := range []AssetCriticality{"", "CRITICAL", "urgent", "p1"} {
+		if c.Valid() {
+			t.Errorf("%q must not be valid — the criticality set is closed", c)
+		}
+	}
+}
+
+func TestAsset_ApplyClassification_DefaultsBlankToUnknown(t *testing.T) {
+	a, err := NewAsset("tn-1", "service", "checkout", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ApplyClassification("", "", nil, nil); err != nil {
+		t.Fatalf("ApplyClassification: %v", err)
+	}
+	if a.Environment != AssetEnvironmentUnknown || a.Criticality != AssetCriticalityUnknown {
+		t.Errorf("blank classification did not default to unknown: %+v", a)
+	}
+}
+
+func TestAsset_ApplyClassification_SetsValues(t *testing.T) {
+	a, err := NewAsset("tn-1", "service", "checkout", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	teamID, userID := "team-1", "user-1"
+	if err := a.ApplyClassification("production", "critical", &teamID, &userID); err != nil {
+		t.Fatalf("ApplyClassification: %v", err)
+	}
+	if a.Environment != AssetEnvironmentProduction || a.Criticality != AssetCriticalityCritical {
+		t.Errorf("classification not applied: %+v", a)
+	}
+	if a.OwnerTeamID == nil || *a.OwnerTeamID != "team-1" {
+		t.Errorf("owner_team_id not applied: %+v", a.OwnerTeamID)
+	}
+	if a.OwnerUserID == nil || *a.OwnerUserID != "user-1" {
+		t.Errorf("owner_user_id not applied: %+v", a.OwnerUserID)
+	}
+}
+
+func TestAsset_ApplyClassification_RejectsUndefinedEnumValues(t *testing.T) {
+	a, err := NewAsset("tn-1", "service", "checkout", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ApplyClassification("prod", "critical", nil, nil); err == nil {
+		t.Error("an undefined environment was accepted")
+	}
+	if err := a.ApplyClassification("production", "urgent", nil, nil); err == nil {
+		t.Error("an undefined criticality was accepted")
+	}
+}
+
+func TestAsset_ValidateRejectsBlankOwnerIDs(t *testing.T) {
+	blank := "   "
+	a, err := NewAsset("tn-1", "server", "Host", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.OwnerTeamID = &blank
+	if err := a.Validate(); err == nil {
+		t.Error("a blank owner_team_id was accepted")
+	}
+	a.OwnerTeamID = nil
+	a.OwnerUserID = &blank
+	if err := a.Validate(); err == nil {
+		t.Error("a blank owner_user_id was accepted")
+	}
+}
+
 func TestNewAssetRelationship_BuildsARelationship(t *testing.T) {
 	r, err := NewAssetRelationship(" tn-1 ", " asset-a ", " asset-b ", RelationshipDependsOn)
 	if err != nil {

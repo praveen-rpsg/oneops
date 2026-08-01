@@ -24,7 +24,10 @@ func NewAssetGraphRepo(pool *pgxpool.Pool) *AssetGraphRepo {
 	return &AssetGraphRepo{pool: pool}
 }
 
-var _ domain.GraphTraversal = (*AssetGraphRepo)(nil)
+var (
+	_ domain.GraphTraversal      = (*AssetGraphRepo)(nil)
+	_ domain.TypedGraphTraversal = (*AssetGraphRepo)(nil)
+)
 
 const assetRelationshipTable = "asset_relationship"
 
@@ -58,6 +61,19 @@ func (r *AssetGraphRepo) RecursiveDependents(ctx context.Context, assetID string
 	defer span.End()
 	near, far := columnsFor(domain.DirectionDependents, "from_asset_id", "to_asset_id")
 	return queryGraphNodes(ctx, r.pool, span, walkQueryOn(assetRelationshipTable, near, far), assetID)
+}
+
+// RecursiveDependenciesOfTypes returns the transitive forward closure
+// reachable using only edges whose type is in types. The CMDB service-map
+// endpoint calls this with {depends_on, runs_on} to compose a
+// business_service from its supporting CIs, excluding connected_to (a
+// network link, not composition) and member_of (grouping, not composition) —
+// domain.TypedGraphTraversal (E1.2).
+func (r *AssetGraphRepo) RecursiveDependenciesOfTypes(ctx context.Context, assetID string, types []string) ([]domain.TraversalNode, error) {
+	ctx, span := graphTracer.Start(ctx, "AssetGraphRepo.RecursiveDependenciesOfTypes")
+	defer span.End()
+	near, far := columnsFor(domain.DirectionDependencies, "from_asset_id", "to_asset_id")
+	return queryGraphNodesTyped(ctx, r.pool, span, walkQueryOnTyped(assetRelationshipTable, near, far), assetID, types)
 }
 
 // CyclePaths returns the closing paths of cycles reachable from assetID.

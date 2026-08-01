@@ -19,14 +19,18 @@ import (
 func (s *Server) SetAssets(repo domain.AssetRepository) { s.assets = repo }
 
 type assetDTO struct {
-	AssetID    string         `json:"asset_id"`
-	Type       string         `json:"type"`
-	Name       string         `json:"name"`
-	Attributes map[string]any `json:"attributes"`
-	Status     string         `json:"status"`
-	RowVersion int64          `json:"row_version"`
-	CreatedAt  time.Time      `json:"created_at"`
-	UpdatedAt  time.Time      `json:"updated_at"`
+	AssetID     string         `json:"asset_id"`
+	Type        string         `json:"type"`
+	Name        string         `json:"name"`
+	Attributes  map[string]any `json:"attributes"`
+	Status      string         `json:"status"`
+	Environment string         `json:"environment"`
+	Criticality string         `json:"criticality"`
+	OwnerTeamID *string        `json:"owner_team_id,omitempty"`
+	OwnerUserID *string        `json:"owner_user_id,omitempty"`
+	RowVersion  int64          `json:"row_version"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
 }
 
 // toAssetDTO deliberately omits tenant_id, the same choice toTeamDTO makes:
@@ -35,7 +39,8 @@ type assetDTO struct {
 func toAssetDTO(a *domain.Asset) assetDTO {
 	return assetDTO{
 		AssetID: a.AssetID, Type: a.Type, Name: a.Name, Attributes: a.Attributes,
-		Status: string(a.Status), RowVersion: a.RowVersion,
+		Status: string(a.Status), Environment: string(a.Environment), Criticality: string(a.Criticality),
+		OwnerTeamID: a.OwnerTeamID, OwnerUserID: a.OwnerUserID, RowVersion: a.RowVersion,
 		CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
 	}
 }
@@ -62,21 +67,38 @@ func toAssetRelationshipDTO(r *domain.AssetRelationship) assetRelationshipDTO {
 // server-side so a caller cannot choose one (the same rule createTeamRequest
 // follows, and the reason `asset.asset_pkey` needs no tenant-key-scope
 // justification beyond "no create route accepts one").
+//
+// Environment/Criticality default to "unknown" when omitted or blank
+// (domain.Asset.ApplyClassification). OwnerTeamID/OwnerUserID are optional;
+// when set, s.assets.Create re-verifies the id against the caller's tenant
+// before the asset is written (ADR-ASSET-001 §6, extended to ownership).
 type createAssetRequest struct {
-	Type       string         `json:"type"`
-	Name       string         `json:"name"`
-	Attributes map[string]any `json:"attributes"`
+	Type        string         `json:"type"`
+	Name        string         `json:"name"`
+	Attributes  map[string]any `json:"attributes"`
+	Environment string         `json:"environment"`
+	Criticality string         `json:"criticality"`
+	OwnerTeamID *string        `json:"owner_team_id"`
+	OwnerUserID *string        `json:"owner_user_id"`
 }
 
-// patchAssetRequest changes one or more of name/attributes/status in a single
-// call. Unlike patchTeamRequest, these do not go through different repository
-// methods — Asset has no authorisation-adjacent status split to protect — so
-// there is no reason to forbid combining them.
+// patchAssetRequest changes one or more fields in a single call. Unlike
+// patchTeamRequest, these do not go through different repository methods —
+// Asset has no authorisation-adjacent status split to protect — so there is
+// no reason to forbid combining them.
+//
+// OwnerTeamID/OwnerUserID follow domain.AssetPatch's tri-state rule: absent
+// (nil) leaves ownership unchanged; present as "" clears it; present as a
+// non-empty string sets it, re-verified against the caller's tenant first.
 type patchAssetRequest struct {
-	RowVersion int64          `json:"row_version"`
-	Name       *string        `json:"name"`
-	Attributes map[string]any `json:"attributes"`
-	Status     *string        `json:"status"`
+	RowVersion  int64          `json:"row_version"`
+	Name        *string        `json:"name"`
+	Attributes  map[string]any `json:"attributes"`
+	Status      *string        `json:"status"`
+	Environment *string        `json:"environment"`
+	Criticality *string        `json:"criticality"`
+	OwnerTeamID *string        `json:"owner_team_id"`
+	OwnerUserID *string        `json:"owner_user_id"`
 }
 
 type createAssetRelationshipRequest struct {
@@ -139,7 +161,16 @@ func (s *Server) createAsset(w http.ResponseWriter, r *http.Request) {
 		s.mapError(w, r, err)
 		return
 	}
+	if err := a.ApplyClassification(req.Environment, req.Criticality, req.OwnerTeamID, req.OwnerUserID); err != nil {
+		s.mapError(w, r, err)
+		return
+	}
 	created, err := s.assets.Create(r.Context(), a)
+	if errors.Is(err, domain.ErrNotFound) {
+		writeProblem(w, r, http.StatusNotFound, "not found",
+			"owner_team_id or owner_user_id does not name a team or user visible to this tenant")
+		return
+	}
 	if err != nil {
 		s.mapError(w, r, err)
 		return
@@ -183,31 +214,49 @@ func (s *Server) patchAsset(w http.ResponseWriter, r *http.Request) {
 			"must be the row_version last read for this asset"))
 		return
 	}
-	if req.Name == nil && req.Attributes == nil && req.Status == nil {
+	if req.Name == nil && req.Attributes == nil && req.Status == nil &&
+		req.Environment == nil && req.Criticality == nil &&
+		req.OwnerTeamID == nil && req.OwnerUserID == nil {
 		s.mapError(w, r, domain.NewValidationError("body",
-			"supply at least one of name, attributes or status"))
+			"supply at least one of name, attributes, status, environment, criticality, owner_team_id or owner_user_id"))
 		return
 	}
 
-	var name *string
+	patch := domain.AssetPatch{Attributes: req.Attributes, OwnerTeamID: req.OwnerTeamID, OwnerUserID: req.OwnerUserID}
 	if req.Name != nil {
 		trimmed := strings.TrimSpace(*req.Name)
-		name = &trimmed
+		patch.Name = &trimmed
 	}
-	var status *domain.AssetStatus
 	if req.Status != nil {
 		st := domain.AssetStatus(strings.TrimSpace(*req.Status))
 		if !st.Valid() {
 			s.mapError(w, r, domain.NewValidationError("status", "must be one of: active, retired"))
 			return
 		}
-		status = &st
+		patch.Status = &st
+	}
+	if req.Environment != nil {
+		env := domain.AssetEnvironment(strings.TrimSpace(*req.Environment))
+		if !env.Valid() {
+			s.mapError(w, r, domain.NewValidationError("environment", "must be one of: production, staging, development, unknown"))
+			return
+		}
+		patch.Environment = &env
+	}
+	if req.Criticality != nil {
+		crit := domain.AssetCriticality(strings.TrimSpace(*req.Criticality))
+		if !crit.Valid() {
+			s.mapError(w, r, domain.NewValidationError("criticality", "must be one of: critical, high, medium, low, unknown"))
+			return
+		}
+		patch.Criticality = &crit
 	}
 
-	updated, err := s.assets.Update(r.Context(), id, req.RowVersion, name, req.Attributes, status)
+	updated, err := s.assets.Update(r.Context(), id, req.RowVersion, patch)
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
-		writeProblem(w, r, http.StatusNotFound, "not found", "no such asset")
+		writeProblem(w, r, http.StatusNotFound, "not found",
+			"no such asset, or owner_team_id/owner_user_id does not name a team or user visible to this tenant")
 		return
 	case errors.Is(err, domain.ErrVersionMismatch):
 		writeProblem(w, r, http.StatusConflict, "conflict", "asset was modified concurrently; re-read and retry")
@@ -399,4 +448,49 @@ func (s *Server) serveAssetTraversal(w http.ResponseWriter, r *http.Request, dir
 	}
 
 	writeJSON(w, http.StatusOK, newAssetTraversalResponse(assetID, dir, recursive, nodes))
+}
+
+// assetTypeBusinessService is the seeded Asset.Type value a service-map
+// query applies to (E1.2). Asset.Type is open-but-validated, not a closed
+// enum (ADR-ASSET-001 §1), so this is a convention this endpoint enforces,
+// not a database constraint.
+const assetTypeBusinessService = "business_service"
+
+// getAssetServiceMap serves GET /v1/admin/assets/{id}/service-map: the
+// supporting Configuration Items composing a business_service, computed as a
+// PROJECTION over the existing CMDB graph — no new stored structure. It
+// walks only the composition edge types, depends_on and runs_on
+// (connected_to is a network link and member_of is grouping, neither
+// composes a service), reusing the same recursive-CTE traversal the
+// /dependencies endpoint uses via domain.TypedGraphTraversal
+// (ADR-ASSET-001 §4).
+func (s *Server) getAssetServiceMap(w http.ResponseWriter, r *http.Request) {
+	if s.assets == nil {
+		writeProblem(w, r, http.StatusNotImplemented, "not implemented", "asset administration is not configured")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	asset, err := s.assets.Get(r.Context(), id)
+	if err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+	if asset.Type != assetTypeBusinessService {
+		s.mapError(w, r, domain.NewValidationError("id",
+			"asset is not a business_service; service-map composes only business_service assets"))
+		return
+	}
+
+	typed, ok := s.assetGraphRepo.(domain.TypedGraphTraversal)
+	if !ok {
+		writeProblem(w, r, http.StatusInternalServerError, "internal error", "asset graph service unavailable")
+		return
+	}
+	nodes, err := typed.RecursiveDependenciesOfTypes(r.Context(), id,
+		[]string{string(domain.RelationshipDependsOn), string(domain.RelationshipRunsOn)})
+	if err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, newServiceMapResponse(id, nodes))
 }
