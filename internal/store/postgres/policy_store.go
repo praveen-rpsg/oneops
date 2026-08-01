@@ -260,6 +260,22 @@ func (s *PolicyStore) MarkResult(ctx context.Context, id string, claimToken time
 	return nil
 }
 
+// SetGate records a step's Decision gate resolution (ADR-POLICY-001 §3).
+// Unfenced by a claim token: it runs after the step's own outcome is already
+// durably recorded (MarkResult succeeded), so there is no in-flight claim left
+// to fence against — it is a plain write to the gate column, not a status
+// transition.
+func (s *PolicyStore) SetGate(ctx context.Context, id string, gate policy.GateState) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE policy_execution SET gate=$2 WHERE id=$1`, id, string(gate))
+	if err != nil {
+		return fmt.Errorf("set execution gate: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
 // ListByPolicy returns a policy's recent executions (newest first).
 func (s *PolicyStore) ListByPolicy(ctx context.Context, policyID string, limit int) ([]policy.Execution, error) {
 	rows, err := s.pool.Query(ctx, `

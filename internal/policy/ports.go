@@ -45,4 +45,12 @@ type ExecutionStore interface {
 	// the persistence side of RunProgress (ADR-POLICY-001). There is no
 	// run-progress table: a run's Executions ARE its progress.
 	ListByRun(ctx context.Context, runID string) ([]Execution, error)
+	// SetGate records a step's Decision gate resolution. The executor calls it
+	// with GatePending immediately after a gated step's action succeeds,
+	// pausing the run at that step (ADR-POLICY-001 §3); a future gate
+	// evaluator (W3) is what flips it to GatePassed. Unfenced by a claim
+	// token: gate resolution is a separate write from the execution's own
+	// claim/retry lifecycle, and by the time it is called the step's own
+	// outcome is already durably recorded as succeeded.
+	SetGate(ctx context.Context, id string, gate GateState) error
 }

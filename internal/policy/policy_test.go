@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"testing"
@@ -147,10 +148,18 @@ type fakeExecs struct {
 }
 
 func newFakeExecs() *fakeExecs { return &fakeExecs{m: map[string]Execution{}} }
+
+// Enqueue mirrors the real store's `ON CONFLICT (id) DO NOTHING`
+// (ADR-CONCURRENCY-003): a re-enqueue of an id already present is a no-op, not
+// an overwrite, which is what makes a duplicated advance of a composed run
+// (internal/policy/executor.go's advanceRun) idempotent under a fake store too.
 func (f *fakeExecs) Enqueue(_ context.Context, xs []Execution) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, x := range xs {
+		if _, exists := f.m[x.ID]; exists {
+			continue
+		}
 		f.m[x.ID] = x
 	}
 	return nil
@@ -225,11 +234,23 @@ func (f *fakeExecs) ListByRun(_ context.Context, runID string) ([]Execution, err
 	defer f.mu.Unlock()
 	var out []Execution
 	for _, x := range f.m {
-		if x.RunID == runID {
+		if runID != "" && x.RunID == runID {
 			out = append(out, x)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StepIndex < out[j].StepIndex })
 	return out, nil
+}
+func (f *fakeExecs) SetGate(_ context.Context, id string, gate GateState) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	x, ok := f.m[id]
+	if !ok {
+		return domain.ErrNotFound
+	}
+	x.Gate = gate
+	f.m[id] = x
+	return nil
 }
 func (f *fakeExecs) count() int {
 	f.mu.Lock()

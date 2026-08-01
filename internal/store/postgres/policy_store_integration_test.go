@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rpsg/oneops/internal/domain"
 	"github.com/rpsg/oneops/internal/policy"
 )
 
@@ -178,5 +179,23 @@ func TestPolicyStore_CompositionRoundTrip(t *testing.T) {
 	}
 	if len(soloRun) != 0 {
 		t.Fatalf("a single-action execution's NULL run_id must never match ListByRun(\"\"): got %+v", soloRun)
+	}
+
+	// --- SetGate: the executor's W2 pause-at-gate write --------------------------
+	if err := s.SetGate(ctx, "run1_step0", policy.GatePending); err != nil {
+		t.Fatalf("SetGate pending: %v", err)
+	}
+	run, err = s.ListByRun(ctx, "run1")
+	if err != nil || len(run) != 2 || run[0].Gate != policy.GatePending {
+		t.Fatalf("gate not persisted: %+v %v", run, err)
+	}
+	if err := s.SetGate(ctx, "run1_step0", policy.GatePassed); err != nil {
+		t.Fatalf("SetGate passed: %v", err)
+	}
+	if run, err = s.ListByRun(ctx, "run1"); err != nil || run[0].Gate != policy.GatePassed {
+		t.Fatalf("gate resolution not persisted: %+v %v", run, err)
+	}
+	if err := s.SetGate(ctx, "does-not-exist", policy.GatePending); err != domain.ErrNotFound {
+		t.Fatalf("SetGate on a missing row = %v, want domain.ErrNotFound", err)
 	}
 }
