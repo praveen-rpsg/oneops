@@ -512,6 +512,12 @@ func run(logger *slog.Logger) error {
 	// Setting is tenant-owned and under row-level security, exactly like team
 	// above, so no exemption is needed here either.
 	srv.SetSettings(postgres.NewSettingStore(appPool))
+	// CMDB Asset/relationship graph: tenant-owned and under row-level
+	// security, exactly like team above. SetAssetGraph wires the same
+	// dependency-graph engine SetGraph wires for configuration_object, over
+	// asset_relationship instead (ADR-ASSET-001 §4).
+	srv.SetAssets(postgres.NewAssetStore(appPool))
+	srv.SetAssetGraph(postgres.NewAssetGraphRepo(appPool))
 
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.

@@ -1217,6 +1217,234 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/assets:
+    get:
+      summary: List the caller's tenant's CMDB assets (Configuration Items)
+      description: >-
+        asset is tenant-owned and under row-level security, exactly like
+        Team, so the result is confined to the caller's tenant by the
+        database. Paging is keyset over `asset_id`, a ULID and therefore
+        ordered by creation.
+      operationId: listAssets
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last asset_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of assets
+          content: { application/json: { schema: { $ref: '#/components/schemas/AssetList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Register a Configuration Item
+      description: >-
+        The tenant is taken from the bound connection and never from the
+        request, so a caller cannot plant an asset inside another boundary
+        (the same rule createTeam enforces). `type` is an open but validated
+        set (lower-case snake_case) — server, service, network_device,
+        application, database and future increments' types are all accepted.
+      operationId: createAsset
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAssetRequest' }
+      responses:
+        '201':
+          description: The asset
+          content: { application/json: { schema: { $ref: '#/components/schemas/Asset' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/assets/relationships:
+    post:
+      summary: Create a CMDB relationship between two assets
+      description: >-
+        Both from_asset_id and to_asset_id must already name assets visible
+        to the caller's tenant — confirmed on the tenant-scoped connection
+        before the edge is created, because PostgreSQL's foreign-key checks
+        bypass row-level security on the referenced table (ADR-ASSET-001
+        §6). A from/to id the tenant cannot see returns 404, identical to one
+        that does not exist.
+      operationId: createAssetRelationship
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAssetRelationshipRequest' }
+      responses:
+        '201':
+          description: The relationship
+          content: { application/json: { schema: { $ref: '#/components/schemas/AssetRelationship' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/assets/relationships/{id}:
+    delete:
+      summary: Remove a CMDB relationship
+      operationId: deleteAssetRelationship
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: The relationship was removed
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/assets/{id}:
+    get:
+      summary: Get an asset by identifier
+      operationId: getAsset
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The asset
+          content: { application/json: { schema: { $ref: '#/components/schemas/Asset' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Change an asset's name, attributes and/or status
+      description: >-
+        Supply at least one of name, attributes or status. Unlike
+        PatchTeamRequest, these may be combined in one call — Asset has no
+        authorisation-adjacent status split to protect.
+      operationId: patchAsset
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchAssetRequest' }
+      responses:
+        '200':
+          description: The updated asset
+          content: { application/json: { schema: { $ref: '#/components/schemas/Asset' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    delete:
+      summary: Delete an asset
+      description: >-
+        A real delete, unlike Team's archive-only lifecycle: an Asset is not
+        a named governed grouping. Its relationships are removed with it
+        (ON DELETE CASCADE).
+      operationId: deleteAsset
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: The asset was deleted
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/assets/{id}/relationships:
+    get:
+      summary: List the direct (one-hop) relationships naming an asset
+      operationId: listAssetRelationships
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The asset's direct in- and out-edges
+          content: { application/json: { schema: { $ref: '#/components/schemas/AssetRelationshipEdges' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/assets/{id}/dependencies:
+    get:
+      summary: Dependencies of an asset in the CMDB graph (forward)
+      description: >
+        Direct dependencies by default; the transitive forward closure when
+        recursive=true. Reuses the same dependency-graph engine
+        /v1/configurations/{cfgId}/dependencies uses, over asset_relationship
+        instead of dependency_edge (ADR-ASSET-001 §4).
+      operationId: getAssetDependencies
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: recursive, in: query, schema: { type: boolean, default: false } }
+        - { name: max_depth, in: query, schema: { type: integer, minimum: 1 }, description: Cap recursive depth. }
+      responses:
+        '200':
+          description: Reachable dependency nodes
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssetTraversalResponse' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/assets/{id}/dependents:
+    get:
+      summary: Dependents of an asset in the CMDB graph (reverse)
+      description: >
+        Direct dependents by default; the transitive reverse closure when
+        recursive=true.
+      operationId: getAssetDependents
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: recursive, in: query, schema: { type: boolean, default: false } }
+        - { name: max_depth, in: query, schema: { type: integer, minimum: 1 }, description: Cap recursive depth. }
+      responses:
+        '200':
+          description: Reachable dependent nodes
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssetTraversalResponse' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/notifications:
     get:
       summary: List the caller's tenant's notifications
@@ -1872,6 +2100,100 @@ components:
       required: [user_id]
       properties:
         user_id: { type: string }
+    Asset:
+      type: object
+      description: >-
+        A Configuration Item — the operational unit every downstream
+        NOC/SOC/ITSM capability references. Distinct from a Configuration
+        Object (ADR-ASSET-001 §2).
+      properties:
+        asset_id: { type: string }
+        type:
+          type: string
+          description: >-
+            Open but validated: lower-case snake_case, e.g. server, service,
+            network_device, application, database.
+        name: { type: string, maxLength: 200 }
+        attributes:
+          type: object
+          additionalProperties: true
+        status: { type: string, enum: [active, retired] }
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AssetList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Asset' }
+    CreateAssetRequest:
+      type: object
+      required: [type, name]
+      properties:
+        type: { type: string }
+        name: { type: string, maxLength: 200 }
+        attributes:
+          type: object
+          additionalProperties: true
+    PatchAssetRequest:
+      type: object
+      required: [row_version]
+      description: Supply at least one of name, attributes or status.
+      properties:
+        row_version: { type: integer, format: int64, minimum: 1 }
+        name: { type: string, maxLength: 200 }
+        attributes:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+          enum: [active, retired]
+    AssetRelationship:
+      type: object
+      description: A directed, typed edge of the CMDB graph between two Assets.
+      properties:
+        relationship_id: { type: string }
+        from_asset_id: { type: string }
+        to_asset_id: { type: string }
+        type: { type: string, enum: [depends_on, runs_on, connected_to, member_of] }
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AssetRelationshipEdges:
+      type: object
+      description: An asset's direct (one-hop) in- and out-edges.
+      properties:
+        from:
+          type: array
+          items: { $ref: '#/components/schemas/AssetRelationship' }
+        to:
+          type: array
+          items: { $ref: '#/components/schemas/AssetRelationship' }
+    CreateAssetRelationshipRequest:
+      type: object
+      required: [from_asset_id, to_asset_id, type]
+      properties:
+        from_asset_id: { type: string }
+        to_asset_id: { type: string }
+        type: { type: string, enum: [depends_on, runs_on, connected_to, member_of] }
+    AssetTraversalResponse:
+      type: object
+      description: >-
+        Same shape as TraversalResponse, over the CMDB graph. Node ids are
+        asset_ids rather than cfg_ids (ADR-ASSET-001 §4).
+      properties:
+        root: { type: string }
+        direction: { type: string, enum: [dependencies, dependents] }
+        recursive: { type: boolean }
+        count: { type: integer }
+        nodes:
+          type: array
+          items:
+            type: object
+            properties:
+              asset_id: { type: string }
+              depth: { type: integer }
     Setting:
       type: object
       description: >-

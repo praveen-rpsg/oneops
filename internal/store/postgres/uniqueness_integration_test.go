@@ -57,6 +57,11 @@ var serverGeneratedIdentifiers = map[string]string{
 
 	// Multi-approver approval quorum (ADR-GOV-005).
 	"approval_record_pkey": "approval_id is server-minted (a ULID via domain.NewApprovalRecord); no create route accepts one from a client",
+
+	// CMDB Asset/Configuration Item graph (ADR-ASSET-001).
+	"asset_pkey":              "asset_id is server-minted (domain.NewAsset); no create route accepts one from a client",
+	"asset_relationship_pkey": "relationship_id is server-minted (domain.NewAssetRelationship); no create route accepts one from a client",
+	"uq_asset_relationship":   "keyed on from_asset_id/to_asset_id, both server-minted asset_ids AssetStore.CreateRelationship confirms belong to the caller's tenant before insert (ADR-ASSET-001 §6), plus a closed relationship type",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

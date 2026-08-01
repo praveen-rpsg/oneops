@@ -16,9 +16,19 @@ executable, it lives in the Makefile or a guard — read those, don't trust pros
 - `make graph` — regenerate `pkg.json` (generated, **never committed**)
 - `make migrate-hash` / `make migrate-validate` — after any migration change (Atlas)
 
+## START HERE — the canonical build plan
+
+**`docs/PLATFORM-BUILD-PLAN.md` is the single source of truth for what to build
+next.** Read it before any product work. Find the `▶ CURRENT` marker, do that,
+and update the marker + checkboxes in the SAME change that lands the work. It
+exists so no session/agent ever re-plans from scratch or loses track. OneOps is
+one unified platform (governance + ITSM + NOC + SOC + asset + AI); build it all
+here (the separate AINOC project is retired).
+
 ## Authoritative documents (in order of consultation)
 
-1. `docs/ENGINEERING-OPERATING-SYSTEM.md` — how work flows; what lives where
+1. `docs/PLATFORM-BUILD-PLAN.md` — **what to build next + status (read first)**
+2. `docs/ENGINEERING-OPERATING-SYSTEM.md` — how work flows; what lives where
 2. `docs/TRUST-REGISTER.md` — eliminated defect classes + the 5-condition rule for adding entries
 3. `docs/adr/` — 37+ ADRs; find the governing ADR **before** touching its area
 4. `docs/architecture-guards.md` + `internal/arch/` — ~56 build-failing guards

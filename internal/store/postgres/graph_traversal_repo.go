@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
@@ -12,67 +13,86 @@ import (
 
 var _ domain.GraphTraversal = (*GraphRepo)(nil)
 
-// walkQuery builds a cycle-safe recursive-CTE traversal returning each reachable
-// node once at its minimum depth, ordered deterministically by (depth, cfg_id).
-// near/far are code-controlled column names selecting direction:
-// forward  = near "from_cfg", far "to_cfg"  (dependencies);
-// reverse  = near "to_cfg",   far "from_cfg" (dependents).
-func walkQuery(near, far string) string {
+// walkQueryOn builds a cycle-safe recursive-CTE traversal over the given edge
+// table, returning each reachable node once at its minimum depth, ordered
+// deterministically by (depth, node_id). table, near and far are
+// code-controlled identifiers — never request input — selecting the edge
+// table and its direction:
+// forward = near "from_*", far "to_*"  (dependencies);
+// reverse = near "to_*",   far "from_*" (dependents).
+//
+// This is the one traversal engine the platform has. AssetGraphRepo below
+// reuses it unchanged, over asset_relationship's own column names, rather
+// than a second implementation of the same recursive CTE (ADR-ASSET-001 §4).
+func walkQueryOn(table, near, far string) string {
 	return fmt.Sprintf(`
 WITH RECURSIVE walk AS (
-    SELECT e.%[2]s AS cfg_id, 1 AS depth,
+    SELECT e.%[2]s AS node_id, 1 AS depth,
            ARRAY[e.%[1]s, e.%[2]s] AS path,
            (e.%[2]s = e.%[1]s) AS cyc
-      FROM dependency_edge e
+      FROM %[3]s e
      WHERE e.%[1]s = $1
     UNION ALL
     SELECT e.%[2]s, w.depth + 1, w.path || e.%[2]s,
            e.%[2]s = ANY(w.path)
-      FROM dependency_edge e
-      JOIN walk w ON e.%[1]s = w.cfg_id
+      FROM %[3]s e
+      JOIN walk w ON e.%[1]s = w.node_id
      WHERE NOT w.cyc
 )
-SELECT cfg_id, depth FROM (
-    SELECT DISTINCT ON (cfg_id) cfg_id, depth
+SELECT node_id, depth FROM (
+    SELECT DISTINCT ON (node_id) node_id, depth
       FROM walk WHERE NOT cyc
-     ORDER BY cfg_id, depth
+     ORDER BY node_id, depth
 ) t
-ORDER BY depth, cfg_id`, near, far)
+ORDER BY depth, node_id`, near, far, table)
 }
 
-// cycleQuery builds a recursive traversal that returns the closing path of every
-// cycle reachable from the root, carrying the full path so callers can report
-// the complete cycle. Ordering is deterministic.
-func cycleQuery(near, far string) string {
+// cycleQueryOn builds a recursive traversal over the given edge table that
+// returns the closing path of every cycle reachable from the root, carrying
+// the full path so callers can report the complete cycle. Ordering is
+// deterministic.
+func cycleQueryOn(table, near, far string) string {
 	return fmt.Sprintf(`
 WITH RECURSIVE walk AS (
     SELECT e.%[2]s AS cur,
            ARRAY[e.%[1]s, e.%[2]s] AS path,
            (e.%[2]s = e.%[1]s) AS closed
-      FROM dependency_edge e
+      FROM %[3]s e
      WHERE e.%[1]s = $1
     UNION ALL
     SELECT e.%[2]s, w.path || e.%[2]s,
            e.%[2]s = ANY(w.path)
-      FROM dependency_edge e
+      FROM %[3]s e
       JOIN walk w ON e.%[1]s = w.cur
      WHERE NOT w.closed
 )
-SELECT path FROM walk WHERE closed ORDER BY path`, near, far)
+SELECT path FROM walk WHERE closed ORDER BY path`, near, far, table)
 }
 
+// walkQuery/cycleQuery are the dependency_edge instantiations of the generic
+// queries above, kept as their own names because graph_perf_test.go's EXPLAIN
+// harness calls them directly.
+func walkQuery(near, far string) string  { return walkQueryOn("dependency_edge", near, far) }
+func cycleQuery(near, far string) string { return cycleQueryOn("dependency_edge", near, far) }
+
 func directionColumns(dir domain.Direction) (near, far string) {
+	return columnsFor(dir, "from_cfg", "to_cfg")
+}
+
+// columnsFor resolves a traversal direction against a table's own forward
+// column names: forward walks near=fromCol,far=toCol; reverse swaps them.
+func columnsFor(dir domain.Direction, fromCol, toCol string) (near, far string) {
 	if dir == domain.DirectionDependents {
-		return "to_cfg", "from_cfg"
+		return toCol, fromCol
 	}
-	return "from_cfg", "to_cfg"
+	return fromCol, toCol
 }
 
 // Dependencies returns the direct (one-hop) dependency node ids of cfgID.
 func (r *GraphRepo) Dependencies(ctx context.Context, cfgID string) ([]string, error) {
 	ctx, span := graphTracer.Start(ctx, "GraphRepo.Dependencies")
 	defer span.End()
-	return r.queryIDs(ctx, span,
+	return queryGraphIDs(ctx, r.pool, span,
 		`SELECT DISTINCT to_cfg FROM dependency_edge WHERE from_cfg = $1 ORDER BY to_cfg`, cfgID)
 }
 
@@ -80,7 +100,7 @@ func (r *GraphRepo) Dependencies(ctx context.Context, cfgID string) ([]string, e
 func (r *GraphRepo) Dependents(ctx context.Context, cfgID string) ([]string, error) {
 	ctx, span := graphTracer.Start(ctx, "GraphRepo.Dependents")
 	defer span.End()
-	return r.queryIDs(ctx, span,
+	return queryGraphIDs(ctx, r.pool, span,
 		`SELECT DISTINCT from_cfg FROM dependency_edge WHERE to_cfg = $1 ORDER BY from_cfg`, cfgID)
 }
 
@@ -88,14 +108,14 @@ func (r *GraphRepo) Dependents(ctx context.Context, cfgID string) ([]string, err
 func (r *GraphRepo) RecursiveDependencies(ctx context.Context, cfgID string) ([]domain.TraversalNode, error) {
 	ctx, span := graphTracer.Start(ctx, "GraphRepo.RecursiveDependencies")
 	defer span.End()
-	return r.queryNodes(ctx, span, walkQuery("from_cfg", "to_cfg"), cfgID)
+	return queryGraphNodes(ctx, r.pool, span, walkQuery("from_cfg", "to_cfg"), cfgID)
 }
 
 // RecursiveDependents returns the transitive reverse closure with depths.
 func (r *GraphRepo) RecursiveDependents(ctx context.Context, cfgID string) ([]domain.TraversalNode, error) {
 	ctx, span := graphTracer.Start(ctx, "GraphRepo.RecursiveDependents")
 	defer span.End()
-	return r.queryNodes(ctx, span, walkQuery("to_cfg", "from_cfg"), cfgID)
+	return queryGraphNodes(ctx, r.pool, span, walkQuery("to_cfg", "from_cfg"), cfgID)
 }
 
 // CyclePaths returns the closing paths of cycles reachable from cfgID.
@@ -104,30 +124,15 @@ func (r *GraphRepo) CyclePaths(ctx context.Context, cfgID string, dir domain.Dir
 	defer span.End()
 
 	near, far := directionColumns(dir)
-	rows, err := r.pool.Query(ctx, cycleQuery(near, far), cfgID)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "cycle paths")
-		return nil, fmt.Errorf("cycle paths: %w", err)
-	}
-	defer rows.Close()
-
-	var paths []domain.GraphPath
-	for rows.Next() {
-		var nodes []string
-		if err := rows.Scan(&nodes); err != nil {
-			return nil, err
-		}
-		paths = append(paths, domain.GraphPath{Nodes: nodes})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return paths, nil
+	return queryGraphPaths(ctx, r.pool, span, cycleQuery(near, far), cfgID)
 }
 
-func (r *GraphRepo) queryIDs(ctx context.Context, span trace.Span, sql, arg string) ([]string, error) {
-	rows, err := r.pool.Query(ctx, sql, arg)
+// queryGraphIDs, queryGraphNodes and queryGraphPaths are the shared read
+// helpers behind every domain.GraphTraversal implementation in this package —
+// GraphRepo (dependency_edge) and AssetGraphRepo (asset_relationship) both
+// call them, rather than each hand-rolling its own row scanning.
+func queryGraphIDs(ctx context.Context, pool *pgxpool.Pool, span trace.Span, sql, arg string) ([]string, error) {
+	rows, err := pool.Query(ctx, sql, arg)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "query ids")
@@ -149,8 +154,8 @@ func (r *GraphRepo) queryIDs(ctx context.Context, span trace.Span, sql, arg stri
 	return ids, nil
 }
 
-func (r *GraphRepo) queryNodes(ctx context.Context, span trace.Span, sql, arg string) ([]domain.TraversalNode, error) {
-	rows, err := r.pool.Query(ctx, sql, arg)
+func queryGraphNodes(ctx context.Context, pool *pgxpool.Pool, span trace.Span, sql, arg string) ([]domain.TraversalNode, error) {
+	rows, err := pool.Query(ctx, sql, arg)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "query nodes")
@@ -170,4 +175,27 @@ func (r *GraphRepo) queryNodes(ctx context.Context, span trace.Span, sql, arg st
 		return nil, err
 	}
 	return nodes, nil
+}
+
+func queryGraphPaths(ctx context.Context, pool *pgxpool.Pool, span trace.Span, sql, arg string) ([]domain.GraphPath, error) {
+	rows, err := pool.Query(ctx, sql, arg)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "cycle paths")
+		return nil, fmt.Errorf("cycle paths: %w", err)
+	}
+	defer rows.Close()
+
+	var paths []domain.GraphPath
+	for rows.Next() {
+		var nodes []string
+		if err := rows.Scan(&nodes); err != nil {
+			return nil, err
+		}
+		paths = append(paths, domain.GraphPath{Nodes: nodes})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return paths, nil
 }

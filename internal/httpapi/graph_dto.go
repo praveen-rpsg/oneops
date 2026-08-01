@@ -32,6 +32,40 @@ func newTraversalResponse(root string, dir domain.Direction, recursive bool, nod
 	}
 }
 
+// assetGraphNode is a reachable node in a CMDB traversal response. Same shape
+// as graphNode, with an asset_id key instead of cfg_id — the underlying
+// domain.TraversalNode is the same generic graph primitive either way
+// (ADR-ASSET-001 §4); only the JSON label differs, because "cfg_id" would be
+// a confusing label on an Asset's own API.
+type assetGraphNode struct {
+	AssetID string `json:"asset_id"`
+	Depth   int    `json:"depth"`
+}
+
+// assetTraversalResponse is the payload for the CMDB dependencies/dependents
+// endpoints.
+type assetTraversalResponse struct {
+	Root      string           `json:"root"`
+	Direction string           `json:"direction"`
+	Recursive bool             `json:"recursive"`
+	Count     int              `json:"count"`
+	Nodes     []assetGraphNode `json:"nodes"`
+}
+
+func newAssetTraversalResponse(root string, dir domain.Direction, recursive bool, nodes []domain.TraversalNode) assetTraversalResponse {
+	out := make([]assetGraphNode, len(nodes))
+	for i, n := range nodes {
+		out[i] = assetGraphNode{AssetID: n.CfgID, Depth: n.Depth}
+	}
+	return assetTraversalResponse{
+		Root:      root,
+		Direction: string(dir),
+		Recursive: recursive,
+		Count:     len(out),
+		Nodes:     out,
+	}
+}
+
 // cyclePath is a single detected cycle as a closed path of node ids.
 type cyclePath struct {
 	Path []string `json:"path"`
