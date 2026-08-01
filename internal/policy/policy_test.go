@@ -220,6 +220,17 @@ func (f *fakeExecs) ListByPolicy(_ context.Context, policyID string, _ int) ([]E
 	}
 	return out, nil
 }
+func (f *fakeExecs) ListByRun(_ context.Context, runID string) ([]Execution, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []Execution
+	for _, x := range f.m {
+		if x.RunID == runID {
+			out = append(out, x)
+		}
+	}
+	return out, nil
+}
 func (f *fakeExecs) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -41,4 +41,8 @@ type ExecutionStore interface {
 	// worker stopped between claiming and running (ADR-CONCURRENCY-006).
 	ReleaseClaim(ctx context.Context, id string, claimToken time.Time) error
 	ListByPolicy(ctx context.Context, policyID string, limit int) ([]Execution, error)
+	// ListByRun returns every Execution sharing runID, ordered by StepIndex —
+	// the persistence side of RunProgress (ADR-POLICY-001). There is no
+	// run-progress table: a run's Executions ARE its progress.
+	ListByRun(ctx context.Context, runID string) ([]Execution, error)
 }

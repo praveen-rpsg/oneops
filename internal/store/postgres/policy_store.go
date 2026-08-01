@@ -32,7 +32,7 @@ var (
 
 // tenant_id is read on every path so the consumer's fan-out can compare
 // ownership: it lists policies across all tenants on a privileged connection.
-const policyCols = `id, name, enabled, condition, action_type, action_config, max_retries, created_at, updated_at, tenant_id`
+const policyCols = `id, name, enabled, condition, action_type, action_config, steps, max_retries, created_at, updated_at, tenant_id`
 
 // Create inserts a policy.
 func (s *PolicyStore) Create(ctx context.Context, p policy.Policy) error {
@@ -40,10 +40,14 @@ func (s *PolicyStore) Create(ctx context.Context, p policy.Policy) error {
 	if err != nil {
 		return fmt.Errorf("marshal condition: %w", err)
 	}
+	steps, err := sequenceJSON(p.Steps)
+	if err != nil {
+		return err
+	}
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO policy (`+policyCols+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now(),$8)`,
-		p.ID, p.Name, p.Enabled, cond, p.Action.Type, actionConfig(p.Action.Config), p.MaxRetries,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),now(),$9)`,
+		p.ID, p.Name, p.Enabled, cond, p.Action.Type, actionConfig(p.Action.Config), steps, p.MaxRetries,
 		domain.TenantIDFrom(ctx))
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -99,12 +103,16 @@ func (s *PolicyStore) Update(ctx context.Context, p policy.Policy) error {
 	if err != nil {
 		return fmt.Errorf("marshal condition: %w", err)
 	}
+	steps, err := sequenceJSON(p.Steps)
+	if err != nil {
+		return err
+	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE policy
 		   SET name=$2, enabled=$3, condition=$4, action_type=$5, action_config=$6,
-		       max_retries=$7, updated_at=now()
+		       steps=$7, max_retries=$8, updated_at=now()
 		 WHERE id=$1`,
-		p.ID, p.Name, p.Enabled, cond, p.Action.Type, actionConfig(p.Action.Config), p.MaxRetries)
+		p.ID, p.Name, p.Enabled, cond, p.Action.Type, actionConfig(p.Action.Config), steps, p.MaxRetries)
 	if err != nil {
 		return fmt.Errorf("update policy: %w", err)
 	}
@@ -126,9 +134,12 @@ func (s *PolicyStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-const execCols = `id, policy_id, event_id, event, status, retry_count, error, started_at, ended_at, next_attempt_at, created_at, claimed_at`
+const execCols = `id, policy_id, event_id, event, status, retry_count, error, started_at, ended_at, next_attempt_at, created_at, claimed_at, run_id, step_index, gate`
 
-// Enqueue inserts pending executions (idempotent by id).
+// Enqueue inserts pending executions (idempotent by id). RunID/StepIndex/Gate
+// default to their zero values for a single-action policy's execution,
+// exactly as every execution behaved before those columns existed; a
+// composed Sequence run's steps set them explicitly (ADR-POLICY-001).
 func (s *PolicyStore) Enqueue(ctx context.Context, xs []policy.Execution) error {
 	batch := &pgx.Batch{}
 	for i := range xs {
@@ -139,10 +150,12 @@ func (s *PolicyStore) Enqueue(ctx context.Context, xs []policy.Execution) error 
 		}
 		batch.Queue(`
 			INSERT INTO policy_execution
-				(id, policy_id, event_id, event, status, retry_count, next_attempt_at, created_at)
-			VALUES ($1,$2,$3,$4,$5,0,$6,now())
+				(id, policy_id, event_id, event, status, retry_count, next_attempt_at, created_at,
+				 run_id, step_index, gate)
+			VALUES ($1,$2,$3,$4,$5,0,$6,now(),$7,$8,$9)
 			ON CONFLICT (id) DO NOTHING`,
-			x.ID, x.PolicyID, x.Event.EventID, ev, string(x.Status), x.NextAttemptAt)
+			x.ID, x.PolicyID, x.Event.EventID, ev, string(x.Status), x.NextAttemptAt,
+			nullString(x.RunID), x.StepIndex, string(x.Gate))
 	}
 	br := s.pool.SendBatch(ctx, batch)
 	defer func() { _ = br.Close() }()
@@ -292,8 +305,8 @@ func (s *PolicyStore) SetPolicyCursor(ctx context.Context, chainID string, seq i
 
 func scanPolicy(sc rowScanner) (policy.Policy, error) {
 	var p policy.Policy
-	var cond, cfg []byte
-	if err := sc.Scan(&p.ID, &p.Name, &p.Enabled, &cond, &p.Action.Type, &cfg, &p.MaxRetries,
+	var cond, cfg, steps []byte
+	if err := sc.Scan(&p.ID, &p.Name, &p.Enabled, &cond, &p.Action.Type, &cfg, &steps, &p.MaxRetries,
 		&p.CreatedAt, &p.UpdatedAt, &p.TenantID); err != nil {
 		return policy.Policy{}, err
 	}
@@ -303,6 +316,11 @@ func scanPolicy(sc rowScanner) (policy.Policy, error) {
 		}
 	}
 	p.Action.Config = json.RawMessage(cfg)
+	if len(steps) > 0 {
+		if err := json.Unmarshal(steps, &p.Steps); err != nil {
+			return policy.Policy{}, fmt.Errorf("unmarshal steps: %w", err)
+		}
+	}
 	return p, nil
 }
 
@@ -320,14 +338,19 @@ func scanExecutions(rows pgx.Rows) ([]policy.Execution, error) {
 
 func scanExecution(sc rowScanner) (policy.Execution, error) {
 	var x policy.Execution
-	var status string
+	var status, gate string
 	var ev []byte
 	var started, ended, claimedAt *time.Time
+	var runID *string
 	if err := sc.Scan(&x.ID, &x.PolicyID, new(string), &ev, &status, &x.RetryCount, &x.Error,
-		&started, &ended, &x.NextAttemptAt, &x.CreatedAt, &claimedAt); err != nil {
+		&started, &ended, &x.NextAttemptAt, &x.CreatedAt, &claimedAt, &runID, &x.StepIndex, &gate); err != nil {
 		return policy.Execution{}, err
 	}
 	x.Status = policy.ExecutionStatus(status)
+	x.Gate = policy.GateState(gate)
+	if runID != nil {
+		x.RunID = *runID
+	}
 	if len(ev) > 0 {
 		if err := json.Unmarshal(ev, &x.Event); err != nil {
 			return policy.Execution{}, fmt.Errorf("unmarshal event: %w", err)
@@ -350,4 +373,41 @@ func actionConfig(c json.RawMessage) []byte {
 		return []byte("{}")
 	}
 	return c
+}
+
+// sequenceJSON marshals a composed Sequence, defaulting to an empty JSON
+// array so a Policy with no Steps (the overwhelming majority, today all of
+// them) stores the same "[]" a fresh policy table row already defaults to.
+func sequenceJSON(seq policy.Sequence) ([]byte, error) {
+	if len(seq) == 0 {
+		return []byte("[]"), nil
+	}
+	b, err := json.Marshal(seq)
+	if err != nil {
+		return nil, fmt.Errorf("marshal steps: %w", err)
+	}
+	return b, nil
+}
+
+// nullString maps an empty Go string to SQL NULL, so an unused nullable
+// column (run_id, for an execution outside any composed run) stores NULL
+// rather than an empty string two different unrelated rows could collide on.
+func nullString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// ListByRun returns every Execution sharing runID, ordered by StepIndex — the
+// persistence side of policy.RunProgress (ADR-POLICY-001).
+func (s *PolicyStore) ListByRun(ctx context.Context, runID string) ([]policy.Execution, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+execCols+` FROM policy_execution
+		 WHERE run_id=$1 ORDER BY step_index`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list run executions: %w", err)
+	}
+	defer rows.Close()
+	return scanExecutions(rows)
 }
