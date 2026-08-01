@@ -87,6 +87,11 @@ var keyScopeJustifications = map[string]string{
 	// already contains tenant_id and needs no justification here; only the
 	// surrogate PK does.
 	"approval_record.approval_record_pkey": "approval_id is platform-generated (a ULID via domain.NewApprovalRecord); clients never supply it and there is no create route that accepts one",
+
+	// CMDB Asset/Configuration Item graph (ADR-ASSET-001).
+	"asset.asset_pkey":                           "asset_id is platform-generated (domain.NewAsset); clients never supply it and there is no create route that accepts one",
+	"asset_relationship.asset_relationship_pkey": "relationship_id is platform-generated (domain.NewAssetRelationship); clients never supply it and there is no create route that accepts one",
+	"asset_relationship.uq_asset_relationship":   "keyed by from_asset_id/to_asset_id, both platform-generated asset_ids that AssetStore.CreateRelationship confirms belong to the caller's tenant before insert (ADR-ASSET-001 §6), plus a closed relationship type",
 }
 
 func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {

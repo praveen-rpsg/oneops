@@ -87,6 +87,15 @@ type Server struct {
 	// above, so nothing here needs an exemption from row-level security.
 	teams domain.TeamRepository
 
+	// CMDB Asset registry; nil until SetAssets. asset/asset_relationship are
+	// TENANT-OWNED, like team above. assetGraph is a second graph.Service —
+	// distinct from the M2.3 one above, which walks configuration_object's
+	// dependency_edge — traversing asset_relationship instead, over the same
+	// domain.GraphTraversal interface (ADR-ASSET-001 §4).
+	assets         domain.AssetRepository
+	assetGraph     *graph.Service
+	assetGraphRepo domain.GraphTraversal
+
 	// Notification registry (read-only); nil until SetNotifications.
 	// notification is TENANT-OWNED, like team above, so nothing here needs an
 	// exemption from row-level security.
@@ -130,6 +139,14 @@ func (s *Server) SetGovernance(e governanceExecutor) {
 func (s *Server) SetGraph(gt domain.GraphTraversal) {
 	s.graphRepo = gt
 	s.graph = graph.NewService(gt)
+}
+
+// SetAssetGraph wires the CMDB relationship-graph traversal layer. It is
+// additive: the registry endpoints operate without it. Mirrors SetGraph
+// exactly, over asset_relationship instead of dependency_edge.
+func (s *Server) SetAssetGraph(gt domain.GraphTraversal) {
+	s.assetGraphRepo = gt
+	s.assetGraph = graph.NewService(gt)
 }
 
 // SetDiagnostics wires the read-only operational diagnostics handler. It is
@@ -342,6 +359,23 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/teams/{id}/members", s.listTeamMembers)
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/teams/{id}/members", s.addTeamMember)
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/teams/{id}/members/{userId}", s.removeTeamMember)
+
+		// CMDB Asset administration. asset/asset_relationship are TENANT-OWNED,
+		// exactly like team above, so the permission tier is tenant
+		// administration, not requirePlatformAdmin. The relationship routes are
+		// a static collection (/admin/assets/relationships) mounted alongside
+		// the per-asset routes, the same shape webhooks' deadletters collection
+		// uses next to /admin/webhooks/{id}.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets", s.listAssets)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/assets", s.createAsset)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/assets/relationships", s.createAssetRelationship)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/assets/relationships/{id}", s.deleteAssetRelationship)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/{id}", s.getAsset)
+		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/assets/{id}", s.patchAsset)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/assets/{id}", s.deleteAsset)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/{id}/relationships", s.listAssetRelationships)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/{id}/dependencies", s.getAssetDependencies)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/{id}/dependents", s.getAssetDependents)
 
 		// Notification administration (read-only). notification is TENANT-OWNED,
 		// exactly like team above, so the permission tier is tenant
