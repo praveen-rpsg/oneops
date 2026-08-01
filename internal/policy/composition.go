@@ -24,6 +24,17 @@ type GateSpec struct {
 	Config json.RawMessage `json:"config,omitempty"`
 }
 
+// GateTypeApproval is the one gate evaluator this platform implements today
+// (ADR-POLICY-002): it consults the SAME multi-approver quorum §8 Approval
+// already enforces (ADR-GOV-005) — the run's own triggering Event.CfgID is
+// the governance object whose distinct-approval count is checked, and the
+// tenant's governance_required_approvals Setting is the threshold. No
+// per-gate Config is needed or read for this type; the subject is the run
+// itself, not a value an operator names when composing the Policy. Other
+// Decision types (a re-evaluated Condition, a timer) are deferred — an
+// unrecognised Type is left pending, never guessed at (see reconciler.go).
+const GateTypeApproval = "approval"
+
 // Validate reports whether the gate names an evaluator.
 func (g GateSpec) Validate() error {
 	if g.Type == "" {

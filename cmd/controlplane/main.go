@@ -437,6 +437,13 @@ func run(logger *slog.Logger) error {
 	// mid-flight crash. Same pool as the consumer/executor above (every
 	// tenant's runs), same leader gate below (exactly one sweeper).
 	policyReconciler := policy.NewReconciler(policyStore, policyStore, logger, policy.ReconcilerConfig{})
+	// Gate evaluation (W3, ADR-POLICY-002): the same sweep resolves a run's
+	// paused "approval" gates before re-deriving stalled runs, so a gate this
+	// pass flips to passed is picked up by the very same pass's stalled-run
+	// scan. Built over the admin pool (every tenant, no RLS binding), the same
+	// posture policyStore itself has here — tenant scoping is explicit in
+	// every query, never implicit (ADR-TENANCY-003).
+	policyReconciler.SetApprovalGate(postgres.NewApprovalGateStore(pool))
 	workers = append(workers, policyConsumer.Run, policyExecutor.Run, policyReconciler.Run)
 	srv.SetPolicies(policyAdminStore, func(ctx context.Context, p policy.Policy) (policy.ExecutionStatus, error) {
 		ex := policy.Execution{

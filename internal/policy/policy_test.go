@@ -43,6 +43,66 @@ func (f *fakePolicyOwners) ResolveEventOwner(_ context.Context, chainID string, 
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// fakeApprovalGate is a stand-in ApprovalGate: an in-memory distinct-approver
+// set per (tenantID, governanceID) and a per-tenant required-approvals
+// threshold (defaulting to 1, matching domain.EffectiveRequiredApprovals'
+// own default). A test records approvals with approve(); nothing else in
+// this package may ever add one, mirroring the real ApprovalGateStore's
+// read-only contract.
+type fakeApprovalGate struct {
+	mu         sync.Mutex
+	approvers  map[string]map[string]bool // "tenant/governance" -> set of approver ids
+	required   map[string]int             // tenant -> required approvals (0 = use default 1)
+	countErr   error
+	requireErr error
+}
+
+func newFakeApprovalGate() *fakeApprovalGate {
+	return &fakeApprovalGate{approvers: map[string]map[string]bool{}, required: map[string]int{}}
+}
+
+func approvalKey(tenantID, governanceID string) string { return tenantID + "/" + governanceID }
+
+// approve records one distinct approver's vote, mirroring approval_record's
+// UNIQUE (tenant_id, governance_id, approver_user_id): a repeat approver is
+// a no-op, never a second vote.
+func (f *fakeApprovalGate) approve(tenantID, governanceID, approver string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := approvalKey(tenantID, governanceID)
+	if f.approvers[k] == nil {
+		f.approvers[k] = map[string]bool{}
+	}
+	f.approvers[k][approver] = true
+}
+
+func (f *fakeApprovalGate) setRequired(tenantID string, n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.required[tenantID] = n
+}
+
+func (f *fakeApprovalGate) CountDistinct(_ context.Context, tenantID, governanceID string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.countErr != nil {
+		return 0, f.countErr
+	}
+	return len(f.approvers[approvalKey(tenantID, governanceID)]), nil
+}
+
+func (f *fakeApprovalGate) RequiredApprovals(_ context.Context, tenantID string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.requireErr != nil {
+		return 0, f.requireErr
+	}
+	if n, ok := f.required[tenantID]; ok && n > 0 {
+		return n, nil
+	}
+	return 1, nil
+}
+
 // ---- fakes ------------------------------------------------------------------
 
 type fakeSource struct {
@@ -251,6 +311,24 @@ func (f *fakeExecs) SetGate(_ context.Context, id string, gate GateState) error 
 	x.Gate = gate
 	f.m[id] = x
 	return nil
+}
+
+// ListPendingGates mirrors the real store's predicate (postgres.PolicyStore):
+// a succeeded step whose Gate is GatePending.
+func (f *fakeExecs) ListPendingGates(_ context.Context, limit int) ([]Execution, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []Execution
+	for _, x := range f.m {
+		if x.Status == ExecSucceeded && x.Gate == GatePending {
+			out = append(out, x)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 // ListStalledRuns mirrors the real store's predicate (postgres.PolicyStore):

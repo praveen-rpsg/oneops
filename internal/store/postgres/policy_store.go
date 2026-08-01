@@ -438,7 +438,7 @@ func (s *PolicyStore) ListByRun(ctx context.Context, runID string) ([]policy.Exe
 // The NOT EXISTS successor lookup is an equality match on run_id, served by
 // ix_policy_execution_run; step_index is then filtered over the handful of rows
 // one run ever has. The outer candidate relation, however, is scanned and
-// filtered (`run_id IS NOT NULL AND status='succeeded' AND gate IN ('','passed')`)
+// filtered (run_id IS NOT NULL AND status = succeeded AND gate is none or passed)
 // — no index covers that composite predicate, so on a table dominated by
 // single-action rows the planner may seq-scan it. Acceptable and no new index
 // needed because the sweep is periodic (~30s) and LIMIT-bounded; if the
@@ -478,4 +478,24 @@ func (s *PolicyStore) ListStalledRuns(ctx context.Context, limit int) ([]string,
 		out = append(out, runID)
 	}
 	return out, rows.Err()
+}
+
+// ListPendingGates returns the Executions currently paused at an unresolved
+// Decision gate (ADR-POLICY-002) — a succeeded step whose gate column is
+// 'pending' — ordered by created_at so a test (and an operator) sees a
+// deterministic sequence when several runs are paused at once. Unindexed
+// beyond ix_policy_execution's existing (status) shape for the same reason
+// ListStalledRuns' composite predicate is: paused-gate rows are a small
+// fraction of the table and this sweep is periodic and LIMIT-bounded.
+func (s *PolicyStore) ListPendingGates(ctx context.Context, limit int) ([]policy.Execution, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+execCols+` FROM policy_execution
+		 WHERE run_id IS NOT NULL AND status = 'succeeded' AND gate = 'pending'
+		 ORDER BY created_at
+		 LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list pending gates: %w", err)
+	}
+	defer rows.Close()
+	return scanExecutions(rows)
 }

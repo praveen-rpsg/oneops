@@ -223,12 +223,15 @@ audit events, applied to a run's own Executions instead of the audit log.
   `domain.ResolveAndAuthorize` per step exactly as it does today per
   single-action execution (ADR-TENANCY-003 is unaffected — each step's
   Event ownership is still re-derived, never trusted from the queued row).
-- **W3:** Gate evaluators. `"approval"` consults `governance.ApprovalRecorder`
-  (ADR-GOV-005); a plain `"condition"` gate re-evaluates a `Condition` against
-  current state. A gate evaluator flips `Execution.Gate` from `GatePending`
-  to `GatePassed` (or leaves it pending) — it never itself enqueues the next
-  step; that stays the executor's job (W2), keeping "evaluate a gate" and
-  "advance a sequence" as one responsibility each.
+- **W3 (delivered — see ADR-POLICY-002):** Gate evaluators. `"approval"`
+  consults the same multi-approver quorum ADR-GOV-005 built for §8 Approval,
+  keyed on the run's own triggering Event as the governance subject; a plain
+  `"condition"` gate re-evaluating a `Condition` against current state
+  remains undelivered. The evaluator flips `Execution.Gate` from
+  `GatePending` to `GatePassed` (or leaves it pending) — it never itself
+  enqueues the next step; that stays the reconciler/executor's job (W2),
+  keeping "evaluate a gate" and "advance a sequence" as one responsibility
+  each, composed through the row they both read.
 - **W4:** HTTP: define a Policy with `Steps`, start/observe a run (`GET
   .../runs/{run_id}` returning `RunProgress`-shaped JSON), following the
   same DTO-translation shape `handlers_policies.go` already uses for the

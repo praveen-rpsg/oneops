@@ -50,6 +50,11 @@ type Reconciler struct {
 	log      *slog.Logger
 	now      func() time.Time
 	cfg      ReconcilerConfig
+	// approvals is the optional Decision-gate evaluator. When set, RunOnce
+	// resolves pending "approval" gates (ADR-POLICY-002) before its stalled-run
+	// scan; when nil, gate evaluation is skipped entirely and the Reconciler is
+	// exactly the W2b durability sweep.
+	approvals ApprovalGate
 }
 
 // NewReconciler builds the sweep. execs and policies are required.
@@ -63,6 +68,10 @@ func NewReconciler(execs ExecutionStore, policies Store, log *slog.Logger, cfg R
 		now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
 	}
 }
+
+// SetApprovalGate wires the approval-quorum evaluator (ADR-POLICY-002). Without
+// it, RunOnce performs only stalled-run reconciliation and no gate ever resolves.
+func (r *Reconciler) SetApprovalGate(a ApprovalGate) { r.approvals = a }
 
 // Run sweeps on Interval until ctx is cancelled.
 func (r *Reconciler) Run(ctx context.Context) error {
@@ -87,6 +96,12 @@ func (r *Reconciler) Run(ctx context.Context) error {
 // sweep) is simply a no-op here — advanceRunSteps recomputes the cursor
 // fresh and finds nothing left to do.
 func (r *Reconciler) RunOnce(ctx context.Context) {
+	// Phase 1: resolve any Decision gates whose quorum now holds. A gate that
+	// flips GatePending->GatePassed here makes its run match the stalled-run
+	// scan below, so resolution and advancement compose through the row in the
+	// same pass — never through a direct call.
+	r.evaluateGates(ctx)
+
 	runIDs, err := r.execs.ListStalledRuns(ctx, r.cfg.BatchLimit)
 	if err != nil {
 		r.log.Error("policy reconciler: list stalled runs", "err", err)
@@ -119,4 +134,86 @@ func (r *Reconciler) reconcileRun(ctx context.Context, runID string) {
 		return
 	}
 	advanceRunSteps(ctx, r.execs, r.log, r.now, p, runID, steps)
+}
+
+// evaluateGates resolves steps paused at a pending Decision gate. It is a no-op
+// unless an ApprovalGate has been wired. Every failure mode leaves the gate
+// PENDING — the only way past a gate is a genuinely satisfied Decision, so a
+// missing subject, an unreadable count, or an unrecognised gate type must never
+// advance the run (a gate that opens without its Decision is an approval bypass).
+func (r *Reconciler) evaluateGates(ctx context.Context) {
+	if r.approvals == nil {
+		return
+	}
+	gates, err := r.execs.ListPendingGates(ctx, r.cfg.BatchLimit)
+	if err != nil {
+		r.log.Error("policy reconciler: list pending gates", "err", err)
+		return
+	}
+	for i := range gates {
+		if ctx.Err() != nil {
+			return
+		}
+		r.evaluateGate(ctx, gates[i])
+	}
+}
+
+// evaluateGate dispatches on the gate's declared type, resolved from the owning
+// Policy (never trusted from the Execution row, which records only the gate's
+// state, not its spec). An unrecognised type is left pending and logged — never
+// guessed at.
+func (r *Reconciler) evaluateGate(ctx context.Context, ex Execution) {
+	p, err := r.policies.Get(ctx, ex.PolicyID)
+	if err != nil {
+		r.log.Error("policy reconciler: get policy for gate", "run_id", ex.RunID, "policy_id", ex.PolicyID, "err", err)
+		return
+	}
+	if ex.StepIndex < 0 || ex.StepIndex >= len(p.Steps) {
+		r.log.Warn("policy reconciler: gate step out of range", "run_id", ex.RunID, "step_index", ex.StepIndex)
+		return
+	}
+	gate := p.Steps[ex.StepIndex].Gate
+	if gate == nil {
+		// The row says pending but the current Sequence has no gate here
+		// (policy edited mid-run); leave it — advancement will reconcile.
+		return
+	}
+	switch gate.Type {
+	case GateTypeApproval:
+		r.evaluateApprovalGate(ctx, ex)
+	default:
+		r.log.Warn("policy reconciler: unrecognised gate type, leaving pending",
+			"run_id", ex.RunID, "gate_type", gate.Type)
+	}
+}
+
+// evaluateApprovalGate flips the gate to GatePassed only when the run's own
+// triggering subject (Event.CfgID, the governance object this run is about) has
+// at least the tenant's required distinct approvals (ADR-GOV-005). It reuses the
+// exact quorum data Approval owns; it never counts quorum itself. An empty
+// subject, or any read error, leaves the gate pending.
+func (r *Reconciler) evaluateApprovalGate(ctx context.Context, ex Execution) {
+	tenantID := ex.Event.TenantID
+	governanceID := ex.Event.CfgID
+	if governanceID == "" {
+		// A run not triggered by an approvable object can never satisfy an
+		// approval gate — fail-safe, it simply stays paused.
+		return
+	}
+	required, err := r.approvals.RequiredApprovals(ctx, tenantID)
+	if err != nil {
+		r.log.Error("policy reconciler: read required approvals", "run_id", ex.RunID, "err", err)
+		return
+	}
+	count, err := r.approvals.CountDistinct(ctx, tenantID, governanceID)
+	if err != nil {
+		r.log.Error("policy reconciler: count approvals", "run_id", ex.RunID, "err", err)
+		return
+	}
+	if count < required {
+		return // below quorum — leave pending
+	}
+	if err := r.execs.SetGate(ctx, ex.ID, GatePassed); err != nil {
+		r.log.Error("policy reconciler: set gate passed", "run_id", ex.RunID, "err", err)
+	}
 }

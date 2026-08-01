@@ -66,4 +66,33 @@ type ExecutionStore interface {
 	// execution's run (run_id is NULL for those) or a run parked on a
 	// pending gate.
 	ListStalledRuns(ctx context.Context, limit int) ([]string, error)
+	// ListPendingGates returns the Executions currently paused at an
+	// unresolved Decision gate — a succeeded step whose Gate is GatePending
+	// — the read side of gate EVALUATION (ADR-POLICY-002), exactly as
+	// ListStalledRuns is the read side of run advancement. At most one such
+	// row exists per run at a time: only the frontier step is ever set to
+	// GatePending.
+	ListPendingGates(ctx context.Context, limit int) ([]Execution, error)
+}
+
+// ApprovalGate is the read-only quorum check an "approval" Gate consults
+// (ADR-POLICY-002): how many distinct approvers have recorded an approval of
+// the governance object that triggered the composed run (the run's own
+// Event.CfgID), and how many the tenant's governance_required_approvals
+// Setting currently requires (ADR-GOV-005). It reads exactly the data the
+// Governance Engine's own ApprovalRecorder/EffectiveRequiredApprovals
+// already decide Approval on — this is a second, read-only caller of that
+// data, never a second quorum implementation.
+//
+// The gate evaluator (reconciler.go) runs on the same admin/background pool
+// PolicyStore's own background instance uses (main.go) — every tenant's
+// runs, not one request's bound connection — so tenantID is an explicit
+// argument on every call rather than relied on from RLS (ADR-TENANCY-003).
+type ApprovalGate interface {
+	// CountDistinct returns the number of distinct approvers recorded for
+	// (tenantID, governanceID).
+	CountDistinct(ctx context.Context, tenantID, governanceID string) (int, error)
+	// RequiredApprovals returns tenantID's configured Approval quorum
+	// threshold, falling back to the Setting's own default when unset.
+	RequiredApprovals(ctx context.Context, tenantID string) (int, error)
 }
