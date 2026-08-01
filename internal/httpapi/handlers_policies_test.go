@@ -20,10 +20,11 @@ type fakePolicyReg struct {
 	mu    sync.Mutex
 	m     map[string]policy.Policy
 	execs map[string][]policy.Execution
+	runs  map[string][]policy.Execution
 }
 
 func newFakePolicyReg() *fakePolicyReg {
-	return &fakePolicyReg{m: map[string]policy.Policy{}, execs: map[string][]policy.Execution{}}
+	return &fakePolicyReg{m: map[string]policy.Policy{}, execs: map[string][]policy.Execution{}, runs: map[string][]policy.Execution{}}
 }
 func (f *fakePolicyReg) Create(_ context.Context, p policy.Policy) error {
 	f.mu.Lock()
@@ -71,6 +72,11 @@ func (f *fakePolicyReg) ListByPolicy(_ context.Context, id string, _ int) ([]pol
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.execs[id], nil
+}
+func (f *fakePolicyReg) ListByRun(_ context.Context, runID string) ([]policy.Execution, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.runs[runID], nil
 }
 
 func newPolicyAPI(t *testing.T, wire bool) (http.Handler, *fakePolicyReg) {
@@ -180,5 +186,179 @@ func TestPolicyUnwiredReturns500(t *testing.T) {
 	h, _ := newPolicyAPI(t, false)
 	if rec := do(h, http.MethodGet, "/v1/admin/policies", nil, nil); rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+}
+
+// TestPolicyCompositionRoundTrip defines a 3-step Sequence (one gated) via
+// the API and confirms a GET of the same policy (via the list endpoint,
+// since there is no single-get route) returns the Steps intact —
+// ADR-POLICY-001's "Steps is additive" DTO round-trip.
+func TestPolicyCompositionRoundTrip(t *testing.T) {
+	h, reg := newPolicyAPI(t, true)
+
+	body := map[string]any{
+		"name": "onboard-then-approve-then-provision",
+		"steps": []map[string]any{
+			{"action": map[string]any{"type": "notification"}},
+			{
+				"action": map[string]any{"type": "http", "config": map[string]any{"url": "https://example.test"}},
+				"gate":   map[string]any{"type": "approval"},
+			},
+			{"action": map[string]any{"type": "command"}},
+		},
+	}
+	rec := do(h, http.MethodPost, "/v1/admin/policies", body, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var created policyDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(created.Steps) != 3 {
+		t.Fatalf("created steps = %+v, want 3", created.Steps)
+	}
+	if created.Steps[1].Gate == nil || created.Steps[1].Gate.Type != "approval" {
+		t.Fatalf("step 1 gate = %+v, want approval", created.Steps[1].Gate)
+	}
+	if created.Steps[0].Gate != nil || created.Steps[2].Gate != nil {
+		t.Fatalf("ungated steps must not gain a gate: %+v", created.Steps)
+	}
+	if created.Action.Type != "" {
+		t.Fatalf("composed-only policy must not synthesize a single Action: %+v", created.Action)
+	}
+
+	// The domain object stored behind the registry carries the same Sequence
+	// (the store, not just the DTO round-trip, is what a real read reflects).
+	stored, err := reg.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(stored.Steps) != 3 || stored.Steps[1].Gate == nil || stored.Steps[1].Gate.Type != "approval" {
+		t.Fatalf("stored steps = %+v", stored.Steps)
+	}
+
+	// List reflects the same Steps.
+	l := do(h, http.MethodGet, "/v1/admin/policies", nil, nil)
+	var list struct {
+		Items []policyDTO `json:"items"`
+	}
+	_ = json.Unmarshal(l.Body.Bytes(), &list)
+	if len(list.Items) != 1 || len(list.Items[0].Steps) != 3 {
+		t.Fatalf("list steps = %+v", list.Items)
+	}
+
+	// Patch can replace Steps too.
+	patchBody := map[string]any{
+		"steps": []map[string]any{
+			{"action": map[string]any{"type": "notification"}},
+		},
+	}
+	p := do(h, http.MethodPatch, "/v1/admin/policies/"+created.ID, patchBody, nil)
+	var patched policyDTO
+	_ = json.Unmarshal(p.Body.Bytes(), &patched)
+	if len(patched.Steps) != 1 {
+		t.Fatalf("patched steps = %+v, want 1", patched.Steps)
+	}
+}
+
+// TestPolicyCompositionRejectsBadStep proves a malformed step (missing
+// action.type) and a malformed gate (missing gate.type) are both rejected by
+// the domain Validate() this handler wires in — a dropped/garbled gate must
+// never round-trip as silently accepted.
+func TestPolicyCompositionRejectsBadStep(t *testing.T) {
+	h, _ := newPolicyAPI(t, true)
+
+	badAction := map[string]any{
+		"name":  "bad-action",
+		"steps": []map[string]any{{"action": map[string]any{"type": ""}}},
+	}
+	if rec := do(h, http.MethodPost, "/v1/admin/policies", badAction, nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad action step: status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+
+	badGate := map[string]any{
+		"name": "bad-gate",
+		"steps": []map[string]any{
+			{"action": map[string]any{"type": "notification"}, "gate": map[string]any{"type": ""}},
+		},
+	}
+	if rec := do(h, http.MethodPost, "/v1/admin/policies", badGate, nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad gate: status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPolicyRun proves the run-inspection endpoint reflects step statuses,
+// gate state and progress, both mid-run (paused at a gate) and complete.
+func TestPolicyRun(t *testing.T) {
+	h, reg := newPolicyAPI(t, true)
+
+	p := policy.Policy{
+		ID: "pol_run", Name: "gated", Enabled: true, MaxRetries: 3,
+		Steps: policy.Sequence{
+			{Action: policy.ActionSpec{Type: "notification"}},
+			{Action: policy.ActionSpec{Type: "http"}, Gate: &policy.GateSpec{Type: policy.GateTypeApproval}},
+			{Action: policy.ActionSpec{Type: "command"}},
+		},
+	}
+	if err := reg.Create(context.Background(), p); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	reg.runs["run_1"] = []policy.Execution{
+		{ID: "ex_0", PolicyID: "pol_run", RunID: "run_1", StepIndex: 0, Status: policy.ExecSucceeded},
+		{ID: "ex_1", PolicyID: "pol_run", RunID: "run_1", StepIndex: 1, Status: policy.ExecSucceeded, Gate: policy.GatePending},
+	}
+
+	rec := do(h, http.MethodGet, "/v1/admin/policies/pol_run/runs/run_1", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var run policyRunDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &run); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if run.RunID != "run_1" || run.PolicyID != "pol_run" {
+		t.Fatalf("run = %+v", run)
+	}
+	if len(run.Steps) != 3 {
+		t.Fatalf("steps = %+v, want 3", run.Steps)
+	}
+	if run.Steps[0].Status != "succeeded" || run.Steps[0].Gate != "none" {
+		t.Fatalf("step 0 = %+v", run.Steps[0])
+	}
+	if run.Steps[1].Status != "succeeded" || run.Steps[1].Gate != "pending" {
+		t.Fatalf("step 1 = %+v", run.Steps[1])
+	}
+	if run.Steps[2].Status != "pending" || run.Steps[2].Gate != "none" || run.Steps[2].ExecutionID != "" {
+		t.Fatalf("step 2 (never enqueued) = %+v", run.Steps[2])
+	}
+	if run.CurrentStep != 1 {
+		t.Fatalf("current_step = %d, want 1 (paused at the gate)", run.CurrentStep)
+	}
+	if run.Complete {
+		t.Fatal("run must not be complete while paused at a gate")
+	}
+	if !run.PausedAtGate {
+		t.Fatal("run must report paused_at_gate")
+	}
+
+	// Resolve the gate and complete the run.
+	reg.runs["run_1"] = []policy.Execution{
+		reg.runs["run_1"][0],
+		{ID: "ex_1", PolicyID: "pol_run", RunID: "run_1", StepIndex: 1, Status: policy.ExecSucceeded, Gate: policy.GatePassed},
+		{ID: "ex_2", PolicyID: "pol_run", RunID: "run_1", StepIndex: 2, Status: policy.ExecSucceeded},
+	}
+	rec = do(h, http.MethodGet, "/v1/admin/policies/pol_run/runs/run_1", nil, nil)
+	_ = json.Unmarshal(rec.Body.Bytes(), &run)
+	if !run.Complete || run.PausedAtGate {
+		t.Fatalf("run = %+v, want complete and not paused", run)
+	}
+	if run.CurrentStep != 3 {
+		t.Fatalf("current_step = %d, want 3 (len(steps))", run.CurrentStep)
+	}
+
+	// Unknown run: 404.
+	if rec := do(h, http.MethodGet, "/v1/admin/policies/pol_run/runs/no-such-run", nil, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }

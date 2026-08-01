@@ -387,6 +387,9 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/policies/{id}", s.deletePolicy)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/policies/{id}/executions", s.listPolicyExecutions)
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/policies/{id}/test", s.testPolicy)
+		// Composed run inspection (ADR-POLICY-001 W4): a run's progress is a pure
+		// projection over its Executions, never a stored entity.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/policies/{id}/runs/{runId}", s.getPolicyRun)
 
 		// Execution timeline — read-only operational read model over existing data.
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/timeline/{eventID}", s.getEventTimeline)
