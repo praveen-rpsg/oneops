@@ -53,4 +53,17 @@ type ExecutionStore interface {
 	// claim/retry lifecycle, and by the time it is called the step's own
 	// outcome is already durably recorded as succeeded.
 	SetGate(ctx context.Context, id string, gate GateState) error
+	// ListStalledRuns returns the ids of composed runs whose frontier step
+	// succeeded with a resolved gate (none, or passed) but whose immediate
+	// successor step has no Execution row at all — the permanent-stall gap a
+	// worker crash between MarkResult(succeeded) and Enqueue(next step)
+	// leaves behind, since ClaimDue only ever reselects pending/failed/
+	// stuck-running rows, never a succeeded one. It over-includes a run whose
+	// frontier is genuinely its LAST step (nothing left to enqueue): that is
+	// harmless, because the caller (Reconciler) re-derives the run's real
+	// cursor via RunProgress before acting, and a run RunProgress already
+	// reports Complete is always a no-op. Never returns a single-action
+	// execution's run (run_id is NULL for those) or a run parked on a
+	// pending gate.
+	ListStalledRuns(ctx context.Context, limit int) ([]string, error)
 }

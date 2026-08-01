@@ -252,6 +252,44 @@ func (f *fakeExecs) SetGate(_ context.Context, id string, gate GateState) error 
 	f.m[id] = x
 	return nil
 }
+
+// ListStalledRuns mirrors the real store's predicate (postgres.PolicyStore):
+// a run's frontier Execution succeeded with a resolved gate but has no row
+// at step_index+1. Sorted for deterministic test assertions (the real
+// store's DISTINCT carries no ordering guarantee either, and callers must
+// not depend on one).
+func (f *fakeExecs) ListStalledRuns(_ context.Context, limit int) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, x := range f.m {
+		if x.RunID == "" || x.Status != ExecSucceeded {
+			continue
+		}
+		if x.Gate != GateNone && x.Gate != GatePassed {
+			continue
+		}
+		hasSuccessor := false
+		for _, y := range f.m {
+			if y.RunID == x.RunID && y.StepIndex == x.StepIndex+1 {
+				hasSuccessor = true
+				break
+			}
+		}
+		if hasSuccessor || seen[x.RunID] {
+			continue
+		}
+		seen[x.RunID] = true
+		out = append(out, x.RunID)
+	}
+	sort.Strings(out)
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 func (f *fakeExecs) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

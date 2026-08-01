@@ -427,3 +427,55 @@ func (s *PolicyStore) ListByRun(ctx context.Context, runID string) ([]policy.Exe
 	defer rows.Close()
 	return scanExecutions(rows)
 }
+
+// ListStalledRuns finds composed runs permanently wedged by the gap
+// policy.Reconciler exists to close: a frontier Execution durably succeeded
+// with a resolved gate (none, or already passed) but its immediate
+// successor step (step_index+1) was never enqueued, because the worker that
+// recorded the success crashed before calling Enqueue. ClaimDue never
+// reselects a succeeded row, so nothing else re-discovers this.
+//
+// The NOT EXISTS successor lookup is an equality match on run_id, served by
+// ix_policy_execution_run; step_index is then filtered over the handful of rows
+// one run ever has. The outer candidate relation, however, is scanned and
+// filtered (`run_id IS NOT NULL AND status='succeeded' AND gate IN ('','passed')`)
+// — no index covers that composite predicate, so on a table dominated by
+// single-action rows the planner may seq-scan it. Acceptable and no new index
+// needed because the sweep is periodic (~30s) and LIMIT-bounded; if the
+// execution table grows large enough that this scan bites, add a partial index
+// on (status) WHERE run_id IS NOT NULL.
+//
+// This over-includes a run whose frontier is genuinely its LAST step (there
+// is no step_index+1 because the run is complete, not because one is
+// missing): that is intentional and harmless. The caller re-derives the
+// run's real cursor via policy.RunProgress before acting, and a run
+// RunProgress already reports Complete is always a no-op there — filtering
+// "is this run actually complete" here would require re-deriving the
+// Policy's Sequence length in SQL, duplicating logic RunProgress already
+// owns.
+func (s *PolicyStore) ListStalledRuns(ctx context.Context, limit int) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT e.run_id
+		  FROM policy_execution e
+		 WHERE e.run_id IS NOT NULL
+		   AND e.status = 'succeeded'
+		   AND e.gate IN ('', 'passed')
+		   AND NOT EXISTS (
+		         SELECT 1 FROM policy_execution nx
+		          WHERE nx.run_id = e.run_id AND nx.step_index = e.step_index + 1
+		       )
+		 LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list stalled runs: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var runID string
+		if err := rows.Scan(&runID); err != nil {
+			return nil, fmt.Errorf("scan stalled run: %w", err)
+		}
+		out = append(out, runID)
+	}
+	return out, rows.Err()
+}
