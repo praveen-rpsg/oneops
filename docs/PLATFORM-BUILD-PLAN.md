@@ -169,15 +169,15 @@ Signals about assets: metrics, logs, traces, synthetics. The scale extreme.
 - [ ] E3.3 Maintenance windows / blackout; dependency-aware suppression (suppress downstream when a root CI is down — uses the CMDB graph)
 - **Edge cases:** alert storms, self-referential suppression, rule changes mid-fire, per-tenant rule isolation.
 
-### E4 — Event Correlation & AIOps-lite  `[ ]`
-- [ ] E4.1 Correlate alerts/events into incidents (time + topology window via CMDB)
+### E4 — Event Correlation & AIOps-lite  `[~]`
+- [~] E4.1 Correlate an alert firing into an incident (E4.1a: create-or-link by affected CI — connects E3→E5; topology-window grouping via CMDB graph = E4.2). Includes building the tracked read-side privileged-SELECT arch guard (ADR-TENANCY-012) since correlation reads across the tenant's alerting+incident state on the leader pool.  ▶ CURRENT *(sequenced ahead of E5.2: makes the detect→incident pipeline AUTOMATIC — the core payoff — vs manual incident creation)*
 - [ ] E4.2 Noise reduction, grouping, root-cause candidate suggestion (heuristic first; ML later in E13)
 - **Edge cases:** correlation never crosses tenants; window tuning; late-arriving correlated signals.
 
 ### E5 — ITSM core: Incident / Problem / Change  `[ ]`
 Stateful work items on the workflow + state-machine primitives.
 - [x] E5.1 Incident lifecycle (manual now; alert/correlation→incident wires in at E4), assignment, append-only timeline *(sequenced ahead of E3.2/E4: after "notify", operators need to TRACK work — incidents are the NOC's operational heart; independent of alerting refinements)*
-- [ ] E5.2 On-call, scheduling & paging (rotations, escalation policies, notify via E-notification)  ▶ CURRENT
+- [ ] E5.2 On-call, scheduling & paging (rotations, escalation policies, notify via E-notification)
 - [ ] E5.3 SLA/SLO tracking on work items (business hours, pause-on-hold, breach escalation)
 - [ ] E5.4 Problem management (root cause, known errors) linked to incidents/CIs
 - [ ] E5.5 Change management (change request → CAB approval via approval quorum, change calendar, conflict/collision detection, risk)
