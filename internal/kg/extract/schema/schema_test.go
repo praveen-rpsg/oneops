@@ -51,7 +51,7 @@ func TestEveryTableIsANode(t *testing.T) {
 	// Named rather than derived: a second derivation sharing this one's regexes
 	// would agree with it about anything, including a mistake.
 	want := []string{
-		"admin_audit_chain_head", "admin_audit_event", "app_user", "approval_record", "artifact_version",
+		"admin_audit_chain_head", "admin_audit_event", "alert_rule", "app_user", "approval_record", "artifact_version",
 		"asset", "asset_change_history", "asset_relationship",
 		"audit_chain_head", "audit_event", "audit_event_default", "collector_check", "configuration_metadata",
 		"configuration_object", "dependency_edge", "idempotency_key", "invitation",
@@ -99,8 +99,8 @@ func TestCommentsDoNotDeclareObjects(t *testing.T) {
 func TestIndexOnClauseMaySpanLines(t *testing.T) {
 	nodes, edges := extract(t)
 	idx := byKind(nodes)[kindIndex]
-	if len(idx) != 69 {
-		t.Errorf("extracted %d indexes, want 69", len(idx))
+	if len(idx) != 72 {
+		t.Errorf("extracted %d indexes, want 72", len(idx))
 	}
 	// ix_webhook_delivery_due declares ON on a following line.
 	const want = "index:ix_webhook_delivery_due"
@@ -283,7 +283,7 @@ func TestCorpusCensus(t *testing.T) {
 		got[n.Kind]++
 	}
 	want := map[string]int{
-		kindTable: 33, kindColumn: 291, kindIndex: 69, kindConstraint: 88, kindTrigger: 6,
+		kindTable: 34, kindColumn: 305, kindIndex: 72, kindConstraint: 94, kindTrigger: 6,
 	}
 	for kind, w := range want {
 		if got[kind] != w {
@@ -400,18 +400,18 @@ func TestMultiLineAlterTableIsExtracted(t *testing.T) {
 		}
 	}
 
-	// Twenty-seven tables carry the discriminator (E2.1 added
+	// Twenty-eight tables carry the discriminator (E2.1 added
 	// telemetry_sample; E2.1b adds telemetry_rollup_5m; E2.2a adds
-	// collector_check). Anything less is a wrong answer to the question the
-	// graph exists to answer.
+	// collector_check; E3.1 adds alert_rule). Anything less is a wrong
+	// answer to the question the graph exists to answer.
 	scoped := 0
 	for _, n := range nodes {
 		if strings.HasSuffix(n.ID, ".tenant_id") && n.Kind == kindColumn {
 			scoped++
 		}
 	}
-	if scoped != 27 {
-		t.Errorf("%d tables carry tenant_id, want 27", scoped)
+	if scoped != 28 {
+		t.Errorf("%d tables carry tenant_id, want 28", scoped)
 	}
 
 	// A multi-line declaration must still be owned by its table.

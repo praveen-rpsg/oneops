@@ -44,4 +44,5 @@ var TenantOwnedTables = []string{
 	"telemetry_sample",
 	"telemetry_rollup_5m",
 	"collector_check",
+	"alert_rule",
 }

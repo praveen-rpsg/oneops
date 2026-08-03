@@ -196,6 +196,42 @@ func (s *TelemetryStore) QueryRange(
 	return out, nil
 }
 
+// QueryRangeForTenant is QueryRange's privileged-pool counterpart — see
+// domain.TelemetryRepository's doc comment for why an explicit tenant_id
+// predicate is required here and not merely relied on as an ambient
+// connection property. Raw samples only, ordered by ts ascending, bounded by
+// MaxTelemetryQueryLimit — the same "no unbounded query" rule QueryRange's
+// own LIMIT enforces.
+func (s *TelemetryStore) QueryRangeForTenant(
+	ctx context.Context, tenantID, assetID, metric string, from, to time.Time,
+) ([]domain.Sample, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT tenant_id, asset_id, metric, ts, value, labels
+		  FROM telemetry_sample
+		 WHERE tenant_id = $1 AND asset_id = $2 AND metric = $3
+		   AND ts >= $4 AND ts <= $5
+		 ORDER BY ts
+		 LIMIT $6`,
+		tenantID, assetID, metric, from, to, domain.MaxTelemetryQueryLimit)
+	if err != nil {
+		return nil, fmt.Errorf("query telemetry range for tenant: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]domain.Sample, 0, 16)
+	for rows.Next() {
+		sm, err := scanSample(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan telemetry sample: %w", err)
+		}
+		out = append(out, sm)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate telemetry samples: %w", err)
+	}
+	return out, nil
+}
+
 // resolveTelemetryResolution turns the caller's requested resolution into the
 // concrete one this query will actually run, and is where
 // domain.MaxRawQueryWindow is enforced (E2.1b).

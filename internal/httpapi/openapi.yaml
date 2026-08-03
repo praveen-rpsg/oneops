@@ -1796,6 +1796,103 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/alert-rules:
+    get:
+      summary: List the caller's tenant's alert rules (E3.1)
+      operationId: listAlertRules
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last rule_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of alert rules
+          content: { application/json: { schema: { $ref: '#/components/schemas/AlertRuleList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Register a threshold alert rule over one asset's one metric (E3.1)
+      description: >-
+        asset_id must already name a Configuration Item visible to the
+        caller's tenant, re-verified server-side before the row is written
+        (ADR-ASSET-001 §6, extended here) — a cross-tenant or nonexistent
+        asset_id is rejected with 404. A firing is DERIVED by the leader-gated
+        evaluator against telemetry, never stored here as a reified
+        Alert/Event/Signal.
+      operationId: createAlertRule
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAlertRuleRequest' }
+      responses:
+        '201':
+          description: The created alert rule
+          content: { application/json: { schema: { $ref: '#/components/schemas/AlertRule' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/alert-rules/{id}:
+    get:
+      summary: Get one alert rule by identifier
+      operationId: getAlertRule
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The alert rule
+          content: { application/json: { schema: { $ref: '#/components/schemas/AlertRule' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Change one or more fields of an alert rule
+      operationId: patchAlertRule
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchAlertRuleRequest' }
+      responses:
+        '200':
+          description: The updated alert rule
+          content: { application/json: { schema: { $ref: '#/components/schemas/AlertRule' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    delete:
+      summary: Remove an alert rule
+      operationId: deleteAlertRule
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/notifications:
     get:
       summary: List the caller's tenant's notifications
@@ -2935,6 +3032,71 @@ components:
         interval_seconds: { type: integer, minimum: 30, maximum: 2592000 }
         enabled: { type: boolean }
         metric_prefix: { type: string, maxLength: 80 }
+    AlertRule:
+      type: object
+      description: >-
+        A threshold config over one asset's one metric (E3.1). A firing is
+        DERIVED by the leader-gated evaluator against telemetry_sample and
+        delivered as a Notification — never a reified Alert/Event/Signal row.
+        last_state/last_transition_at are the evaluator's last verdict, set
+        only by it, never through PATCH.
+      properties:
+        rule_id: { type: string }
+        asset_id: { type: string }
+        metric: { type: string }
+        comparator: { type: string, enum: [gt, lt, gte, lte] }
+        threshold: { type: number, format: double }
+        for_duration_seconds:
+          type: integer
+          minimum: 1
+          maximum: 86400
+          description: How long the breach must be sustained before the rule fires.
+        severity: { type: string, enum: [critical, warning, info] }
+        enabled: { type: boolean }
+        last_state:
+          type: string
+          enum: [ok, firing]
+          description: Set only by the evaluator. A new rule starts at "ok".
+        last_transition_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Set only by the evaluator. Absent means never evaluated to a transition.
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AlertRuleList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AlertRule' }
+    CreateAlertRuleRequest:
+      type: object
+      required: [asset_id, metric, comparator, threshold, for_duration_seconds]
+      description: severity defaults to "warning" when omitted. enabled defaults to true.
+      properties:
+        asset_id: { type: string }
+        metric: { type: string }
+        comparator: { type: string, enum: [gt, lt, gte, lte] }
+        threshold: { type: number, format: double }
+        for_duration_seconds: { type: integer, minimum: 1, maximum: 86400 }
+        severity: { type: string, enum: [critical, warning, info] }
+        enabled: { type: boolean }
+    PatchAlertRuleRequest:
+      type: object
+      required: [row_version]
+      description: >-
+        Supply one or more of comparator, threshold, for_duration_seconds,
+        severity or enabled. asset_id and metric cannot be changed — delete
+        and recreate the rule instead.
+      properties:
+        row_version: { type: integer, format: int64 }
+        comparator: { type: string, enum: [gt, lt, gte, lte] }
+        threshold: { type: number, format: double }
+        for_duration_seconds: { type: integer, minimum: 1, maximum: 86400 }
+        severity: { type: string, enum: [critical, warning, info] }
+        enabled: { type: boolean }
     Setting:
       type: object
       description: >-

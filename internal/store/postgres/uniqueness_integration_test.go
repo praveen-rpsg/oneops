@@ -68,6 +68,9 @@ var serverGeneratedIdentifiers = map[string]string{
 
 	// Collector check-target configuration (E2.2a).
 	"collector_check_pkey": "check_id is server-minted (domain.NewCollectorCheck); no create route accepts one from a client",
+
+	// Alert rule config + firing-state (E3.1).
+	"alert_rule_pkey": "rule_id is server-minted (domain.NewAlertRule); no create route accepts one from a client",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

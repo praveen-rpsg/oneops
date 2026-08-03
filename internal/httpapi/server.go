@@ -108,6 +108,13 @@ type Server struct {
 	// the privileged pool) — this field is only the admin CRUD surface.
 	collectorChecks domain.CollectorCheckRepository
 
+	// Alert rule registry (E3.1); nil until SetAlertRules. alert_rule is
+	// TENANT-OWNED, like asset above, so nothing here needs an exemption from
+	// row-level security. The evaluator that derives firings and notifies is
+	// wired separately (alerting.Evaluator, over the privileged pool) — this
+	// field is only the admin CRUD surface.
+	alertRules domain.AlertRuleRepository
+
 	// Notification registry (read-only); nil until SetNotifications.
 	// notification is TENANT-OWNED, like team above, so nothing here needs an
 	// exemption from row-level security.
@@ -418,6 +425,18 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/collector-checks/{id}", s.getCollectorCheck)
 		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/collector-checks/{id}", s.patchCollectorCheck)
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/collector-checks/{id}", s.deleteCollectorCheck)
+
+		// Alert rule administration (E3.1). alert_rule is TENANT-OWNED,
+		// exactly like asset/telemetry/collector_check above, so the
+		// permission tier is tenant administration, not requirePlatformAdmin.
+		// AlertRule is config; a firing is derived by the leader-gated
+		// evaluator and delivered as a Notification — there is no "firings"
+		// endpoint here because a firing is not a stored, listable thing.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/alert-rules", s.listAlertRules)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/alert-rules", s.createAlertRule)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/alert-rules/{id}", s.getAlertRule)
+		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/alert-rules/{id}", s.patchAlertRule)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/alert-rules/{id}", s.deleteAlertRule)
 
 		// Notification administration (read-only). notification is TENANT-OWNED,
 		// exactly like team above, so the permission tier is tenant

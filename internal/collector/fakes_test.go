@@ -113,6 +113,10 @@ func (f *fakeTelemetry) QueryRange(context.Context, string, string, time.Time, t
 	return nil, nil
 }
 
+func (f *fakeTelemetry) QueryRangeForTenant(context.Context, string, string, string, time.Time, time.Time) ([]domain.Sample, error) {
+	return nil, nil
+}
+
 func (f *fakeTelemetry) samplesFor(assetID string) []domain.Sample {
 	f.mu.Lock()
 	defer f.mu.Unlock()
