@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -87,7 +88,7 @@ func TestAsset_TypeIsOpenButValidated(t *testing.T) {
 }
 
 func TestAssetStatus_Valid(t *testing.T) {
-	for _, s := range []AssetStatus{AssetActive, AssetRetired} {
+	for _, s := range []AssetStatus{AssetPlanned, AssetActive, AssetMaintenance, AssetRetired} {
 		if !s.Valid() {
 			t.Errorf("%q must be valid", s)
 		}
@@ -96,6 +97,63 @@ func TestAssetStatus_Valid(t *testing.T) {
 		if AssetStatus(s).Valid() {
 			t.Errorf("%q must not be valid", s)
 		}
+	}
+}
+
+// The whole lifecycle, positive and negative, so a future edit to
+// assetTransitions cannot silently open or close a move without a test
+// noticing (mirrors TestUserStatus_CanTransitionTo's shape).
+func TestAssetStatus_CanTransitionTo(t *testing.T) {
+	cases := []struct {
+		from, to AssetStatus
+		want     bool
+	}{
+		{AssetPlanned, AssetActive, true},
+		{AssetPlanned, AssetRetired, true},
+		{AssetPlanned, AssetMaintenance, false},
+		{AssetActive, AssetMaintenance, true},
+		{AssetActive, AssetRetired, true},
+		{AssetActive, AssetPlanned, false},
+		{AssetMaintenance, AssetActive, true},
+		{AssetMaintenance, AssetRetired, true},
+		{AssetMaintenance, AssetPlanned, false},
+		// Reinstate: deliberately permitted, unlike UserStatus's terminal
+		// deactivated — a decommissioned CI can be redeployed.
+		{AssetRetired, AssetActive, true},
+		{AssetRetired, AssetPlanned, false},
+		{AssetRetired, AssetMaintenance, false},
+		// A move to the current state is refused: it is a no-op, not a
+		// transition.
+		{AssetActive, AssetActive, false},
+		{AssetRetired, AssetRetired, false},
+	}
+	for _, c := range cases {
+		if got := c.from.CanTransitionTo(c.to); got != c.want {
+			t.Errorf("%s -> %s = %v, want %v", c.from, c.to, got, c.want)
+		}
+	}
+}
+
+func TestAssetStatus_ValidInitialStatus(t *testing.T) {
+	for _, s := range []AssetStatus{AssetPlanned, AssetActive} {
+		if !s.ValidInitialStatus() {
+			t.Errorf("%q must be a valid initial status", s)
+		}
+	}
+	for _, s := range []AssetStatus{AssetMaintenance, AssetRetired} {
+		if s.ValidInitialStatus() {
+			t.Errorf("%q must NOT be a valid initial status — it is reachable only by transition", s)
+		}
+	}
+}
+
+func TestAssetTransitionError_WrapsErrInvalidTransition(t *testing.T) {
+	err := NewAssetTransitionError(AssetRetired, AssetPlanned)
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Error("AssetTransitionError must unwrap to ErrInvalidTransition")
+	}
+	if err.Error() != "invalid lifecycle transition: retired -> planned" {
+		t.Errorf("Error() = %q", err.Error())
 	}
 }
 

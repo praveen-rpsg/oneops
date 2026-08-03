@@ -12,15 +12,21 @@ import (
 )
 
 type fakeAssets struct {
-	creates, gets, lists, patches, deletes   int
-	relCreates, relDeletes, relFroms, relTos int
-	lastTenant                               string
-	createRelErr                             error
-	createErr                                error
-	updateErr                                error
-	lastCreated                              *domain.Asset
-	lastPatch                                domain.AssetPatch
-	getType                                  string
+	creates, gets, lists, patches, deletes, setStatuses, histories int
+	relCreates, relDeletes, relFroms, relTos                       int
+	lastTenant                                                     string
+	createRelErr                                                   error
+	createErr                                                      error
+	updateErr                                                      error
+	setStatusErr                                                   error
+	historyErr                                                     error
+	lastCreated                                                    *domain.Asset
+	lastPatch                                                      domain.AssetPatch
+	lastStatus                                                     domain.AssetStatus
+	lastListStatus                                                 domain.AssetStatus
+	getType                                                        string
+	getStatus                                                      domain.AssetStatus
+	historyItems                                                   []*domain.AssetChangeEntry
 }
 
 func (f *fakeAssets) Create(_ context.Context, a *domain.Asset) (*domain.Asset, error) {
@@ -38,10 +44,15 @@ func (f *fakeAssets) Get(context.Context, string) (*domain.Asset, error) {
 	if ty == "" {
 		ty = "server"
 	}
-	return &domain.Asset{AssetID: "a1", Type: ty, Name: "host", Status: domain.AssetActive, RowVersion: 1}, nil
+	status := f.getStatus
+	if status == "" {
+		status = domain.AssetActive
+	}
+	return &domain.Asset{AssetID: "a1", Type: ty, Name: "host", Status: status, RowVersion: 1}, nil
 }
-func (f *fakeAssets) List(context.Context, int, string) ([]*domain.Asset, error) {
+func (f *fakeAssets) List(_ context.Context, _ int, _ string, status domain.AssetStatus) ([]*domain.Asset, error) {
 	f.lists++
+	f.lastListStatus = status
 	return nil, nil
 }
 func (f *fakeAssets) Update(_ context.Context, _ string, _ int64, patch domain.AssetPatch) (*domain.Asset, error) {
@@ -52,9 +63,24 @@ func (f *fakeAssets) Update(_ context.Context, _ string, _ int64, patch domain.A
 	}
 	return &domain.Asset{AssetID: "a1", Type: "server", Name: "host", Status: domain.AssetActive, RowVersion: 2}, nil
 }
+func (f *fakeAssets) SetStatus(_ context.Context, _ string, _ int64, status domain.AssetStatus) (*domain.Asset, error) {
+	f.setStatuses++
+	f.lastStatus = status
+	if f.setStatusErr != nil {
+		return nil, f.setStatusErr
+	}
+	return &domain.Asset{AssetID: "a1", Type: "server", Name: "host", Status: status, RowVersion: 2}, nil
+}
 func (f *fakeAssets) Delete(context.Context, string) error {
 	f.deletes++
 	return nil
+}
+func (f *fakeAssets) History(context.Context, string, int, string) ([]*domain.AssetChangeEntry, error) {
+	f.histories++
+	if f.historyErr != nil {
+		return nil, f.historyErr
+	}
+	return f.historyItems, nil
 }
 func (f *fakeAssets) CreateRelationship(_ context.Context, r *domain.AssetRelationship) (*domain.AssetRelationship, error) {
 	f.relCreates++
@@ -77,7 +103,7 @@ func (f *fakeAssets) RelationshipsTo(context.Context, string) ([]*domain.AssetRe
 	return nil, nil
 }
 func (f *fakeAssets) touched() int {
-	return f.creates + f.gets + f.lists + f.patches + f.deletes +
+	return f.creates + f.gets + f.lists + f.patches + f.deletes + f.setStatuses + f.histories +
 		f.relCreates + f.relDeletes + f.relFroms + f.relTos
 }
 
@@ -94,6 +120,7 @@ func TestAssets_Authorization(t *testing.T) {
 		{http.MethodPost, "/v1/admin/assets/relationships", `{"from_asset_id":"a1","to_asset_id":"a2","type":"depends_on"}`},
 		{http.MethodDelete, "/v1/admin/assets/relationships/r1", ""},
 		{http.MethodGet, "/v1/admin/assets/a1/relationships", ""},
+		{http.MethodGet, "/v1/admin/assets/a1/history", ""},
 	}
 	cases := []struct {
 		name  string
@@ -463,4 +490,252 @@ func TestAssetServiceMap_UntypedGraphReturns500(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500: %s", rec.Code, rec.Body.String())
 	}
+}
+
+// A status-only patch goes to SetStatus, never Update — the transport-level
+// half of the E1.3 rule that a transition is the only authority for a
+// status change.
+func TestPatchAsset_StatusOnlyGoesThroughSetStatus(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/admin/assets/a1",
+		strings.NewReader(`{"row_version":1,"status":"retired"}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if spy.setStatuses != 1 {
+		t.Errorf("SetStatus called %d time(s), want 1", spy.setStatuses)
+	}
+	if spy.patches != 0 {
+		t.Error("a status-only patch also reached Update")
+	}
+	if spy.lastStatus != domain.AssetRetired {
+		t.Errorf("status forwarded = %q, want retired", spy.lastStatus)
+	}
+}
+
+// Combining a status transition with any other field is refused before
+// either repository method is called — the same rule patchUser enforces for
+// display_name/status.
+func TestPatchAsset_RejectsStatusCombinedWithOtherFields(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/admin/assets/a1",
+		strings.NewReader(`{"row_version":1,"status":"retired","name":"new-name"}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	if spy.touched() != 0 {
+		t.Error("a combined status+field patch reached the store")
+	}
+}
+
+// An illegal transition — refused by the domain guard inside the store — must
+// surface as 409, not 500 or a silent 200.
+func TestPatchAsset_InvalidTransitionMapsToConflict(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{setStatusErr: domain.NewAssetTransitionError(domain.AssetRetired, domain.AssetPlanned)}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/admin/assets/a1",
+		strings.NewReader(`{"row_version":1,"status":"planned"}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	if spy.setStatuses != 1 {
+		t.Errorf("SetStatus called %d time(s), want 1", spy.setStatuses)
+	}
+}
+
+func TestPatchAsset_StatusRejectsUndefinedValue(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/admin/assets/a1",
+		strings.NewReader(`{"row_version":1,"status":"decommissioned"}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	if spy.setStatuses != 0 {
+		t.Error("an undefined status reached SetStatus")
+	}
+}
+
+// listAssets forwards ?status= to the repository, and rejects an undefined
+// value before the store is ever reached.
+func TestListAssets_ForwardsStatusFilter(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets?status=retired", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if spy.lastListStatus != domain.AssetRetired {
+		t.Errorf("status filter forwarded = %q, want retired", spy.lastListStatus)
+	}
+}
+
+func TestListAssets_RejectsUndefinedStatusFilter(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets?status=decommissioned", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	if spy.lists != 0 {
+		t.Error("an undefined status filter reached the store")
+	}
+}
+
+// createAsset forwards an explicit initial status when it is one of the
+// permitted values, and rejects one that is not (maintenance/retired are
+// reachable only by transition).
+func TestCreateAsset_AcceptsPlannedInitialStatus(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/assets",
+		strings.NewReader(`{"type":"server","name":"host-1","status":"planned"}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	if spy.lastCreated == nil || spy.lastCreated.Status != domain.AssetPlanned {
+		t.Errorf("initial status not forwarded: %+v", spy.lastCreated)
+	}
+}
+
+func TestCreateAsset_RejectsMaintenanceOrRetiredAsInitialStatus(t *testing.T) {
+	for _, status := range []string{"maintenance", "retired"} {
+		t.Run(status, func(t *testing.T) {
+			srv, _ := newTestServer(true)
+			srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+			spy := &fakeAssets{}
+			srv.SetAssets(spy)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/admin/assets",
+				strings.NewReader(`{"type":"server","name":"host-1","status":"`+status+`"}`))
+			req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+			rec := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
+			}
+			if spy.creates != 0 {
+				t.Errorf("%s reached the store as an initial status", status)
+			}
+		})
+	}
+}
+
+// getAssetHistory checks the asset exists (404 if not), then serves the
+// store's page as-is.
+func TestGetAssetHistory_HappyPath(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	oldVal, newVal := "active", "retired"
+	spy := &fakeAssets{historyItems: []*domain.AssetChangeEntry{
+		{ChangeID: "c1", AssetID: "a1", Kind: domain.AssetChangeTransitioned, Field: "status", OldValue: &oldVal, NewValue: &newVal, Actor: "user-1", RowVersion: 2},
+	}}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/a1/history", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if spy.gets != 1 || spy.histories != 1 {
+		t.Errorf("gets=%d histories=%d, want 1 and 1", spy.gets, spy.histories)
+	}
+	var body struct {
+		Items []assetChangeEntryDTO `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Items) != 1 || body.Items[0].Actor != "user-1" || *body.Items[0].OldValue != "active" || *body.Items[0].NewValue != "retired" {
+		t.Errorf("unexpected history payload: %+v", body.Items)
+	}
+}
+
+func TestGetAssetHistory_NoSuchAssetReturns404(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/missing/history", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+
+	// Swap Get to report not-found for this one request via a wrapper.
+	notFound := &fakeAssetsNotFound{fakeAssets: spy}
+	srv.SetAssets(notFound)
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	if notFound.histories != 0 {
+		t.Error("history was queried for an asset that does not exist")
+	}
+}
+
+// fakeAssetsNotFound wraps fakeAssets and makes Get always report
+// domain.ErrNotFound, without disturbing every other fakeAssets test's
+// simpler zero-value construction.
+type fakeAssetsNotFound struct {
+	*fakeAssets
+}
+
+func (f *fakeAssetsNotFound) Get(context.Context, string) (*domain.Asset, error) {
+	f.gets++
+	return nil, domain.ErrNotFound
 }

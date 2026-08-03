@@ -17,7 +17,8 @@ const (
 	assetColumns = `asset_id, tenant_id, type, name, attributes, status,
 		environment, criticality, owner_team_id, owner_user_id,
 		row_version, created_at, updated_at`
-	assetRelColumns = `relationship_id, tenant_id, from_asset_id, to_asset_id, type, row_version, created_at, updated_at`
+	assetRelColumns    = `relationship_id, tenant_id, from_asset_id, to_asset_id, type, row_version, created_at, updated_at`
+	assetChangeColumns = `change_id, tenant_id, asset_id, kind, field, old_value, new_value, actor, row_version, occurred_at`
 )
 
 // defaultAssetPageSize bounds an unbounded List; maxAssetPageSize caps what a
@@ -58,6 +59,24 @@ func clampAssetPage(limit int) int {
 		return maxAssetPageSize
 	}
 	return limit
+}
+
+// getForUpdateTx reads assetID's current row under FOR UPDATE, inside tx, so
+// the caller holds the row lock for the rest of its transaction. Used by
+// Update and SetStatus to read the pre-image they diff against: serialising
+// on the mutated row itself is this table's equivalent of ADR-AUDIT-006's
+// obligation to serialise an append on its chain head, since a change-history
+// row is written from exactly this read in the same transaction.
+func (s *AssetStore) getForUpdateTx(ctx context.Context, tx pgx.Tx, assetID string) (*domain.Asset, error) {
+	row := tx.QueryRow(ctx, `SELECT `+assetColumns+` FROM asset WHERE asset_id = $1 FOR UPDATE`, assetID)
+	a, err := scanAsset(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get asset for update: %w", err)
+	}
+	return a, nil
 }
 
 func scanAsset(s scanner) (*domain.Asset, error) {
@@ -102,12 +121,21 @@ func scanAssetRelationship(s scanner) (*domain.AssetRelationship, error) {
 	return &r, nil
 }
 
-// Create inserts an asset. When a.OwnerTeamID/a.OwnerUserID is set, both are
-// re-verified against this store's own tenant-scoped connection before the
-// INSERT runs — see verifyOwnerTeamExists/verifyOwnerUserExists.
+// Create inserts an asset and records the single AssetChangeCreated history
+// row in the same transaction. When a.OwnerTeamID/a.OwnerUserID is set, both
+// are re-verified against this store's own tenant-scoped connection before
+// the INSERT runs — see verifyOwnerTeamExists/verifyOwnerUserExists.
 func (s *AssetStore) Create(ctx context.Context, a *domain.Asset) (*domain.Asset, error) {
 	if err := a.Validate(); err != nil {
 		return nil, err
+	}
+	if !a.Status.ValidInitialStatus() {
+		return nil, domain.NewValidationError("status",
+			"must be one of: planned, active at creation; maintenance and retired are reached by transition")
+	}
+	actor, ok := domain.ActorFrom(ctx)
+	if !ok {
+		return nil, domain.ErrNoActor
 	}
 	if a.OwnerTeamID != nil {
 		if err := s.verifyOwnerTeamExists(ctx, *a.OwnerTeamID); err != nil {
@@ -123,7 +151,14 @@ func (s *AssetStore) Create(ctx context.Context, a *domain.Asset) (*domain.Asset
 	if err != nil {
 		return nil, fmt.Errorf("marshal asset attributes: %w", err)
 	}
-	row := s.pool.QueryRow(ctx, `
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row := tx.QueryRow(ctx, `
 		INSERT INTO asset (asset_id, tenant_id, type, name, attributes, status, environment, criticality, owner_team_id, owner_user_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING `+assetColumns,
@@ -147,7 +182,34 @@ func (s *AssetStore) Create(ctx context.Context, a *domain.Asset) (*domain.Asset
 			return nil, fmt.Errorf("insert asset: %w", err)
 		}
 	}
+
+	if err := s.recordChange(ctx, tx, created.TenantID, created.AssetID,
+		domain.AssetChangeCreated, "", nil, nil, actor, created.RowVersion); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
 	return created, nil
+}
+
+// recordChange appends one asset_change_history row inside tx, so it commits
+// or aborts with the mutation it describes. oldValue/newValue are nil for
+// AssetChangeCreated (there is no prior state to diff).
+func (s *AssetStore) recordChange(
+	ctx context.Context, tx pgx.Tx, tenantID, assetID string,
+	kind domain.AssetChangeKind, field string, oldValue, newValue *string,
+	actor string, rowVersion int64,
+) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO asset_change_history
+			(change_id, tenant_id, asset_id, kind, field, old_value, new_value, actor, row_version)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		domain.NewID(), tenantID, assetID, string(kind), field, oldValue, newValue, actor, rowVersion)
+	if err != nil {
+		return fmt.Errorf("record asset change history: %w", err)
+	}
+	return nil
 }
 
 // verifyOwnerTeamExists confirms teamID names a team visible to this store's
@@ -214,15 +276,38 @@ func (s *AssetStore) Get(ctx context.Context, assetID string) (*domain.Asset, er
 
 // List returns a page of the caller's assets, keyset-paginated over
 // asset_id — a ULID, and therefore ordered by creation.
-func (s *AssetStore) List(ctx context.Context, limit int, after string) ([]*domain.Asset, error) {
+//
+// status is the E1.3 soft-retire filter. The zero value excludes
+// AssetRetired (a retired CI is soft-deleted from the default view, per
+// ix_asset_tenant_status_not_retired) but includes every other status; a
+// caller that explicitly wants retired assets — or wants only one other
+// status — passes it. A retired asset is always individually reachable
+// through Get regardless of this filter.
+func (s *AssetStore) List(ctx context.Context, limit int, after string, status domain.AssetStatus) ([]*domain.Asset, error) {
 	limit = clampAssetPage(limit)
+	if status != "" && !status.Valid() {
+		return nil, domain.NewValidationError("status", "must be one of: planned, active, maintenance, retired")
+	}
 
-	rows, err := s.pool.Query(ctx, `
-		SELECT `+assetColumns+`
-		  FROM asset
-		 WHERE ($1 = '' OR asset_id > $1)
-		 ORDER BY asset_id
-		 LIMIT $2`, after, limit)
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if status == "" {
+		rows, err = s.pool.Query(ctx, `
+			SELECT `+assetColumns+`
+			  FROM asset
+			 WHERE status <> 'retired' AND ($1 = '' OR asset_id > $1)
+			 ORDER BY asset_id
+			 LIMIT $2`, after, limit)
+	} else {
+		rows, err = s.pool.Query(ctx, `
+			SELECT `+assetColumns+`
+			  FROM asset
+			 WHERE status = $1 AND ($2 = '' OR asset_id > $2)
+			 ORDER BY asset_id
+			 LIMIT $3`, string(status), after, limit)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list assets: %w", err)
 	}
@@ -242,16 +327,27 @@ func (s *AssetStore) List(ctx context.Context, limit int, after string) ([]*doma
 	return out, nil
 }
 
-// Update changes one or more fields of patch under optimistic locking. A nil
-// pointer/map leaves that field unchanged — COALESCE against a NULL bind
-// parameter, the same way a caller signals "not supplied" rather than
-// "clear it". OwnerTeamID/OwnerUserID are tri-state (see domain.AssetPatch's
-// doc comment): untouched, cleared to NULL, or set to a new id — a new id is
-// re-verified against this store's own tenant-scoped connection exactly as
-// Create re-verifies one, before the UPDATE runs.
+// Update changes one or more non-lifecycle fields of patch under optimistic
+// locking, recording one AssetChangeUpdated history row per field actually
+// changed. A nil pointer/map leaves that field unchanged — COALESCE against a
+// NULL bind parameter, the same way a caller signals "not supplied" rather
+// than "clear it". OwnerTeamID/OwnerUserID are tri-state (see
+// domain.AssetPatch's doc comment): untouched, cleared to NULL, or set to a
+// new id — a new id is re-verified against this store's own tenant-scoped
+// connection exactly as Create re-verifies one, before the UPDATE runs.
+//
+// Status is deliberately not a field here (E1.3): see SetStatus.
+//
+// The old values needed to diff are read under FOR UPDATE inside the same
+// transaction as the write — see getForUpdateTx's doc comment for why.
 func (s *AssetStore) Update(
 	ctx context.Context, assetID string, rowVersion int64, patch domain.AssetPatch,
 ) (*domain.Asset, error) {
+	actor, ok := domain.ActorFrom(ctx)
+	if !ok {
+		return nil, domain.ErrNoActor
+	}
+
 	var namePtr *string
 	if patch.Name != nil {
 		trimmed := strings.TrimSpace(*patch.Name)
@@ -262,15 +358,6 @@ func (s *AssetStore) Update(
 			return nil, domain.NewValidationError("name", "must be at most 200 characters")
 		}
 		namePtr = &trimmed
-	}
-
-	var statusPtr *string
-	if patch.Status != nil {
-		if !patch.Status.Valid() {
-			return nil, domain.NewValidationError("status", "must be one of: active, retired")
-		}
-		v := string(*patch.Status)
-		statusPtr = &v
 	}
 
 	var envPtr *string
@@ -291,13 +378,14 @@ func (s *AssetStore) Update(
 		critPtr = &v
 	}
 
-	var attrs []byte
-	if patch.Attributes != nil {
+	var attrsJSON string
+	haveAttrs := patch.Attributes != nil
+	if haveAttrs {
 		b, err := json.Marshal(patch.Attributes)
 		if err != nil {
 			return nil, fmt.Errorf("marshal asset attributes: %w", err)
 		}
-		attrs = b
+		attrsJSON = string(b)
 	}
 
 	// touchOwnerTeam/touchOwnerUser is false when the patch field is nil
@@ -324,23 +412,49 @@ func (s *AssetStore) Update(
 		}
 	}
 
-	row := s.pool.QueryRow(ctx, `
+	var attrsParam []byte
+	if haveAttrs {
+		attrsParam = []byte(attrsJSON)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// The pre-image is read under FOR UPDATE, inside this transaction, not by
+	// a separate s.Get before it begins. This is the same obligation
+	// ADR-AUDIT-006 imposes on audit_event/admin_audit_event's chain head,
+	// applied to this table's own equivalent of one: two concurrent PATCHes
+	// against the same asset now serialise on its row instead of racing to
+	// compute a diff against a value the other has already superseded, and
+	// the guarded UPDATE below is therefore certain to match once the
+	// version check passes — nothing else can touch this row until commit.
+	current, err := s.getForUpdateTx(ctx, tx, assetID)
+	if err != nil {
+		return nil, err
+	}
+	if current.RowVersion != rowVersion {
+		return nil, domain.ErrVersionMismatch
+	}
+
+	row := tx.QueryRow(ctx, `
 		UPDATE asset
 		   SET name          = COALESCE($3, name),
 		       attributes    = COALESCE($4, attributes),
-		       status        = COALESCE($5, status),
-		       environment   = COALESCE($6, environment),
-		       criticality   = COALESCE($7, criticality),
-		       owner_team_id = CASE WHEN $8  THEN $9  ELSE owner_team_id END,
-		       owner_user_id = CASE WHEN $10 THEN $11 ELSE owner_user_id END,
+		       environment   = COALESCE($5, environment),
+		       criticality   = COALESCE($6, criticality),
+		       owner_team_id = CASE WHEN $7 THEN $8  ELSE owner_team_id END,
+		       owner_user_id = CASE WHEN $9 THEN $10 ELSE owner_user_id END,
 		       row_version   = row_version + 1,
 		       updated_at    = now()
 		 WHERE asset_id = $1 AND row_version = $2
 		RETURNING `+assetColumns,
-		assetID, rowVersion, namePtr, attrs, statusPtr, envPtr, critPtr,
+		assetID, rowVersion, namePtr, attrsParam, envPtr, critPtr,
 		touchOwnerTeam, ownerTeamValue, touchOwnerUser, ownerUserValue)
 
-	a, err := scanAsset(row)
+	updated, err := scanAsset(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, s.explainMissedUpdate(ctx, assetID)
 	}
@@ -350,10 +464,146 @@ func (s *AssetStore) Update(
 		}
 		return nil, fmt.Errorf("update asset: %w", err)
 	}
-	return a, nil
+
+	// changes lists only the fields the caller actually supplied — name/
+	// environment/criticality are added only when their patch pointer was
+	// non-nil, and the owner fields only when touched. This matters because
+	// nil means two different things for these groups: for name/environment/
+	// criticality nil means "not supplied" (skip); for an owner field that
+	// WAS touched, nil means "clear it" (a real, recordable change). Gating
+	// membership in the slice on "was this field supplied at all" — rather
+	// than on whether the resulting pointer is nil — keeps both meanings
+	// correct without special-casing the owner fields in the loop below.
+	var changes []assetFieldChange
+	if patch.Name != nil {
+		changes = append(changes, assetFieldChange{"name", strPtr(current.Name), namePtr})
+	}
+	if patch.Environment != nil {
+		changes = append(changes, assetFieldChange{"environment", strPtr(string(current.Environment)), envPtr})
+	}
+	if patch.Criticality != nil {
+		changes = append(changes, assetFieldChange{"criticality", strPtr(string(current.Criticality)), critPtr})
+	}
+	if haveAttrs {
+		currentAttrsJSON, err := json.Marshal(current.Attributes)
+		if err != nil {
+			return nil, fmt.Errorf("marshal current asset attributes: %w", err)
+		}
+		changes = append(changes, assetFieldChange{"attributes", strPtr(string(currentAttrsJSON)), &attrsJSON})
+	}
+	if touchOwnerTeam {
+		changes = append(changes, assetFieldChange{"owner_team_id", current.OwnerTeamID, ownerTeamValue})
+	}
+	if touchOwnerUser {
+		changes = append(changes, assetFieldChange{"owner_user_id", current.OwnerUserID, ownerUserValue})
+	}
+	for _, c := range changes {
+		if strPtrEqual(c.old, c.new) {
+			continue
+		}
+		if err := s.recordChange(ctx, tx, updated.TenantID, assetID,
+			domain.AssetChangeUpdated, c.field, c.old, c.new, actor, updated.RowVersion); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return updated, nil
+}
+
+// assetFieldChange is one candidate history row Update may write: a field
+// name and its old/new value, both as *string so a nil owner reference and
+// an absent field are representable uniformly.
+type assetFieldChange struct {
+	field    string
+	old, new *string
+}
+
+// strPtr returns a pointer to s. A small helper so assetFieldChange can
+// treat every field uniformly as *string, including ones the domain models
+// as a distinct type (AssetEnvironment, AssetCriticality).
+func strPtr(s string) *string { return &s }
+
+// strPtrEqual reports whether two optional strings hold the same value, nil
+// included — used to skip writing a history row for a field the caller
+// "changed" to the value it already held.
+func strPtrEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// SetStatus performs a lifecycle transition under optimistic locking,
+// guarded by AssetStatus.CanTransitionTo — the single authority for status
+// changes (mirrors UserStore.SetStatus). The transition is checked against
+// the state the database currently holds, not one the caller asserts: a
+// caller that read the asset, then had it retired underneath them, must not
+// be able to move it by supplying the old state — the row-version guard
+// makes that read-then-write safe.
+func (s *AssetStore) SetStatus(
+	ctx context.Context, assetID string, rowVersion int64, status domain.AssetStatus,
+) (*domain.Asset, error) {
+	if !status.Valid() {
+		return nil, domain.NewValidationError("status", "must be one of: planned, active, maintenance, retired")
+	}
+	actor, ok := domain.ActorFrom(ctx)
+	if !ok {
+		return nil, domain.ErrNoActor
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Read under FOR UPDATE inside this transaction — see Update's identical
+	// comment on why: this is this table's equivalent of ADR-AUDIT-006's
+	// chain-head serialisation for a concurrent append.
+	current, err := s.getForUpdateTx(ctx, tx, assetID)
+	if err != nil {
+		return nil, err
+	}
+	if current.RowVersion != rowVersion {
+		return nil, domain.ErrVersionMismatch
+	}
+	if !current.Status.CanTransitionTo(status) {
+		return nil, domain.NewAssetTransitionError(current.Status, status)
+	}
+
+	row := tx.QueryRow(ctx, `
+		UPDATE asset
+		   SET status = $3, row_version = row_version + 1, updated_at = now()
+		 WHERE asset_id = $1 AND row_version = $2
+		RETURNING `+assetColumns,
+		assetID, rowVersion, string(status))
+
+	updated, err := scanAsset(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, s.explainMissedUpdate(ctx, assetID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("set asset status: %w", err)
+	}
+
+	oldVal, newVal := string(current.Status), string(status)
+	if err := s.recordChange(ctx, tx, updated.TenantID, assetID,
+		domain.AssetChangeTransitioned, "status", &oldVal, &newVal, actor, updated.RowVersion); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return updated, nil
 }
 
 // Delete removes an asset. Its relationships go with it (ON DELETE CASCADE).
+// Its change history does NOT: asset_change_history carries no foreign key
+// to asset, precisely so a hard Delete does not erase the forensic record of
+// how the asset got to the state it was deleted in (see the migration).
 func (s *AssetStore) Delete(ctx context.Context, assetID string) error {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM asset WHERE asset_id = $1`, assetID)
 	if err != nil {
@@ -363,6 +613,57 @@ func (s *AssetStore) Delete(ctx context.Context, assetID string) error {
 		return domain.ErrNotFound
 	}
 	return nil
+}
+
+// History returns a page of assetID's append-only change history,
+// keyset-paginated over change_id — a ULID, and therefore chronological
+// ascending, the same shape List's asset_id pagination uses. Isolation is
+// enforced by row-level security on the tenant-scoped connection, exactly as
+// every other read in this store is; no explicit tenant_id predicate is
+// needed here for the same reason List has none.
+func (s *AssetStore) History(
+	ctx context.Context, assetID string, limit int, after string,
+) ([]*domain.AssetChangeEntry, error) {
+	limit = clampAssetPage(limit)
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+assetChangeColumns+`
+		  FROM asset_change_history
+		 WHERE asset_id = $1 AND ($2 = '' OR change_id > $2)
+		 ORDER BY change_id
+		 LIMIT $3`, assetID, after, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list asset change history: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*domain.AssetChangeEntry, 0, limit)
+	for rows.Next() {
+		e, err := scanAssetChangeEntry(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan asset change entry: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate asset change history: %w", err)
+	}
+	return out, nil
+}
+
+func scanAssetChangeEntry(s scanner) (*domain.AssetChangeEntry, error) {
+	var (
+		e    domain.AssetChangeEntry
+		kind string
+	)
+	if err := s.Scan(
+		&e.ChangeID, &e.TenantID, &e.AssetID, &kind, &e.Field,
+		&e.OldValue, &e.NewValue, &e.Actor, &e.RowVersion, &e.OccurredAt,
+	); err != nil {
+		return nil, err
+	}
+	e.Kind = domain.AssetChangeKind(kind)
+	return &e, nil
 }
 
 // explainMissedUpdate distinguishes "gone" from "stale version" after an

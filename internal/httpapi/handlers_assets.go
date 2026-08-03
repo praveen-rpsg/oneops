@@ -63,6 +63,30 @@ func toAssetRelationshipDTO(r *domain.AssetRelationship) assetRelationshipDTO {
 	}
 }
 
+// assetChangeEntryDTO is one row of an asset's append-only change history
+// (E1.3). OldValue/NewValue are omitted when nil rather than rendered as
+// JSON null — AssetChangeCreated carries neither, and a field cleared to
+// empty is represented by an empty string, not an absent key.
+type assetChangeEntryDTO struct {
+	ChangeID   string    `json:"change_id"`
+	AssetID    string    `json:"asset_id"`
+	Kind       string    `json:"kind"`
+	Field      string    `json:"field,omitempty"`
+	OldValue   *string   `json:"old_value,omitempty"`
+	NewValue   *string   `json:"new_value,omitempty"`
+	Actor      string    `json:"actor"`
+	RowVersion int64     `json:"row_version"`
+	OccurredAt time.Time `json:"occurred_at"`
+}
+
+func toAssetChangeEntryDTO(e *domain.AssetChangeEntry) assetChangeEntryDTO {
+	return assetChangeEntryDTO{
+		ChangeID: e.ChangeID, AssetID: e.AssetID, Kind: string(e.Kind), Field: e.Field,
+		OldValue: e.OldValue, NewValue: e.NewValue, Actor: e.Actor,
+		RowVersion: e.RowVersion, OccurredAt: e.OccurredAt,
+	}
+}
+
 // createAssetRequest carries no asset_id: the identifier is minted
 // server-side so a caller cannot choose one (the same rule createTeamRequest
 // follows, and the reason `asset.asset_pkey` needs no tenant-key-scope
@@ -72,20 +96,28 @@ func toAssetRelationshipDTO(r *domain.AssetRelationship) assetRelationshipDTO {
 // (domain.Asset.ApplyClassification). OwnerTeamID/OwnerUserID are optional;
 // when set, s.assets.Create re-verifies the id against the caller's tenant
 // before the asset is written (ADR-ASSET-001 §6, extended to ownership).
+// Status is optional and defaults to "active" (domain.NewAsset's own
+// default, E1.3 decision); a caller pre-registering a CI not yet in service
+// may set it to "planned" — any other value is refused, because maintenance
+// and retired describe something that happened to a CI already in service
+// and are reachable only by a later transition (PATCH .../status).
 type createAssetRequest struct {
 	Type        string         `json:"type"`
 	Name        string         `json:"name"`
 	Attributes  map[string]any `json:"attributes"`
+	Status      string         `json:"status"`
 	Environment string         `json:"environment"`
 	Criticality string         `json:"criticality"`
 	OwnerTeamID *string        `json:"owner_team_id"`
 	OwnerUserID *string        `json:"owner_user_id"`
 }
 
-// patchAssetRequest changes one or more fields in a single call. Unlike
-// patchTeamRequest, these do not go through different repository methods —
-// Asset has no authorisation-adjacent status split to protect — so there is
-// no reason to forbid combining them.
+// patchAssetRequest changes one or more non-lifecycle fields in a single
+// call, OR performs exactly one lifecycle transition — never both in the
+// same request (E1.3). The two go through different repository methods on
+// purpose, mirroring patchUser: SetStatus is the single place a transition
+// is checked, and a call that did both would consume two row versions and
+// leave the caller unable to say which half failed.
 //
 // OwnerTeamID/OwnerUserID follow domain.AssetPatch's tri-state rule: absent
 // (nil) leaves ownership unchanged; present as "" clears it; present as a
@@ -101,13 +133,25 @@ type patchAssetRequest struct {
 	OwnerUserID *string        `json:"owner_user_id"`
 }
 
+// nonStatusPatchFieldsSet reports whether req carries any field other than
+// status — used to refuse a request that tries to combine a lifecycle
+// transition with an ordinary field change.
+func (req patchAssetRequest) nonStatusPatchFieldsSet() bool {
+	return req.Name != nil || req.Attributes != nil || req.Environment != nil ||
+		req.Criticality != nil || req.OwnerTeamID != nil || req.OwnerUserID != nil
+}
+
 type createAssetRelationshipRequest struct {
 	FromAssetID string `json:"from_asset_id"`
 	ToAssetID   string `json:"to_asset_id"`
 	Type        string `json:"type"`
 }
 
-// listAssets returns a page of the caller's assets.
+// listAssets returns a page of the caller's assets. By default (no status
+// query param) a retired asset is excluded — soft-retire (E1.3) removes it
+// from the ordinary view, not from existence — but it remains individually
+// fetchable via getAsset, and ?status=retired lists exactly the retired
+// ones.
 func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 	if s.assets == nil {
 		writeProblem(w, r, http.StatusNotImplemented, "not implemented", "asset administration is not configured")
@@ -122,8 +166,13 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
+	status := domain.AssetStatus(strings.TrimSpace(r.URL.Query().Get("status")))
+	if status != "" && !status.Valid() {
+		s.mapError(w, r, domain.NewValidationError("status", "must be one of: planned, active, maintenance, retired"))
+		return
+	}
 
-	items, err := s.assets.List(r.Context(), limit, r.URL.Query().Get("after"))
+	items, err := s.assets.List(r.Context(), limit, r.URL.Query().Get("after"), status)
 	if err != nil {
 		s.mapError(w, r, err)
 		return
@@ -165,6 +214,14 @@ func (s *Server) createAsset(w http.ResponseWriter, r *http.Request) {
 		s.mapError(w, r, err)
 		return
 	}
+	if status := domain.AssetStatus(strings.TrimSpace(req.Status)); status != "" {
+		if !status.ValidInitialStatus() {
+			s.mapError(w, r, domain.NewValidationError("status",
+				"must be one of: planned, active at creation; maintenance and retired are reached by transition"))
+			return
+		}
+		a.Status = status
+	}
 	created, err := s.assets.Create(r.Context(), a)
 	if errors.Is(err, domain.ErrNotFound) {
 		writeProblem(w, r, http.StatusNotFound, "not found",
@@ -196,7 +253,8 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toAssetDTO(a))
 }
 
-// patchAsset changes name, attributes and/or status under optimistic locking.
+// patchAsset changes name/attributes/environment/criticality/ownership, OR
+// performs a lifecycle transition — never both (see patchAssetRequest).
 func (s *Server) patchAsset(w http.ResponseWriter, r *http.Request) {
 	if s.assets == nil {
 		writeProblem(w, r, http.StatusNotImplemented, "not implemented", "asset administration is not configured")
@@ -214,45 +272,54 @@ func (s *Server) patchAsset(w http.ResponseWriter, r *http.Request) {
 			"must be the row_version last read for this asset"))
 		return
 	}
-	if req.Name == nil && req.Attributes == nil && req.Status == nil &&
-		req.Environment == nil && req.Criticality == nil &&
-		req.OwnerTeamID == nil && req.OwnerUserID == nil {
+	switch {
+	case req.Status == nil && !req.nonStatusPatchFieldsSet():
 		s.mapError(w, r, domain.NewValidationError("body",
 			"supply at least one of name, attributes, status, environment, criticality, owner_team_id or owner_user_id"))
 		return
+	case req.Status != nil && req.nonStatusPatchFieldsSet():
+		s.mapError(w, r, domain.NewValidationError("body",
+			"a status transition must be supplied on its own; changing both would consume "+
+				"two row versions and leave the outcome of one of them unreported"))
+		return
 	}
 
-	patch := domain.AssetPatch{Attributes: req.Attributes, OwnerTeamID: req.OwnerTeamID, OwnerUserID: req.OwnerUserID}
-	if req.Name != nil {
-		trimmed := strings.TrimSpace(*req.Name)
-		patch.Name = &trimmed
-	}
+	var (
+		updated *domain.Asset
+		err     error
+	)
 	if req.Status != nil {
-		st := domain.AssetStatus(strings.TrimSpace(*req.Status))
-		if !st.Valid() {
-			s.mapError(w, r, domain.NewValidationError("status", "must be one of: active, retired"))
+		status := domain.AssetStatus(strings.TrimSpace(*req.Status))
+		if !status.Valid() {
+			s.mapError(w, r, domain.NewValidationError("status", "must be one of: planned, active, maintenance, retired"))
 			return
 		}
-		patch.Status = &st
-	}
-	if req.Environment != nil {
-		env := domain.AssetEnvironment(strings.TrimSpace(*req.Environment))
-		if !env.Valid() {
-			s.mapError(w, r, domain.NewValidationError("environment", "must be one of: production, staging, development, unknown"))
-			return
+		updated, err = s.assets.SetStatus(r.Context(), id, req.RowVersion, status)
+	} else {
+		patch := domain.AssetPatch{Attributes: req.Attributes, OwnerTeamID: req.OwnerTeamID, OwnerUserID: req.OwnerUserID}
+		if req.Name != nil {
+			trimmed := strings.TrimSpace(*req.Name)
+			patch.Name = &trimmed
 		}
-		patch.Environment = &env
-	}
-	if req.Criticality != nil {
-		crit := domain.AssetCriticality(strings.TrimSpace(*req.Criticality))
-		if !crit.Valid() {
-			s.mapError(w, r, domain.NewValidationError("criticality", "must be one of: critical, high, medium, low, unknown"))
-			return
+		if req.Environment != nil {
+			env := domain.AssetEnvironment(strings.TrimSpace(*req.Environment))
+			if !env.Valid() {
+				s.mapError(w, r, domain.NewValidationError("environment", "must be one of: production, staging, development, unknown"))
+				return
+			}
+			patch.Environment = &env
 		}
-		patch.Criticality = &crit
+		if req.Criticality != nil {
+			crit := domain.AssetCriticality(strings.TrimSpace(*req.Criticality))
+			if !crit.Valid() {
+				s.mapError(w, r, domain.NewValidationError("criticality", "must be one of: critical, high, medium, low, unknown"))
+				return
+			}
+			patch.Criticality = &crit
+		}
+		updated, err = s.assets.Update(r.Context(), id, req.RowVersion, patch)
 	}
 
-	updated, err := s.assets.Update(r.Context(), id, req.RowVersion, patch)
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
 		writeProblem(w, r, http.StatusNotFound, "not found",
@@ -493,4 +560,47 @@ func (s *Server) getAssetServiceMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, newServiceMapResponse(id, nodes))
+}
+
+// getAssetHistory serves GET /v1/admin/assets/{id}/history: the append-only
+// record of every change to a CI (E1.3) — field, old/new value, actor, and
+// the resulting row_version, in chronological order.
+//
+// The asset must currently exist (checked via Get, the same 404 shape every
+// other per-asset endpoint here uses). asset_change_history itself carries
+// no such requirement — a row survives a hard Delete of its asset by design
+// (see the migration) — so a fully deleted asset's history remains in the
+// database, addressable at the storage layer, but is not exposed through
+// this asset-scoped route once the asset itself is gone.
+func (s *Server) getAssetHistory(w http.ResponseWriter, r *http.Request) {
+	if s.assets == nil {
+		writeProblem(w, r, http.StatusNotImplemented, "not implemented", "asset administration is not configured")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if _, err := s.assets.Get(r.Context(), id); err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+
+	limit := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			writeProblem(w, r, http.StatusUnprocessableEntity, "invalid limit", "limit must be an integer")
+			return
+		}
+		limit = n
+	}
+
+	items, err := s.assets.History(r.Context(), id, limit, r.URL.Query().Get("after"))
+	if err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+	out := make([]assetChangeEntryDTO, 0, len(items))
+	for _, e := range items {
+		out = append(out, toAssetChangeEntryDTO(e))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": out})
 }

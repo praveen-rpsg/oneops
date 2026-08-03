@@ -52,7 +52,7 @@ func TestEveryTableIsANode(t *testing.T) {
 	// would agree with it about anything, including a mistake.
 	want := []string{
 		"admin_audit_chain_head", "admin_audit_event", "app_user", "approval_record", "artifact_version",
-		"asset", "asset_relationship",
+		"asset", "asset_change_history", "asset_relationship",
 		"audit_chain_head", "audit_event", "audit_event_default", "configuration_metadata",
 		"configuration_object", "dependency_edge", "idempotency_key", "invitation",
 		"membership", "notification", "organization", "policy", "policy_cursor", "policy_execution",
@@ -99,8 +99,8 @@ func TestCommentsDoNotDeclareObjects(t *testing.T) {
 func TestIndexOnClauseMaySpanLines(t *testing.T) {
 	nodes, edges := extract(t)
 	idx := byKind(nodes)[kindIndex]
-	if len(idx) != 59 {
-		t.Errorf("extracted %d indexes, want 59", len(idx))
+	if len(idx) != 61 {
+		t.Errorf("extracted %d indexes, want 61", len(idx))
 	}
 	// ix_webhook_delivery_due declares ON on a following line.
 	const want = "index:ix_webhook_delivery_due"
@@ -173,8 +173,8 @@ func TestCommentOnDoesNotDeclareAColumn(t *testing.T) {
 func TestTriggersAreOwnedByTheirTable(t *testing.T) {
 	nodes, edges := extract(t)
 	trig := byKind(nodes)[kindTrigger]
-	if len(trig) != 4 {
-		t.Errorf("extracted %d triggers, want 4: %v", len(trig), trig)
+	if len(trig) != 6 {
+		t.Errorf("extracted %d triggers, want 6: %v", len(trig), trig)
 	}
 	for _, tr := range trig {
 		found := false
@@ -283,7 +283,7 @@ func TestCorpusCensus(t *testing.T) {
 		got[n.Kind]++
 	}
 	want := map[string]int{
-		kindTable: 29, kindColumn: 251, kindIndex: 59, kindConstraint: 74, kindTrigger: 4,
+		kindTable: 30, kindColumn: 261, kindIndex: 61, kindConstraint: 77, kindTrigger: 6,
 	}
 	for kind, w := range want {
 		if got[kind] != w {
@@ -400,16 +400,17 @@ func TestMultiLineAlterTableIsExtracted(t *testing.T) {
 		}
 	}
 
-	// Twenty-three tables carry the discriminator. Anything less is a wrong
-	// answer to the question the graph exists to answer.
+	// Twenty-four tables carry the discriminator (E1.3 adds
+	// asset_change_history). Anything less is a wrong answer to the
+	// question the graph exists to answer.
 	scoped := 0
 	for _, n := range nodes {
 		if strings.HasSuffix(n.ID, ".tenant_id") && n.Kind == kindColumn {
 			scoped++
 		}
 	}
-	if scoped != 23 {
-		t.Errorf("%d tables carry tenant_id, want 23", scoped)
+	if scoped != 24 {
+		t.Errorf("%d tables carry tenant_id, want 24", scoped)
 	}
 
 	// A multi-line declaration must still be owned by its table.

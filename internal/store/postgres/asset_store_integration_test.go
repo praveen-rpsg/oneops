@@ -25,6 +25,20 @@ func assetTenant(t *testing.T, tenants *TenantStore, slug string) *domain.Tenant
 	return tn
 }
 
+// assetTestCtx carries both the tenant binding AssetStore's RLS-scoped pool
+// requires and the actor identity Create/Update/SetStatus now require to
+// attribute an asset_change_history row (E1.3) — mirrors adminTestCtx's
+// reason for existing.
+func assetTestCtx(tn *domain.Tenant) context.Context {
+	return assetTestCtxAs(tn, "test-asset-actor")
+}
+
+// assetTestCtxAs is assetTestCtx with an explicit actor, for tests that must
+// assert the recorded actor is the real caller, not a fixture constant.
+func assetTestCtxAs(tn *domain.Tenant, actor string) context.Context {
+	return domain.WithActor(domain.WithTenant(context.Background(), tn), actor)
+}
+
 func TestAssetStore_CreateGetUpdateDelete(t *testing.T) {
 	testPool(t) // ensures migrations are applied before the scoped pool is used
 	priv := testPool(t)
@@ -32,7 +46,7 @@ func TestAssetStore_CreateGetUpdateDelete(t *testing.T) {
 
 	scoped := tenantScopedPool(t)
 	store := NewAssetStore(scoped)
-	ctx := domain.WithTenant(context.Background(), tn)
+	ctx := assetTestCtx(tn)
 
 	a, err := domain.NewAsset(tn.TenantID, "server", "db-primary-01", map[string]any{"region": "us-east-1"})
 	if err != nil {
@@ -58,16 +72,23 @@ func TestAssetStore_CreateGetUpdateDelete(t *testing.T) {
 	}
 
 	newName := "db-primary-02"
-	newStatus := domain.AssetRetired
 	updated, err := store.Update(ctx, created.AssetID, created.RowVersion, domain.AssetPatch{
-		Name: &newName, Attributes: map[string]any{"region": "us-west-2"}, Status: &newStatus,
+		Name: &newName, Attributes: map[string]any{"region": "us-west-2"},
 	})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if updated.Name != newName || updated.Status != domain.AssetRetired ||
+	if updated.Name != newName ||
 		updated.Attributes["region"] != "us-west-2" || updated.RowVersion != created.RowVersion+1 {
 		t.Errorf("unexpected update result: %+v", updated)
+	}
+
+	retired, err := store.SetStatus(ctx, updated.AssetID, updated.RowVersion, domain.AssetRetired)
+	if err != nil {
+		t.Fatalf("set status: %v", err)
+	}
+	if retired.Status != domain.AssetRetired || retired.RowVersion != updated.RowVersion+1 {
+		t.Errorf("unexpected transition result: %+v", retired)
 	}
 
 	if err := store.Delete(ctx, created.AssetID); err != nil {
@@ -85,7 +106,7 @@ func TestAssetStore_UpdateDetectsVersionConflict(t *testing.T) {
 
 	scoped := tenantScopedPool(t)
 	store := NewAssetStore(scoped)
-	ctx := domain.WithTenant(context.Background(), tn)
+	ctx := assetTestCtx(tn)
 
 	a, _ := domain.NewAsset(tn.TenantID, "server", "Host", nil)
 	created, err := store.Create(ctx, a)
@@ -111,7 +132,7 @@ func TestAssetStore_GetUnknownIsNotFound(t *testing.T) {
 
 	scoped := tenantScopedPool(t)
 	store := NewAssetStore(scoped)
-	ctx := domain.WithTenant(context.Background(), tn)
+	ctx := assetTestCtx(tn)
 
 	if _, err := store.Get(ctx, "no-such-asset"); !errors.Is(err, domain.ErrNotFound) {
 		t.Errorf("get unknown asset = %v, want ErrNotFound", err)
@@ -136,8 +157,8 @@ func TestAssetStore_RLSIsolatesAssetsByTenant(t *testing.T) {
 	scoped := tenantScopedPool(t)
 	store := NewAssetStore(scoped)
 
-	ctxA := domain.WithTenant(context.Background(), a)
-	ctxB := domain.WithTenant(context.Background(), b)
+	ctxA := assetTestCtx(a)
+	ctxB := assetTestCtx(b)
 
 	assetA, _ := domain.NewAsset(a.TenantID, "server", "tenant-a-host", nil)
 	createdA, err := store.Create(ctxA, assetA)
@@ -157,7 +178,7 @@ func TestAssetStore_RLSIsolatesAssetsByTenant(t *testing.T) {
 
 	// List: tenant B's page contains only tenant B's own asset, regardless of
 	// how many other tenants' assets exist in the table.
-	pageB, err := store.List(ctxB, 0, "")
+	pageB, err := store.List(ctxB, 0, "", "")
 	if err != nil {
 		t.Fatalf("list as tenant b: %v", err)
 	}
@@ -184,7 +205,7 @@ func TestAssetRelationship_CreateListDelete(t *testing.T) {
 
 	scoped := tenantScopedPool(t)
 	store := NewAssetStore(scoped)
-	ctx := domain.WithTenant(context.Background(), tn)
+	ctx := assetTestCtx(tn)
 
 	app, _ := domain.NewAsset(tn.TenantID, "application", "checkout-svc", nil)
 	app, err := store.Create(ctx, app)
@@ -238,7 +259,7 @@ func TestAssetStore_DeleteCascadesToRelationships(t *testing.T) {
 
 	scoped := tenantScopedPool(t)
 	store := NewAssetStore(scoped)
-	ctx := domain.WithTenant(context.Background(), tn)
+	ctx := assetTestCtx(tn)
 
 	app, _ := domain.NewAsset(tn.TenantID, "application", "app", nil)
 	app, _ = store.Create(ctx, app)
@@ -281,8 +302,8 @@ func TestAssetRelationship_CannotCrossTenants(t *testing.T) {
 
 	scoped := tenantScopedPool(t)
 	store := NewAssetStore(scoped)
-	ctxA := domain.WithTenant(context.Background(), a)
-	ctxB := domain.WithTenant(context.Background(), b)
+	ctxA := assetTestCtx(a)
+	ctxB := assetTestCtx(b)
 
 	victimAsset, _ := domain.NewAsset(a.TenantID, "server", "victim-host", nil)
 	victim, err := store.Create(ctxA, victimAsset)
@@ -335,7 +356,7 @@ func TestAssetGraph_TraversalOverCMDB(t *testing.T) {
 
 	scoped := tenantScopedPool(t)
 	store := NewAssetStore(scoped)
-	ctx := domain.WithTenant(context.Background(), tn)
+	ctx := assetTestCtx(tn)
 
 	mk := func(assetType, name string) *domain.Asset {
 		a, err := domain.NewAsset(tn.TenantID, assetType, name, nil)
@@ -482,8 +503,8 @@ func TestAssetStore_OwnerRefsCannotCrossTenants(t *testing.T) {
 	scoped := tenantScopedPool(t)
 	store := NewAssetStore(scoped)
 
-	ctxA := domain.WithTenant(context.Background(), &domain.Tenant{TenantID: orgA.TenantID})
-	ctxB := domain.WithTenant(context.Background(), &domain.Tenant{TenantID: orgB.TenantID})
+	ctxA := assetTestCtx(&domain.Tenant{TenantID: orgA.TenantID})
+	ctxB := assetTestCtx(&domain.Tenant{TenantID: orgB.TenantID})
 
 	// Tenant B attempting to own an asset by tenant A's team.
 	byTeam, err := domain.NewAsset(orgB.TenantID, "server", "tenant-b-host-team", nil)
@@ -511,7 +532,7 @@ func TestAssetStore_OwnerRefsCannotCrossTenants(t *testing.T) {
 	}
 
 	// No row was created under either attempt: the tenant's own list is empty.
-	pageB, err := store.List(ctxB, 0, "")
+	pageB, err := store.List(ctxB, 0, "", "")
 	if err != nil {
 		t.Fatalf("list as tenant b: %v", err)
 	}
@@ -571,7 +592,7 @@ func TestAssetStore_UpdateClearsOwnerReference(t *testing.T) {
 	orgA, _, user, teamA := assetOwnerFixture(t)
 	scoped := tenantScopedPool(t)
 	store := NewAssetStore(scoped)
-	ctx := domain.WithTenant(context.Background(), &domain.Tenant{TenantID: orgA.TenantID})
+	ctx := assetTestCtx(&domain.Tenant{TenantID: orgA.TenantID})
 
 	a, err := domain.NewAsset(orgA.TenantID, "server", "owned-host", nil)
 	if err != nil {
@@ -611,7 +632,7 @@ func TestAssetGraph_ServiceMapFiltersToCompositionEdges(t *testing.T) {
 
 	scoped := tenantScopedPool(t)
 	store := NewAssetStore(scoped)
-	ctx := domain.WithTenant(context.Background(), tn)
+	ctx := assetTestCtx(tn)
 
 	mk := func(assetType, name string) *domain.Asset {
 		a, err := domain.NewAsset(tn.TenantID, assetType, name, nil)

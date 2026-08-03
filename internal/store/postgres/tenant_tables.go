@@ -40,4 +40,5 @@ var TenantOwnedTables = []string{
 	"approval_record",
 	"asset",
 	"asset_relationship",
+	"asset_change_history",
 }
