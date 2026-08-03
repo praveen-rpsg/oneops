@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rpsg/oneops/internal/domain"
 )
@@ -14,7 +15,7 @@ import (
 type fakeAssets struct {
 	creates, gets, lists, patches, deletes, setStatuses, histories int
 	relCreates, relDeletes, relFroms, relTos                       int
-	upserts, exports, duplicates                                   int
+	upserts, exports, duplicates, healths                          int
 	lastTenant                                                     string
 	createRelErr                                                   error
 	createErr                                                      error
@@ -24,6 +25,7 @@ type fakeAssets struct {
 	upsertErr                                                      error
 	exportErr                                                      error
 	duplicatesErr                                                  error
+	healthErr                                                      error
 	lastCreated                                                    *domain.Asset
 	lastPatch                                                      domain.AssetPatch
 	lastStatus                                                     domain.AssetStatus
@@ -35,6 +37,8 @@ type fakeAssets struct {
 	upsertCreated                                                  bool
 	exportItems                                                    []*domain.Asset
 	duplicateGroups                                                []*domain.AssetDuplicateGroup
+	healthReport                                                   *domain.AssetHealthReport
+	lastStaleAfter                                                 time.Duration
 }
 
 func (f *fakeAssets) Create(_ context.Context, a *domain.Asset) (*domain.Asset, error) {
@@ -138,9 +142,20 @@ func (f *fakeAssets) Duplicates(context.Context) ([]*domain.AssetDuplicateGroup,
 	}
 	return f.duplicateGroups, nil
 }
+func (f *fakeAssets) Health(_ context.Context, staleAfter time.Duration) (*domain.AssetHealthReport, error) {
+	f.healths++
+	f.lastStaleAfter = staleAfter
+	if f.healthErr != nil {
+		return nil, f.healthErr
+	}
+	if f.healthReport != nil {
+		return f.healthReport, nil
+	}
+	return &domain.AssetHealthReport{StaleAfter: staleAfter}, nil
+}
 func (f *fakeAssets) touched() int {
 	return f.creates + f.gets + f.lists + f.patches + f.deletes + f.setStatuses + f.histories +
-		f.relCreates + f.relDeletes + f.relFroms + f.relTos + f.upserts + f.exports + f.duplicates
+		f.relCreates + f.relDeletes + f.relFroms + f.relTos + f.upserts + f.exports + f.duplicates + f.healths
 }
 
 // Asset is tenant-owned, so the authorization tier is tenant administration —
@@ -160,6 +175,7 @@ func TestAssets_Authorization(t *testing.T) {
 		{http.MethodPost, "/v1/admin/assets/import", `{"items":[{"type":"server","name":"host"}]}`},
 		{http.MethodGet, "/v1/admin/assets/export", ""},
 		{http.MethodGet, "/v1/admin/assets/duplicates", ""},
+		{http.MethodGet, "/v1/admin/assets/health", ""},
 	}
 	cases := []struct {
 		name  string
@@ -1023,6 +1039,102 @@ func TestDuplicateAssets_NotConfiguredReturns501(t *testing.T) {
 	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/duplicates", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// GET .../health with no stale_after defaults to domain.DefaultAssetStaleAfter
+// and renders every category (E1.5).
+func TestAssetHealth_HappyPathDefaultsStaleAfter(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{healthReport: &domain.AssetHealthReport{
+		StaleAfter: domain.DefaultAssetStaleAfter,
+		Stale: domain.AssetHealthCategory{Count: 2, Samples: []domain.AssetHealthSample{
+			{AssetID: "a1", Type: "server", Name: "host-1"},
+		}},
+		OrphanedAssets:           domain.AssetHealthCategory{Count: 1},
+		OrphanedBusinessServices: domain.AssetHealthCategory{Count: 0},
+		Incomplete:               domain.AssetHealthCategory{Count: 3},
+	}}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/health", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if spy.healths != 1 {
+		t.Fatalf("store reached %d time(s), want 1", spy.healths)
+	}
+	if spy.lastStaleAfter != domain.DefaultAssetStaleAfter {
+		t.Errorf("stale_after = %v, want the default %v", spy.lastStaleAfter, domain.DefaultAssetStaleAfter)
+	}
+	var body assetHealthReportDTO
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Stale.Count != 2 || len(body.Stale.Samples) != 1 {
+		t.Errorf("stale = %+v", body.Stale)
+	}
+	if body.OrphanedAssets.Count != 1 || body.Incomplete.Count != 3 {
+		t.Errorf("unexpected counts: %+v", body)
+	}
+}
+
+// stale_after is parsed and forwarded to the repository unchanged.
+func TestAssetHealth_ParsesStaleAfterQueryParam(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/health?stale_after=1h", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if spy.lastStaleAfter != time.Hour {
+		t.Errorf("stale_after = %v, want 1h", spy.lastStaleAfter)
+	}
+}
+
+// An invalid stale_after is a 422, and the store is never reached.
+func TestAssetHealth_RejectsInvalidStaleAfter(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/health?stale_after=not-a-duration", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	if spy.healths != 0 {
+		t.Error("an invalid stale_after reached the store")
+	}
+}
+
+func TestAssetHealth_NotConfiguredReturns501(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/health", nil)
 	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
 	rec := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rec, req)

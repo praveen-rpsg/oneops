@@ -271,9 +271,20 @@ type Asset struct {
 	// against, which is what makes re-importing the same source data
 	// idempotent instead of creating a duplicate row each time.
 	ExternalRef *string
-	RowVersion  int64
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// LastSeen is when this CI was last confirmed by a source (E1.5): the
+	// import/upsert path (Upsert) and a manual Create/Update all set it to
+	// the write's own "now", because each is itself an act of confirming the
+	// CI. Nil means "never confirmed since this column existed" — a row
+	// written before this migration and never touched since, which the
+	// health report (below) treats identically to "confirmed a very long
+	// time ago": both are facts worth surfacing, not facts to distinguish. A
+	// caller cannot set this directly; there is no field for it in
+	// createAssetRequest/importAssetRow — it is a derived write-time fact,
+	// not request data, the same way CreatedAt/UpdatedAt already are.
+	LastSeen   *time.Time
+	RowVersion int64
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // Active reports whether the asset is in ordinary use.
@@ -635,6 +646,85 @@ type AssetDuplicateGroup struct {
 	Members []AssetDuplicateMember
 }
 
+// DefaultAssetStaleAfter is GET /admin/assets/health's default `stale_after`
+// threshold when the query parameter is omitted: an active/maintenance CI
+// whose LastSeen (or whose LastSeen is nil) is older than this is reported
+// stale. 30 days is a sane default for a CMDB fed by periodic
+// discovery/import sweeps (E1.4) rather than continuous telemetry — that
+// finer-grained freshness signal is E2's, not this one's.
+const DefaultAssetStaleAfter = 30 * 24 * time.Hour
+
+// ParseAssetStaleAfter parses the stale_after query parameter for the CMDB
+// health report. An empty string is DefaultAssetStaleAfter, not an error —
+// most callers never need to override it. Used only at the transport
+// boundary; AssetRepository.Health takes the parsed time.Duration, never the
+// raw string.
+func ParseAssetStaleAfter(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return DefaultAssetStaleAfter, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, newValidation("stale_after", "must be a valid duration, e.g. 720h, 30m")
+	}
+	if d <= 0 {
+		return 0, newValidation("stale_after", "must be a positive duration")
+	}
+	return d, nil
+}
+
+// AssetHealthSample identifies one Configuration Item inside a bounded
+// health-report category — enough for an operator to act on (e.g. GET
+// /admin/assets/{id}) without a second round-trip.
+type AssetHealthSample struct {
+	AssetID string
+	Type    string
+	Name    string
+}
+
+// AssetHealthCategory is one CMDB data-quality/freshness dimension: Count is
+// the TRUE, uncapped number of matching Configuration Items; Samples is
+// capped (AssetRepository.Health bounds it — see maxAssetHealthSampleRows in
+// the store) so the report itself can never become an unbounded dump of the
+// whole CMDB. The two numbers can diverge — an operator with more candidates
+// than the cap re-runs the report after acting on the visible sample, or (for
+// Stale) narrows stale_after.
+type AssetHealthCategory struct {
+	Count   int
+	Samples []AssetHealthSample
+}
+
+// AssetHealthReport is the read-only CMDB data-quality/freshness projection
+// (E1.5, docs/PLATFORM-BUILD-PLAN.md). It answers "where is the record
+// rotting", never "does the record match reality" — the latter is
+// config-drift-vs-discovered-state, which needs the "actual" state E2
+// monitoring/discovery has not built yet, and is explicitly out of scope
+// here. A retired Configuration Item is excluded from every category below,
+// the same soft-retire default AssetRepository.List already applies: a
+// decommissioned CI with no owner or no relationships is not a data-quality
+// problem, it is the expected state of something taken out of service.
+type AssetHealthReport struct {
+	// StaleAfter is the threshold this report was computed against, echoed
+	// back so a caller can tell which configuration produced it.
+	StaleAfter time.Duration
+	// Stale: active/maintenance CIs whose LastSeen is older than StaleAfter,
+	// or nil (never confirmed by any source — see Asset.LastSeen).
+	Stale AssetHealthCategory
+	// OrphanedAssets: CIs with NO relationship at all, neither an outgoing
+	// nor an incoming edge — unreachable from anything else in the CMDB
+	// graph.
+	OrphanedAssets AssetHealthCategory
+	// OrphanedBusinessServices: business_service CIs with no supporting
+	// CIs — no outgoing depends_on/runs_on edge, the composition
+	// GET .../service-map would otherwise report empty.
+	OrphanedBusinessServices AssetHealthCategory
+	// Incomplete: CIs missing basic classification — unowned (both
+	// OwnerTeamID and OwnerUserID nil), or Criticality/Environment left at
+	// "unknown".
+	Incomplete AssetHealthCategory
+}
+
 // AssetRepository administers the CMDB: assets, the relationships between
 // them, and each asset's append-only change history.
 //
@@ -657,7 +747,10 @@ type AssetRepository interface {
 	// AssetPatch for why the foreign key alone is not enough (ADR-ASSET-001
 	// §6, extended to ownership). A non-nil id the tenant cannot see returns
 	// ErrNotFound. The acting identity comes from ActorFrom(ctx); an
-	// unattributable call returns ErrNoActor.
+	// unattributable call returns ErrNoActor. LastSeen is set to the write's
+	// own "now" regardless of anything a.LastSeen carries (E1.5): a caller
+	// cannot set it directly (see Asset.LastSeen's doc comment) — creating a
+	// CI is itself the first confirmation of it.
 	Create(ctx context.Context, a *Asset) (*Asset, error)
 	Get(ctx context.Context, assetID string) (*Asset, error)
 	// List returns a page of the caller's assets, keyset-paginated over
@@ -672,7 +765,11 @@ type AssetRepository interface {
 	// field actually changed, in the same transaction as the UPDATE. Owner
 	// references are re-verified exactly as Create re-verifies them. The
 	// acting identity comes from ActorFrom(ctx); an unattributable call
-	// returns ErrNoActor.
+	// returns ErrNoActor. LastSeen is set to the write's own "now" (E1.5): an
+	// operator editing a CI by hand is themselves confirming it, the same
+	// reasoning Create's own LastSeen write rests on. This is never recorded
+	// as an AssetChangeUpdated row — LastSeen is a derived freshness signal,
+	// not a field a caller is changing.
 	Update(ctx context.Context, assetID string, rowVersion int64, patch AssetPatch) (*Asset, error)
 	// SetStatus performs a lifecycle transition under optimistic locking,
 	// guarded by AssetStatus.CanTransitionTo — the single authority for
@@ -714,6 +811,18 @@ type AssetRepository interface {
 	// re-verified exactly as Create/Update re-verify them. Returns the
 	// resulting asset and whether it was created (true) or an existing row
 	// was matched and updated (false).
+	//
+	// LastSeen is ALWAYS set to the write's own "now" (E1.5) — including on a
+	// no-op re-import that finds no field changed. A re-import genuinely
+	// re-confirms the CI is still there, so refusing to touch LastSeen on
+	// that path would make freshness detection blind to a CMDB whose only
+	// activity is a scanner re-reporting the same unchanged inventory sweep
+	// after sweep. Critically, this LastSeen-only write on the no-op path
+	// bumps neither RowVersion nor UpdatedAt and records no
+	// AssetChangeUpdated row — point 9's idempotency guarantee (no new row,
+	// no history, no version bump on an unchanged re-import) is about the
+	// CMDB's SUBSTANTIVE fields, not about this derived freshness signal, and
+	// is unaffected by it.
 	Upsert(ctx context.Context, a *Asset) (result *Asset, created bool, err error)
 	// Export returns a page of EVERY asset regardless of status — INCLUDING
 	// retired — for backup/migration (E1.4). Unlike List, nothing here is
@@ -727,6 +836,16 @@ type AssetRepository interface {
 	// a read-only projection: it mutates nothing. Controlled merge is
 	// E1.4b, a separate, later increment.
 	Duplicates(ctx context.Context) ([]*AssetDuplicateGroup, error)
+
+	// Health returns the CMDB data-quality/freshness report (E1.5) — see
+	// AssetHealthReport's doc comment for exactly what each category means
+	// and what it deliberately does not claim. Read-only: it mutates
+	// nothing. staleAfter is the caller-chosen threshold for the Stale
+	// category (ParseAssetStaleAfter parses the transport-layer query
+	// parameter); every other category's rule is fixed. Bounded: each
+	// category's Count is exact, but Samples is capped, so this can never
+	// become an unbounded scan returning every Configuration Item.
+	Health(ctx context.Context, staleAfter time.Duration) (*AssetHealthReport, error)
 
 	// CreateRelationship inserts a relationship. Both endpoints must already
 	// be visible to the caller's tenant; a from/to id the tenant cannot see

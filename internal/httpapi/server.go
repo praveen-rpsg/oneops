@@ -373,6 +373,10 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/assets/import", s.importAssets)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/export", s.exportAssets)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/duplicates", s.duplicateAssets)
+		// CMDB health: staleness/orphan/incomplete data-quality report (E1.5),
+		// a read-only projection like duplicates above — same static-collection
+		// mount alongside /admin/assets/{id}.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/health", s.assetHealth)
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/assets/relationships", s.createAssetRelationship)
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/assets/relationships/{id}", s.deleteAssetRelationship)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/{id}", s.getAsset)
