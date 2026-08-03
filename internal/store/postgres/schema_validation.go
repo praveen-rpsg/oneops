@@ -127,6 +127,10 @@ var immutableAuditTables = []struct {
 }{
 	{"audit_event", "trg_audit_event_no_row_mutate", "trg_audit_event_no_truncate", true},
 	{"admin_audit_event", "trg_admin_audit_event_no_row_mutate", "trg_admin_audit_event_no_truncate", true},
+	// asset_change_history (E1.3): tenant-owned CMDB change history, armed
+	// ENABLE ALWAYS from its first migration rather than hardened after the
+	// fact — see 20260818000001_asset_lifecycle.sql.
+	{"asset_change_history", "trg_asset_change_history_no_row_mutate", "trg_asset_change_history_no_truncate", true},
 }
 
 // validateAuditImmutability verifies that every append-only audit table, and

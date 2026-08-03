@@ -1224,7 +1224,10 @@ paths:
         asset is tenant-owned and under row-level security, exactly like
         Team, so the result is confined to the caller's tenant by the
         database. Paging is keyset over `asset_id`, a ULID and therefore
-        ordered by creation.
+        ordered by creation. By default a retired asset is excluded
+        (soft-retire, E1.3) — it still exists and is still fetchable via
+        GET /admin/assets/{id}, just not in this default view — and
+        ?status=retired lists exactly the retired ones.
       operationId: listAssets
       security: [ { bearerAuth: [] } ]
       parameters:
@@ -1235,6 +1238,12 @@ paths:
           in: query
           description: Keyset cursor — the last asset_id of the previous page.
           schema: { type: string }
+        - name: status
+          in: query
+          description: >-
+            Filter to exactly this status. Omitted, the default view
+            excludes retired but includes every other status.
+          schema: { type: string, enum: [planned, active, maintenance, retired] }
       responses:
         '200':
           description: A page of assets
@@ -1330,11 +1339,15 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
     patch:
-      summary: Change an asset's name, attributes and/or status
+      summary: Change an asset's fields, or perform a lifecycle transition
       description: >-
-        Supply at least one of name, attributes or status. Unlike
-        PatchTeamRequest, these may be combined in one call — Asset has no
-        authorisation-adjacent status split to protect.
+        Two mutually exclusive shapes (E1.3): supply status ALONE to
+        transition the CMDB lifecycle (planned/active/maintenance/retired,
+        checked against AssetStatus.CanTransitionTo — an illegal move
+        returns 409), or supply one or more of name, attributes,
+        environment, criticality, owner_team_id, owner_user_id (freely
+        combinable — Asset has no authorisation-adjacent split among these).
+        Combining status with any other field is refused with 422.
       operationId: patchAsset
       security: [ { bearerAuth: [] } ]
       parameters:
@@ -1464,6 +1477,37 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ServiceMapResponse' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/assets/{id}/history:
+    get:
+      summary: An asset's append-only change history (E1.3)
+      description: >-
+        Every recorded change to this Configuration Item — field, old/new
+        value, actor and the resulting row_version — in chronological order.
+        Written by AssetStore.Create/Update/SetStatus in the same
+        transaction as the mutation it describes; asset_change_history is
+        append-only at the schema level (ENABLE ALWAYS triggers + revoked
+        UPDATE/DELETE/TRUNCATE), mirroring audit_event. Paging is keyset
+        over `change_id`, a ULID and therefore chronological.
+      operationId: getAssetHistory
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last change_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of the asset's change history
+          content: { application/json: { schema: { $ref: '#/components/schemas/AssetChangeHistoryList' } } }
         '401': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
@@ -2142,7 +2186,7 @@ components:
         attributes:
           type: object
           additionalProperties: true
-        status: { type: string, enum: [active, retired] }
+        status: { type: string, enum: [planned, active, maintenance, retired] }
         environment:
           type: string
           enum: [production, staging, development, unknown]
@@ -2176,13 +2220,18 @@ components:
         default the column carries). owner_team_id/owner_user_id are
         optional; when set, the id is re-verified against the caller's
         tenant before the asset is written (ADR-ASSET-001 §6, extended to
-        ownership) — an id the tenant cannot see returns 404.
+        ownership) — an id the tenant cannot see returns 404. status is
+        optional and defaults to "active"; the only other accepted value at
+        creation is "planned" — maintenance and retired describe something
+        that happened to a CI already in service and are reached only by a
+        later PATCH .../status transition (E1.3).
       properties:
         type: { type: string }
         name: { type: string, maxLength: 200 }
         attributes:
           type: object
           additionalProperties: true
+        status: { type: string, enum: [planned, active] }
         environment:
           type: string
           enum: [production, staging, development, unknown]
@@ -2195,11 +2244,14 @@ components:
       type: object
       required: [row_version]
       description: >-
-        Supply at least one of name, attributes, status, environment,
-        criticality, owner_team_id or owner_user_id. owner_team_id/
-        owner_user_id are tri-state: absent leaves ownership unchanged, ""
-        clears it, and a non-empty id sets it (re-verified against the
-        caller's tenant first).
+        Supply either status alone (a lifecycle transition, checked against
+        the CMDB state machine — E1.3) or one or more of name, attributes,
+        environment, criticality, owner_team_id, owner_user_id — never both
+        in the same call; combining them is refused with 422 for the same
+        reason PatchUserRequest refuses combining display_name and status.
+        owner_team_id/owner_user_id are tri-state: absent leaves ownership
+        unchanged, "" clears it, and a non-empty id sets it (re-verified
+        against the caller's tenant first).
       properties:
         row_version: { type: integer, format: int64, minimum: 1 }
         name: { type: string, maxLength: 200 }
@@ -2208,7 +2260,12 @@ components:
           additionalProperties: true
         status:
           type: string
-          enum: [active, retired]
+          enum: [planned, active, maintenance, retired]
+          description: >-
+            A lifecycle transition target, checked against
+            AssetStatus.CanTransitionTo; an illegal move (e.g. planned ->
+            maintenance) returns 409. Mutually exclusive with every other
+            field in this request.
         environment:
           type: string
           enum: [production, staging, development, unknown]
@@ -2278,6 +2335,28 @@ components:
             properties:
               asset_id: { type: string }
               depth: { type: integer }
+    AssetChangeEntry:
+      type: object
+      description: >-
+        One append-only row of an asset's change history (E1.3). field/
+        old_value/new_value are absent for the single "created" row written
+        at insert time — there is no prior state to diff against.
+      properties:
+        change_id: { type: string }
+        asset_id: { type: string }
+        kind: { type: string, enum: [created, updated, status_transitioned] }
+        field: { type: string }
+        old_value: { type: string, nullable: true }
+        new_value: { type: string, nullable: true }
+        actor: { type: string }
+        row_version: { type: integer, format: int64 }
+        occurred_at: { type: string, format: date-time }
+    AssetChangeHistoryList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AssetChangeEntry' }
     Setting:
       type: object
       description: >-

@@ -377,6 +377,7 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/{id}/dependencies", s.getAssetDependencies)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/{id}/dependents", s.getAssetDependents)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/{id}/service-map", s.getAssetServiceMap)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/{id}/history", s.getAssetHistory)
 
 		// Notification administration (read-only). notification is TENANT-OWNED,
 		// exactly like team above, so the permission tier is tenant

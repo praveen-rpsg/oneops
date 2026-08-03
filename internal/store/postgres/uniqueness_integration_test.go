@@ -62,6 +62,9 @@ var serverGeneratedIdentifiers = map[string]string{
 	"asset_pkey":              "asset_id is server-minted (domain.NewAsset); no create route accepts one from a client",
 	"asset_relationship_pkey": "relationship_id is server-minted (domain.NewAssetRelationship); no create route accepts one from a client",
 	"uq_asset_relationship":   "keyed on from_asset_id/to_asset_id, both server-minted asset_ids AssetStore.CreateRelationship confirms belong to the caller's tenant before insert (ADR-ASSET-001 §6), plus a closed relationship type",
+
+	// CI lifecycle + change history (E1.3).
+	"asset_change_history_pkey": "change_id is server-minted (domain.NewID() in AssetStore.recordChange); no route accepts one from a client",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

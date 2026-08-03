@@ -86,12 +86,25 @@ built from the tenant-scoped pool exactly like `team`/`team_membership`
 the connection.
 
 **5. Asset retirement is a status change, not a delete; asset deletion is a
-real DELETE.** `AssetStatus` (`active`/`retired`) exists so a relationship
-naming a decommissioned asset is not orphaned by a routine status change —
-mirroring `TeamStatus`. A hard `Delete` is still offered (unlike Team) because
-an Asset is not a named governed grouping; its relationships are removed with
-it via `ON DELETE CASCADE`, the same way `dependency_edge` cascades off
+real DELETE.** A hard `Delete` is still offered (unlike Team) because an Asset
+is not a named governed grouping; its relationships are removed with it via
+`ON DELETE CASCADE`, the same way `dependency_edge` cascades off
 `configuration_object`.
+
+> **Amended by OPS-CMDB-003 (E1.3), 2026-08-01.** The originally-ratified
+> `AssetStatus` was two states (`active`/`retired`) mirroring `TeamStatus`. A CI
+> has a richer operational life than a governed grouping, so the lifecycle is
+> now a **four-state machine** — `planned → active ⇄ maintenance → retired`,
+> plus a `retired → active` **reinstate** edge (a decommissioned CI can be
+> redeployed; this is an operational fact, not a governance act). Legal edges
+> live as data (`domain.assetTransitions`, mirroring `user.go`'s
+> `CanTransitionTo`); `SetStatus` is the single transition authority
+> (`AssetPatch.Status` was removed). Rationale: `planned` models a CI registered
+> before it is live; `maintenance` models a CI intentionally taken out of
+> service without retiring it — both are needed for accurate health rollups
+> (E7) and change/incident context (E5). Retirement remains a status, not a
+> delete, and a retired asset keeps its relationships and history. This
+> paragraph supersedes the `active`/`retired`-only text above.
 
 **6. Relationship creation re-verifies both endpoints on the tenant-scoped
 connection; it does not trust the foreign key alone.**

@@ -7,21 +7,116 @@ import (
 	"time"
 )
 
-// AssetStatus is the lifecycle of a Configuration Item.
+// AssetStatus is the lifecycle of a Configuration Item (E1.3, extending
+// ADR-ASSET-001 §5).
 //
-// Modelled on TeamStatus rather than a hard delete: a retired asset keeps its
-// row so a relationship, and eventually a monitor or an incident, that already
-// names it is not orphaned (ADR-ASSET-001 §5).
+// §5 originally modelled this as a two-value active/retired pair mirroring
+// TeamStatus. E1.3 widens it to a real lifecycle — planned -> active ->
+// retired, with maintenance as a reversible detour off active — because a
+// CMDB CI has states TeamStatus never needed: a server can be racked and
+// named before it ever serves traffic (planned), and taken down for patching
+// without being decommissioned (maintenance). The "keep the row, never hard
+// delete on a status change" reasoning §5 gives for retirement is unchanged
+// and now applies to every state, not just the terminal one.
 type AssetStatus string
 
 const (
-	AssetActive  AssetStatus = "active"
+	// AssetPlanned is a Configuration Item that has been registered but is
+	// not yet in service — provisioned but not live. It is the default only
+	// for a caller that asks for it explicitly at creation; NewAsset itself
+	// still defaults to active (see its doc comment).
+	AssetPlanned AssetStatus = "planned"
+	// AssetActive is a Configuration Item in ordinary service.
+	AssetActive AssetStatus = "active"
+	// AssetMaintenance is a temporary, reversible detour off active — the CI
+	// is out of service for planned work, not decommissioned.
+	AssetMaintenance AssetStatus = "maintenance"
+	// AssetRetired is a decommissioned Configuration Item. The row survives
+	// (ADR-ASSET-001 §5) so a relationship, monitor or incident that already
+	// names it is not orphaned. Unlike UserStatus.deactivated, retirement is
+	// NOT terminal here: a decommissioned server can be redeployed, so
+	// retired -> active ("reinstate") is a permitted transition — see
+	// assetTransitions.
 	AssetRetired AssetStatus = "retired"
 )
 
 // Valid reports whether s is a defined status.
 func (s AssetStatus) Valid() bool {
-	return s == AssetActive || s == AssetRetired
+	switch s {
+	case AssetPlanned, AssetActive, AssetMaintenance, AssetRetired:
+		return true
+	default:
+		return false
+	}
+}
+
+// assetTransitions is the whole lifecycle, as data rather than as a chain of
+// conditionals — mirrors userTransitions (internal/domain/user.go). A
+// transition absent here is refused, so adding a state means stating every
+// edge it has instead of discovering the omissions in production.
+//
+// retired -> active is "reinstate": deliberately permitted, unlike
+// UserStatus's terminal deactivated, because an Asset's retirement is an
+// operational fact (decommissioned hardware/software), not a governance
+// act — the same CI can be redeployed and go back into service. Reinstating
+// goes straight to active, not back through planned: the CI already has a
+// history, so replanning it would misrepresent it as new.
+var assetTransitions = map[AssetStatus][]AssetStatus{
+	AssetPlanned:     {AssetActive, AssetRetired},
+	AssetActive:      {AssetMaintenance, AssetRetired},
+	AssetMaintenance: {AssetActive, AssetRetired},
+	AssetRetired:     {AssetActive},
+}
+
+// initialAssetStatuses are the statuses a caller may request AT CREATION.
+// maintenance and retired are reachable only by transition (SetStatus): an
+// asset created already "under maintenance" or "retired" has no history to
+// justify either state.
+var initialAssetStatuses = map[AssetStatus]bool{
+	AssetPlanned: true,
+	AssetActive:  true,
+}
+
+// CanTransitionTo reports whether from -> to is a permitted lifecycle move.
+// A transition to the current state is refused: it is a no-op that would
+// consume a row version and write a history record recording nothing.
+func (s AssetStatus) CanTransitionTo(to AssetStatus) bool {
+	for _, allowed := range assetTransitions[s] {
+		if allowed == to {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidInitialStatus reports whether s may be set directly at creation,
+// bypassing the transition guard entirely. planned and active are
+// creation-time facts about a CI that did not exist a moment ago; maintenance
+// and retired describe something that happened to a CI already in service,
+// so they are reachable only through SetStatus.
+func (s AssetStatus) ValidInitialStatus() bool { return initialAssetStatuses[s] }
+
+// AssetTransitionError is a refused lifecycle move, naming both ends so the
+// message says which move was attempted rather than only that one was. It
+// wraps the shared ErrInvalidTransition (defined in user.go), so callers may
+// match the class with errors.Is regardless of which entity's lifecycle
+// refused the move — mirrors user.go's TransitionError exactly, scoped to
+// AssetStatus because Go's type system will not let one struct carry both.
+type AssetTransitionError struct {
+	From AssetStatus
+	To   AssetStatus
+}
+
+func (e *AssetTransitionError) Error() string {
+	return "invalid lifecycle transition: " + string(e.From) + " -> " + string(e.To)
+}
+
+// Unwrap makes errors.Is(err, ErrInvalidTransition) true for this type.
+func (e *AssetTransitionError) Unwrap() error { return ErrInvalidTransition }
+
+// NewAssetTransitionError builds an *AssetTransitionError naming both ends.
+func NewAssetTransitionError(from, to AssetStatus) *AssetTransitionError {
+	return &AssetTransitionError{From: from, To: to}
 }
 
 // MaxAssetNameLength bounds a free-text field that reaches consoles and logs,
@@ -182,7 +277,7 @@ func (a *Asset) Validate() error {
 		return newValidation("name", "must be at most 200 characters")
 	}
 	if !a.Status.Valid() {
-		return newValidation("status", "must be one of: active, retired")
+		return newValidation("status", "must be one of: planned, active, maintenance, retired")
 	}
 	if !a.Environment.Valid() {
 		return newValidation("environment", "must be one of: production, staging, development, unknown")
@@ -199,9 +294,16 @@ func (a *Asset) Validate() error {
 	return nil
 }
 
-// NewAsset builds an active asset. attributes may be nil, which is stored as
-// an empty object rather than SQL NULL — a caller reading it back always gets
-// a map, never a nil-check surprise.
+// NewAsset builds an active asset. Active, not planned, remains the default
+// (E1.3 decision, unchanged from E1.1): the common case registering a CMDB
+// entry is describing infrastructure that already exists and is already
+// serving, not one being pre-provisioned. A caller that wants a planned CI
+// sets Status explicitly before calling AssetRepository.Create, which
+// accepts any AssetStatus.ValidInitialStatus() value.
+//
+// attributes may be nil, which is stored as an empty object rather than SQL
+// NULL — a caller reading it back always gets a map, never a nil-check
+// surprise.
 func NewAsset(tenantID, assetType, name string, attributes map[string]any) (*Asset, error) {
 	if attributes == nil {
 		attributes = map[string]any{}
@@ -307,8 +409,15 @@ func NewAssetRelationship(tenantID, fromAssetID, toAssetID string, relType Relat
 }
 
 // AssetPatch carries the fields AssetRepository.Update may change; a nil
-// pointer leaves that field unchanged, exactly as name/attributes/status
-// already worked before this type existed.
+// pointer leaves that field unchanged, exactly as name/attributes already
+// worked before this type existed.
+//
+// Status is deliberately ABSENT (E1.3): a lifecycle move is no longer a field
+// like any other. AssetRepository.SetStatus is now the single place a
+// transition is checked (mirrors UserRepository.SetStatus/UserRepository.
+// UpdateProfile's split) — folding it back into Update would let a caller
+// change status without going through CanTransitionTo, or hide an illegal
+// move inside a multi-field patch.
 //
 // OwnerTeamID/OwnerUserID are doubly-optional, encoded in a single *string
 // rather than a **string because the JSON layer already gives us the
@@ -321,43 +430,124 @@ func NewAssetRelationship(tenantID, fromAssetID, toAssetID string, relType Relat
 type AssetPatch struct {
 	Name        *string
 	Attributes  map[string]any
-	Status      *AssetStatus
 	Environment *AssetEnvironment
 	Criticality *AssetCriticality
 	OwnerTeamID *string
 	OwnerUserID *string
 }
 
-// AssetRepository administers the CMDB: assets and the relationships between
-// them.
+// AssetChangeKind classifies what an asset_change_history row records.
+type AssetChangeKind string
+
+const (
+	// AssetChangeCreated is the single row written when an asset is first
+	// inserted. It carries no field/old_value/new_value — there is no "old"
+	// state to diff against — only the fact and its actor.
+	AssetChangeCreated AssetChangeKind = "created"
+	// AssetChangeUpdated is one row per field changed by AssetRepository.
+	// Update. A single call that changes three fields writes three rows,
+	// sharing the same resulting RowVersion and OccurredAt: this is the same
+	// shape a field-history table (e.g. ServiceNow's sys_history_line) uses,
+	// and it is what makes "what changed" queryable per field rather than
+	// requiring every reader to diff two JSON blobs.
+	AssetChangeUpdated AssetChangeKind = "updated"
+	// AssetChangeTransitioned is the row written by SetStatus. Field is
+	// always "status".
+	AssetChangeTransitioned AssetChangeKind = "status_transitioned"
+)
+
+// Valid reports whether k is a value the database will accept.
+func (k AssetChangeKind) Valid() bool {
+	switch k {
+	case AssetChangeCreated, AssetChangeUpdated, AssetChangeTransitioned:
+		return true
+	default:
+		return false
+	}
+}
+
+// AssetChangeEntry is one append-only row of an asset's change history
+// (E1.3). It is written by the same transaction that performs the mutation
+// it records — see AssetStore.Create/Update/SetStatus — so a change and its
+// history entry commit together or neither does.
 //
-// asset and asset_relationship are TENANT-OWNED: both are in
-// TenantOwnedTables and carry row-level security, so this repository takes no
-// tenant argument anywhere — the bound connection already is the boundary
-// (ADR-TENANCY-002). Mutations here do NOT pass through withAdminAudit, for
-// the same reason Team does not: ADR-AUDIT-007 §6.2 scopes that chokepoint to
-// five named identity-governance tables, and Asset is not one of them.
+// AssetID deliberately carries no foreign key to asset (see the migration):
+// an administrative or forensic record must outlive its subject, mirroring
+// why admin_audit_event's subject columns carry no foreign key either
+// (ADR-AUDIT-007 §6.3). A hard Delete of the asset therefore leaves its
+// history rows in place, addressable by asset_id even though the asset no
+// longer is.
+type AssetChangeEntry struct {
+	ChangeID   string
+	TenantID   string
+	AssetID    string
+	Kind       AssetChangeKind
+	Field      string
+	OldValue   *string
+	NewValue   *string
+	Actor      string
+	RowVersion int64
+	OccurredAt time.Time
+}
+
+// AssetRepository administers the CMDB: assets, the relationships between
+// them, and each asset's append-only change history.
+//
+// asset, asset_relationship and asset_change_history are TENANT-OWNED: all
+// three are in TenantOwnedTables and carry row-level security, so this
+// repository takes no tenant argument anywhere — the bound connection
+// already is the boundary (ADR-TENANCY-002). Mutations here do NOT pass
+// through withAdminAudit, for the same reason Team does not: ADR-AUDIT-007
+// §6.2 scopes that chokepoint to five named identity-governance tables, and
+// Asset is not one of them; asset_change_history is this entity's own
+// equivalent record, not a use of that one.
 type AssetRepository interface {
-	// Create inserts an asset. When a.OwnerTeamID/a.OwnerUserID is set, the
-	// implementation MUST re-verify it against its own tenant-scoped
-	// connection before writing — see the package doc on AssetPatch for why
-	// the foreign key alone is not enough (ADR-ASSET-001 §6, extended to
-	// ownership). A non-nil id the tenant cannot see returns ErrNotFound.
+	// Create inserts an asset and its AssetChangeCreated history row in one
+	// transaction. a.Status must be an initial status (AssetStatus.
+	// ValidInitialStatus) — planned or active; maintenance and retired
+	// describe something that happened to an asset already in service and
+	// are reachable only through SetStatus. When a.OwnerTeamID/a.OwnerUserID
+	// is set, the implementation MUST re-verify it against its own
+	// tenant-scoped connection before writing — see the package doc on
+	// AssetPatch for why the foreign key alone is not enough (ADR-ASSET-001
+	// §6, extended to ownership). A non-nil id the tenant cannot see returns
+	// ErrNotFound. The acting identity comes from ActorFrom(ctx); an
+	// unattributable call returns ErrNoActor.
 	Create(ctx context.Context, a *Asset) (*Asset, error)
 	Get(ctx context.Context, assetID string) (*Asset, error)
 	// List returns a page of the caller's assets, keyset-paginated over
-	// asset_id.
-	List(ctx context.Context, limit int, after string) ([]*Asset, error)
-	// Update changes one or more fields under optimistic locking, per patch.
-	// Unlike Team, Asset has no authorisation-adjacent status split to
-	// protect: retiring an asset is not a governance act, so there is one
-	// update path, not two. Owner references are re-verified exactly as
-	// Create re-verifies them.
+	// asset_id. status filters to exactly that status; the zero value
+	// excludes AssetRetired (a retired CI is soft-deleted from the default
+	// view, per E1.3's soft-retire decision) but includes every other
+	// status. A retired asset remains individually reachable via Get
+	// regardless of this filter.
+	List(ctx context.Context, limit int, after string, status AssetStatus) ([]*Asset, error)
+	// Update changes one or more non-lifecycle fields under optimistic
+	// locking, per patch, recording one AssetChangeUpdated history row per
+	// field actually changed, in the same transaction as the UPDATE. Owner
+	// references are re-verified exactly as Create re-verifies them. The
+	// acting identity comes from ActorFrom(ctx); an unattributable call
+	// returns ErrNoActor.
 	Update(ctx context.Context, assetID string, rowVersion int64, patch AssetPatch) (*Asset, error)
+	// SetStatus performs a lifecycle transition under optimistic locking,
+	// guarded by AssetStatus.CanTransitionTo — the single authority for
+	// status changes (mirrors UserRepository.SetStatus). An illegal move
+	// returns *AssetTransitionError (ErrInvalidTransition). Records one
+	// AssetChangeTransitioned history row in the same transaction as the
+	// UPDATE. The acting identity comes from ActorFrom(ctx); an
+	// unattributable call returns ErrNoActor.
+	SetStatus(ctx context.Context, assetID string, rowVersion int64, status AssetStatus) (*Asset, error)
 	// Delete removes an asset. Its relationships are removed with it
 	// (ON DELETE CASCADE) — an asset cannot be half-referenced by a dangling
-	// edge.
+	// edge. Its change history is NOT removed: see AssetChangeEntry's doc
+	// comment on why the record must outlive its subject.
 	Delete(ctx context.Context, assetID string) error
+	// History returns a page of assetID's append-only change history, newest
+	// first is NOT guaranteed — ordering is keyset-paginated over change_id
+	// (a ULID, and therefore chronological ascending), the same shape List
+	// uses. Never returns a row this store, or any caller, can update or
+	// delete: asset_change_history is append-only at the schema level.
+	History(ctx context.Context, assetID string, limit int, after string) ([]*AssetChangeEntry, error)
 
 	// CreateRelationship inserts a relationship. Both endpoints must already
 	// be visible to the caller's tenant; a from/to id the tenant cannot see
