@@ -65,6 +65,9 @@ var serverGeneratedIdentifiers = map[string]string{
 
 	// CI lifecycle + change history (E1.3).
 	"asset_change_history_pkey": "change_id is server-minted (domain.NewID() in AssetStore.recordChange); no route accepts one from a client",
+
+	// Collector check-target configuration (E2.2a).
+	"collector_check_pkey": "check_id is server-minted (domain.NewCollectorCheck); no create route accepts one from a client",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a
