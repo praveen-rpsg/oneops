@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,7 +17,7 @@ import (
 const (
 	assetColumns = `asset_id, tenant_id, type, name, attributes, status,
 		environment, criticality, owner_team_id, owner_user_id,
-		source, external_ref,
+		source, external_ref, last_seen,
 		row_version, created_at, updated_at`
 	assetRelColumns    = `relationship_id, tenant_id, from_asset_id, to_asset_id, type, row_version, created_at, updated_at`
 	assetChangeColumns = `change_id, tenant_id, asset_id, kind, field, old_value, new_value, actor, row_version, occurred_at`
@@ -98,7 +99,7 @@ func scanAsset(s scanner) (*domain.Asset, error) {
 	if err := s.Scan(
 		&a.AssetID, &a.TenantID, &a.Type, &a.Name, &attrsBytes, &status,
 		&environment, &criticality, &a.OwnerTeamID, &a.OwnerUserID,
-		&a.Source, &a.ExternalRef,
+		&a.Source, &a.ExternalRef, &a.LastSeen,
 		&a.RowVersion, &a.CreatedAt, &a.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -196,9 +197,13 @@ func (s *AssetStore) insertAssetRowTx(ctx context.Context, tx pgx.Tx, a *domain.
 		return nil, fmt.Errorf("marshal asset attributes: %w", err)
 	}
 
+	// last_seen = now(): a Create — direct or via Upsert's not-found branch —
+	// is itself the first confirmation of this CI (E1.5), regardless of
+	// anything a.LastSeen carries (there is no request field for it — see
+	// Asset.LastSeen's doc comment).
 	row := tx.QueryRow(ctx, `
-		INSERT INTO asset (asset_id, tenant_id, type, name, attributes, status, environment, criticality, owner_team_id, owner_user_id, source, external_ref)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		INSERT INTO asset (asset_id, tenant_id, type, name, attributes, status, environment, criticality, owner_team_id, owner_user_id, source, external_ref, last_seen)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
 		RETURNING `+assetColumns,
 		a.AssetID, a.TenantID, a.Type, a.Name, attrs, string(a.Status),
 		string(a.Environment), string(a.Criticality), a.OwnerTeamID, a.OwnerUserID,
@@ -327,12 +332,27 @@ func (s *AssetStore) Upsert(ctx context.Context, a *domain.Asset) (*domain.Asset
 	}
 
 	// THE idempotency guarantee: re-importing an identical payload finds no
-	// field changed, so nothing is written at all — no UPDATE, no bumped
-	// row_version or updated_at, no history row. Committing an empty
-	// transaction here would be indistinguishable from doing nothing; the
-	// deferred Rollback cleans up the read-only SELECT ... FOR UPDATE.
+	// SUBSTANTIVE field changed, so no history is written, and neither
+	// row_version nor updated_at moves. LastSeen still moves (E1.5): a
+	// re-import genuinely re-confirms the CI is still there, so an operator
+	// running a health report right after a no-op re-import sweep must not
+	// see it as stale — see AssetRepository.Upsert's doc comment for why
+	// this does not weaken the guarantee above. The UPDATE below names ONLY
+	// last_seen for exactly that reason: it cannot bump row_version, touch
+	// updated_at or trigger a history write, because it does not go near any
+	// of the columns those depend on.
 	if len(changed) == 0 {
-		return existing, false, nil
+		touchedRow := tx.QueryRow(ctx, `
+			UPDATE asset SET last_seen = now() WHERE asset_id = $1
+			RETURNING `+assetColumns, existing.AssetID)
+		touched, terr := scanAsset(touchedRow)
+		if terr != nil {
+			return nil, false, fmt.Errorf("touch asset last_seen (upsert no-op): %w", terr)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, false, fmt.Errorf("commit: %w", err)
+		}
+		return touched, false, nil
 	}
 
 	updateRow := tx.QueryRow(ctx, `
@@ -344,6 +364,7 @@ func (s *AssetStore) Upsert(ctx context.Context, a *domain.Asset) (*domain.Asset
 		       criticality   = $6,
 		       owner_team_id = $7,
 		       owner_user_id = $8,
+		       last_seen     = now(),
 		       row_version   = row_version + 1,
 		       updated_at    = now()
 		 WHERE asset_id = $1
@@ -616,6 +637,9 @@ func (s *AssetStore) Update(
 		return nil, domain.ErrVersionMismatch
 	}
 
+	// last_seen = now(): an operator editing a CI by hand is themselves
+	// confirming it (E1.5) — set unconditionally, the same as updated_at,
+	// never through recordChange (see AssetRepository.Update's doc comment).
 	row := tx.QueryRow(ctx, `
 		UPDATE asset
 		   SET name          = COALESCE($3, name),
@@ -624,6 +648,7 @@ func (s *AssetStore) Update(
 		       criticality   = COALESCE($6, criticality),
 		       owner_team_id = CASE WHEN $7 THEN $8  ELSE owner_team_id END,
 		       owner_user_id = CASE WHEN $9 THEN $10 ELSE owner_user_id END,
+		       last_seen     = now(),
 		       row_version   = row_version + 1,
 		       updated_at    = now()
 		 WHERE asset_id = $1 AND row_version = $2
@@ -947,6 +972,154 @@ func (s *AssetStore) Duplicates(ctx context.Context) ([]*domain.AssetDuplicateGr
 		out = append(out, byKey[k])
 	}
 	return out, nil
+}
+
+// maxAssetHealthSampleRows bounds each health-report category's sample —
+// mirrors maxAssetDuplicateRows' "no unbounded scan returning every CI" rule
+// (docs/PLATFORM-BUILD-PLAN.md §3), scoped smaller because Health reports
+// FOUR categories in one call rather than one. Count is never capped by this;
+// only Samples is.
+const maxAssetHealthSampleRows = 50
+
+// healthSampleColumns is the projection every health-report sample query
+// selects — an asset_id/type/name is enough for an operator to act on
+// without a second round-trip through Get.
+const healthSampleColumns = `asset_id, type, name`
+
+func scanAssetHealthSample(s scanner) (domain.AssetHealthSample, error) {
+	var m domain.AssetHealthSample
+	err := s.Scan(&m.AssetID, &m.Type, &m.Name)
+	return m, err
+}
+
+// Health computes the CMDB data-quality/freshness report (E1.5) — see
+// domain.AssetHealthReport's doc comment for what each category means. Every
+// query below is scoped to the caller's tenant by row-level security on this
+// store's connection, exactly like every other read here; none takes an
+// explicit tenant_id predicate for the same reason List has none.
+func (s *AssetStore) Health(ctx context.Context, staleAfter time.Duration) (*domain.AssetHealthReport, error) {
+	report := &domain.AssetHealthReport{StaleAfter: staleAfter}
+
+	var err error
+	if report.Stale, err = s.staleAssets(ctx, staleAfter); err != nil {
+		return nil, err
+	}
+	if report.OrphanedAssets, err = s.orphanedAssets(ctx); err != nil {
+		return nil, err
+	}
+	if report.OrphanedBusinessServices, err = s.orphanedBusinessServices(ctx); err != nil {
+		return nil, err
+	}
+	if report.Incomplete, err = s.incompleteAssets(ctx); err != nil {
+		return nil, err
+	}
+	return report, nil
+}
+
+// staleAssets: active/maintenance CIs whose last_seen is older than
+// staleAfter, OR NULL (never confirmed by any source at all — treated as at
+// least as stale as an old timestamp, not as fresh by omission). Retired and
+// planned CIs are excluded: retired is not in service to go stale, and a
+// planned CI has never been claimed to be confirmed by anything yet, so
+// absence of confirmation is not a defect for it the way it is for
+// something already live. Index-backed by ix_asset_tenant_status_last_seen
+// (20260820000001).
+func (s *AssetStore) staleAssets(ctx context.Context, staleAfter time.Duration) (domain.AssetHealthCategory, error) {
+	cutoff := time.Now().UTC().Add(-staleAfter)
+	const whereSQL = `status IN ('active', 'maintenance') AND (last_seen IS NULL OR last_seen < $1)`
+	return s.assetHealthCategory(ctx,
+		`SELECT COUNT(*) FROM asset WHERE `+whereSQL,
+		`SELECT `+healthSampleColumns+` FROM asset WHERE `+whereSQL+` ORDER BY asset_id LIMIT $2`,
+		cutoff)
+}
+
+// orphanedAssets: CIs (excluding retired) with NO relationship at all,
+// neither outgoing nor incoming — unreachable from anything else in the CMDB
+// graph. Both NOT EXISTS subqueries use the existing per-direction indexes
+// (ix_asset_relationship_from/ix_asset_relationship_to, 20260816000001); no
+// new index is needed for this category.
+func (s *AssetStore) orphanedAssets(ctx context.Context) (domain.AssetHealthCategory, error) {
+	const whereSQL = `
+		status <> 'retired'
+		AND NOT EXISTS (SELECT 1 FROM asset_relationship r WHERE r.from_asset_id = asset.asset_id)
+		AND NOT EXISTS (SELECT 1 FROM asset_relationship r WHERE r.to_asset_id = asset.asset_id)`
+	return s.assetHealthCategory(ctx,
+		`SELECT COUNT(*) FROM asset WHERE `+whereSQL,
+		`SELECT `+healthSampleColumns+` FROM asset WHERE `+whereSQL+` ORDER BY asset_id LIMIT $1`)
+}
+
+// assetTypeBusinessService is the seeded Asset.Type value orphanedBusinessServices
+// applies to — mirrors httpapi's own assetTypeBusinessService (E1.2). Asset.Type
+// is open-but-validated, not a closed enum (ADR-ASSET-001 §1), so this is a
+// convention this query enforces, not a database constraint; duplicated
+// rather than imported because httpapi depends on postgres, not the reverse
+// (ADR-ARCH-001 layering).
+const assetTypeBusinessService = "business_service"
+
+// orphanedBusinessServices: business_service CIs (excluding retired) with no
+// supporting CIs — no outgoing depends_on/runs_on edge, the composition
+// GET .../service-map would otherwise report empty. connected_to and
+// member_of are deliberately excluded, mirroring getAssetServiceMap's own
+// choice of edge types: neither composes a service.
+func (s *AssetStore) orphanedBusinessServices(ctx context.Context) (domain.AssetHealthCategory, error) {
+	const whereSQL = `
+		type = '` + assetTypeBusinessService + `' AND status <> 'retired'
+		AND NOT EXISTS (
+			SELECT 1 FROM asset_relationship r
+			 WHERE r.from_asset_id = asset.asset_id AND r.type IN ('depends_on', 'runs_on'))`
+	return s.assetHealthCategory(ctx,
+		`SELECT COUNT(*) FROM asset WHERE `+whereSQL,
+		`SELECT `+healthSampleColumns+` FROM asset WHERE `+whereSQL+` ORDER BY asset_id LIMIT $1`)
+}
+
+// incompleteAssets: CIs (excluding retired) missing basic classification —
+// unowned (both owner_team_id and owner_user_id NULL), or criticality/
+// environment left at "unknown". Index-backed by the PARTIAL index
+// ix_asset_tenant_incomplete (20260820000001), whose predicate is this exact
+// WHERE clause.
+func (s *AssetStore) incompleteAssets(ctx context.Context) (domain.AssetHealthCategory, error) {
+	const whereSQL = `
+		status <> 'retired'
+		AND ((owner_team_id IS NULL AND owner_user_id IS NULL)
+		     OR criticality = 'unknown'
+		     OR environment = 'unknown')`
+	return s.assetHealthCategory(ctx,
+		`SELECT COUNT(*) FROM asset WHERE `+whereSQL,
+		`SELECT `+healthSampleColumns+` FROM asset WHERE `+whereSQL+` ORDER BY asset_id LIMIT $1`)
+}
+
+// assetHealthCategory runs countSQL (returning one COUNT(*) value) and, only
+// if that count is non-zero, sampleSQL (whose final placeholder — $2 for
+// staleAssets' cutoff-parameterised queries, $1 for every other category — is
+// maxAssetHealthSampleRows) to build one domain.AssetHealthCategory. Skipping
+// the sample query when count is zero avoids a second round-trip for the
+// overwhelmingly common case (most categories are usually empty).
+func (s *AssetStore) assetHealthCategory(ctx context.Context, countSQL, sampleSQL string, args ...any) (domain.AssetHealthCategory, error) {
+	var cat domain.AssetHealthCategory
+	if err := s.pool.QueryRow(ctx, countSQL, args...).Scan(&cat.Count); err != nil {
+		return cat, fmt.Errorf("count asset health category: %w", err)
+	}
+	if cat.Count == 0 {
+		return cat, nil
+	}
+
+	sampleArgs := append(append([]any{}, args...), maxAssetHealthSampleRows)
+	rows, err := s.pool.Query(ctx, sampleSQL, sampleArgs...)
+	if err != nil {
+		return cat, fmt.Errorf("sample asset health category: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		m, err := scanAssetHealthSample(rows)
+		if err != nil {
+			return cat, fmt.Errorf("scan asset health sample: %w", err)
+		}
+		cat.Samples = append(cat.Samples, m)
+	}
+	if err := rows.Err(); err != nil {
+		return cat, fmt.Errorf("iterate asset health sample: %w", err)
+	}
+	return cat, nil
 }
 
 // scanAssetDuplicateMember scans one row shared by both Duplicates queries:

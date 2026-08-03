@@ -38,9 +38,14 @@ type assetDTO struct {
 	OwnerUserID *string        `json:"owner_user_id,omitempty"`
 	Source      string         `json:"source"`
 	ExternalRef *string        `json:"external_ref,omitempty"`
-	RowVersion  int64          `json:"row_version"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
+	// LastSeen is read-only (E1.5): no request DTO in this file accepts it.
+	// Set by the store on Create/Update/Upsert — see domain.Asset.LastSeen's
+	// doc comment. Absent (nil) when this CI has never been confirmed by any
+	// source since the column existed.
+	LastSeen   *time.Time `json:"last_seen,omitempty"`
+	RowVersion int64      `json:"row_version"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 // toAssetDTO deliberately omits tenant_id, the same choice toTeamDTO makes:
@@ -51,7 +56,7 @@ func toAssetDTO(a *domain.Asset) assetDTO {
 		AssetID: a.AssetID, Type: a.Type, Name: a.Name, Attributes: a.Attributes,
 		Status: string(a.Status), Environment: string(a.Environment), Criticality: string(a.Criticality),
 		OwnerTeamID: a.OwnerTeamID, OwnerUserID: a.OwnerUserID,
-		Source: a.Source, ExternalRef: a.ExternalRef,
+		Source: a.Source, ExternalRef: a.ExternalRef, LastSeen: a.LastSeen,
 		RowVersion: a.RowVersion,
 		CreatedAt:  a.CreatedAt, UpdatedAt: a.UpdatedAt,
 	}
@@ -824,4 +829,71 @@ func (s *Server) duplicateAssets(w http.ResponseWriter, r *http.Request) {
 		out = append(out, assetDuplicateGroupDTO{Reason: string(g.Reason), Key: g.Key, Members: members})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"groups": out})
+}
+
+// assetHealthSampleDTO is one Configuration Item inside a bounded
+// health-report category sample (E1.5).
+type assetHealthSampleDTO struct {
+	AssetID string `json:"asset_id"`
+	Type    string `json:"type"`
+	Name    string `json:"name"`
+}
+
+// assetHealthCategoryDTO is one CMDB data-quality/freshness dimension: count
+// is the TRUE, uncapped total; samples is bounded (see domain.
+// AssetHealthCategory's doc comment) — a caller with more candidates than the
+// sample re-runs the report after acting on the first batch, or (for stale)
+// narrows stale_after.
+type assetHealthCategoryDTO struct {
+	Count   int                    `json:"count"`
+	Samples []assetHealthSampleDTO `json:"samples"`
+}
+
+func toAssetHealthCategoryDTO(c domain.AssetHealthCategory) assetHealthCategoryDTO {
+	samples := make([]assetHealthSampleDTO, 0, len(c.Samples))
+	for _, m := range c.Samples {
+		samples = append(samples, assetHealthSampleDTO{AssetID: m.AssetID, Type: m.Type, Name: m.Name})
+	}
+	return assetHealthCategoryDTO{Count: c.Count, Samples: samples}
+}
+
+// assetHealthReportDTO mirrors domain.AssetHealthReport (E1.5): where the
+// CMDB is rotting, never whether it matches reality — true config-drift-vs-
+// discovered-state needs E2's monitoring/discovery and is explicitly out of
+// scope here.
+type assetHealthReportDTO struct {
+	StaleAfter               string                 `json:"stale_after"`
+	Stale                    assetHealthCategoryDTO `json:"stale"`
+	OrphanedAssets           assetHealthCategoryDTO `json:"orphaned_assets"`
+	OrphanedBusinessServices assetHealthCategoryDTO `json:"orphaned_business_services"`
+	Incomplete               assetHealthCategoryDTO `json:"incomplete"`
+}
+
+// assetHealth serves GET /admin/assets/health: the CMDB data-quality/
+// freshness report (E1.5) — see domain.AssetHealthReport's doc comment for
+// exactly what each category means. Read-only: nothing here mutates
+// anything. stale_after is an optional Go duration (e.g. "720h", "30m");
+// omitted, it defaults to domain.DefaultAssetStaleAfter (30 days).
+func (s *Server) assetHealth(w http.ResponseWriter, r *http.Request) {
+	if s.assets == nil {
+		writeProblem(w, r, http.StatusNotImplemented, "not implemented", "asset administration is not configured")
+		return
+	}
+	staleAfter, err := domain.ParseAssetStaleAfter(r.URL.Query().Get("stale_after"))
+	if err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+	report, err := s.assets.Health(r.Context(), staleAfter)
+	if err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, assetHealthReportDTO{
+		StaleAfter:               report.StaleAfter.String(),
+		Stale:                    toAssetHealthCategoryDTO(report.Stale),
+		OrphanedAssets:           toAssetHealthCategoryDTO(report.OrphanedAssets),
+		OrphanedBusinessServices: toAssetHealthCategoryDTO(report.OrphanedBusinessServices),
+		Incomplete:               toAssetHealthCategoryDTO(report.Incomplete),
+	})
 }

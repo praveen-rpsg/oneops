@@ -132,20 +132,20 @@ that is a founder-level constitutional override + ADR, not a story decision.
 Dependency order matters: you cannot monitor, alert on, ticket against, or secure
 what you cannot model. Assets first; intelligence last.
 
-### E1 — Asset / CMDB foundation  `[~]`
+### E1 — Asset / CMDB foundation  `[x]`
 The typed configuration-item model + relationship graph everything references.
 - [x] E1.1 CI model + relationships + CRUD/graph API (reuses `internal/graph`) — **merged to master** (ADR-ASSET-001; cross-tenant edge defense mutation-proven)
 - [x] E1.2 Business-service mapping (service → supporting CIs), criticality, environment, ownership — **merged** (owner refs tenant-verified; service-map = typed graph projection)
 - [x] E1.3 CI lifecycle (planned→active→retired), change history, soft-retire — **merged** (4-state machine per amended ADR-ASSET-001 §5; append-only history hardened ENABLE ALWAYS+REVOKE)
 - [x] E1.4 Bulk import/export + duplicate **detection** (source+external_ref, idempotent upsert, DB uniqueness) — **merged**
-- [ ] E1.4b Controlled duplicate **merge/resolution** (reassign relationships+history to a survivor, retire duplicate) — deferred follow-on
-- [~] E1.5 CMDB health: staleness, orphans, data-quality (true drift-vs-reality needs E2 discovery)  ▶ CURRENT
+- [ ] E1.4b Controlled duplicate **merge/resolution** (reassign relationships+history to a survivor, retire duplicate) — deferred follow-on, does not block epic completion
+- [x] E1.5 CMDB health: staleness, orphans, data-quality (`last_seen` freshness field + GET /admin/assets/health) — bounded, index-backed, RLS-isolated; true drift-vs-reality deferred to post-E2 discovery. **E1 (CMDB) is now complete** — E1.4b remains a separately-gated later increment.
 - [ ] FOLLOW-UP (tech-debt): harden `TestEveryAuditAppendPath_SerialisesOnItsChainHead` — `reachesForUpdate` keys on unqualified method name, so a `Create` can pass via cross-type name-collision (pre-existing; not introduced by E1.x). Also: relationship export (E1.4 exported assets only).
 - **Edge cases:** circular relationships, cross-tenant edges (forbidden), orphaned/duplicate CIs, high-fan-out services, historical point-in-time queries.
 
 ### E2 — Telemetry & Monitoring ingestion  `[ ]`
 Signals about assets: metrics, logs, traces, synthetics. The scale extreme.
-- [ ] E2.1 Ingestion data model + API (metrics/time-series tied to CIs) + retention/downsampling
+- [ ] E2.1 Ingestion data model + API (metrics/time-series tied to CIs) + retention/downsampling  ▶ CURRENT (ADR needed first — see the storage-strategy decision below)
 - [ ] E2.2 Agentless collectors: SNMP (network), API/cloud pollers, uptime/synthetic checks
 - [ ] E2.3 Agent/push ingestion (app/APM, custom metrics), log ingestion
 - [ ] E2.4 Distributed tracing ingestion; correlation to CIs

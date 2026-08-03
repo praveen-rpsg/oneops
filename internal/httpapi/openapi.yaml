@@ -1352,6 +1352,38 @@ paths:
         '401': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/assets/health:
+    get:
+      summary: CMDB data-quality/freshness report (read-only)
+      description: >-
+        Where the CMDB is rotting, never whether it matches reality (E1.5) —
+        true config-drift-vs-discovered-state needs E2's monitoring/discovery
+        and is explicitly out of scope. Three categories, each a count plus a
+        bounded sample: stale (active/maintenance CIs whose last_seen is
+        older than stale_after, or null — never confirmed by any source),
+        orphaned_assets (no relationship at all, neither incoming nor
+        outgoing) and orphaned_business_services (a business_service with no
+        outgoing depends_on/runs_on edge), and incomplete (unowned, or
+        criticality/environment left at "unknown"). A retired CI is excluded
+        from every category, the same soft-retire default GET /admin/assets
+        applies.
+      operationId: assetHealth
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: stale_after
+          in: query
+          description: >-
+            A Go duration (e.g. "720h", "30m"). Defaults to 720h (30 days)
+            when omitted.
+          schema: { type: string }
+      responses:
+        '200':
+          description: The CMDB health report
+          content: { application/json: { schema: { $ref: '#/components/schemas/AssetHealthReport' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
   /v1/admin/assets/relationships:
     post:
       summary: Create a CMDB relationship between two assets
@@ -2293,6 +2325,16 @@ components:
             manually-entered asset with no external identity. Unique per
             (tenant, source) when present — the key POST .../import matches
             on (E1.4).
+        last_seen:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When this CI was last confirmed by a source (E1.5): set by
+            create, update and import/upsert (including a no-op re-import —
+            see POST .../import). Absent/null means never confirmed since
+            this field existed — GET .../health treats that the same as a
+            very old timestamp. Read-only: no request in this API accepts it.
         row_version: { type: integer, format: int64 }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -2544,6 +2586,42 @@ components:
         groups:
           type: array
           items: { $ref: '#/components/schemas/AssetDuplicateGroup' }
+    AssetHealthSample:
+      type: object
+      description: >-
+        One Configuration Item inside a bounded health-report category
+        sample (E1.5) — enough to act on without a second round-trip through
+        GET /admin/assets/{id}.
+      properties:
+        asset_id: { type: string }
+        type: { type: string }
+        name: { type: string }
+    AssetHealthCategory:
+      type: object
+      description: >-
+        count is the TRUE, uncapped number of matching Configuration Items;
+        samples is bounded, so this report can never become an unbounded
+        dump of the whole CMDB.
+      properties:
+        count: { type: integer }
+        samples:
+          type: array
+          items: { $ref: '#/components/schemas/AssetHealthSample' }
+    AssetHealthReport:
+      type: object
+      description: >-
+        The CMDB data-quality/freshness report (E1.5). Answers "where is the
+        record rotting", never "does the record match reality" — that needs
+        E2's discovered state and is out of scope. A retired CI is excluded
+        from every category.
+      properties:
+        stale_after:
+          type: string
+          description: The threshold this report was computed against (a Go duration string).
+        stale: { $ref: '#/components/schemas/AssetHealthCategory' }
+        orphaned_assets: { $ref: '#/components/schemas/AssetHealthCategory' }
+        orphaned_business_services: { $ref: '#/components/schemas/AssetHealthCategory' }
+        incomplete: { $ref: '#/components/schemas/AssetHealthCategory' }
     Setting:
       type: object
       description: >-
