@@ -518,6 +518,10 @@ func run(logger *slog.Logger) error {
 	// asset_relationship instead (ADR-ASSET-001 §4).
 	srv.SetAssets(postgres.NewAssetStore(appPool))
 	srv.SetAssetGraph(postgres.NewAssetGraphRepo(appPool))
+	// Telemetry ingestion/query (E2.1): tenant-owned and under row-level
+	// security, exactly like asset above — a TimescaleDB hypertable is a
+	// regular table to this wiring rule (ADR-TELEMETRY-001).
+	srv.SetTelemetry(postgres.NewTelemetryStore(appPool))
 
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.

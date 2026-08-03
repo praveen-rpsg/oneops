@@ -145,11 +145,12 @@ The typed configuration-item model + relationship graph everything references.
 
 ### E2 — Telemetry & Monitoring ingestion  `[ ]`
 Signals about assets: metrics, logs, traces, synthetics. The scale extreme.
-- [ ] E2.1 Ingestion data model + API (metrics/time-series tied to CIs) + retention/downsampling  ▶ CURRENT (ADR needed first — see the storage-strategy decision below)
-- [ ] E2.2 Agentless collectors: SNMP (network), API/cloud pollers, uptime/synthetic checks
+- [x] E2.1 Ingestion data model + API (metrics/time-series tied to CIs), spine only — **merged** (ADR-TELEMETRY-001: Postgres + TimescaleDB hypertables behind `domain.TelemetryRepository`, D1 resolved; `telemetry_sample` tenant-owned + RLS + FORCE; `asset_id` tenant-re-verified on write per-sample, same defense as ADR-ASSET-001 §6; bounded ingest batch (1000) + bounded/paginated range query (5000, keyset over timestamp); infra-gate proved the Timescale image swap regresses nothing in the pre-existing suite)
+- [ ] E2.1b Retention policy + downsampling/continuous aggregates over telemetry_sample (TimescaleDB `add_retention_policy`/`add_continuous_aggregate_policy`) — deferred follow-on, does not block epic sequencing (mirrors E1.4b's "detected but not yet built" shape)
+- [ ] E2.2 Agentless collectors: SNMP (network), API/cloud pollers, uptime/synthetic checks  ▶ CURRENT
 - [ ] E2.3 Agent/push ingestion (app/APM, custom metrics), log ingestion
 - [ ] E2.4 Distributed tracing ingestion; correlation to CIs
-- **Edge cases:** high cardinality, ingestion backpressure/quotas per tenant, out-of-order & late data, clock skew, collector disconnection, storage growth. **Decision needed:** time-series storage strategy (Postgres+partitioning vs a TSDB) — ADR before E2.1.
+- **Edge cases:** high cardinality, ingestion backpressure/quotas per tenant, out-of-order & late data, clock skew, collector disconnection, storage growth — none of these are addressed by E2.1's spine and remain open for E2.1b/E2.2/E2.3.
 
 ### E3 — Alerting (derived) + suppression  `[ ]`
 - [ ] E3.1 Alert rules (threshold, rate-of-change, absence-of-data, anomaly hook) over telemetry
@@ -233,7 +234,7 @@ Pull forward as soon as E7/dashboards need it.
 ---
 
 ## 6. Global decisions still OPEN (resolve via ADR before the dependent epic)
-- **D1 — Time-series storage** (E2): Postgres partitioning vs dedicated TSDB. Drives ingestion scale.
+- ~~**D1 — Time-series storage** (E2): Postgres partitioning vs dedicated TSDB.~~ **RESOLVED** — ADR-TELEMETRY-001: Postgres + TimescaleDB hypertables behind a pluggable interface (RLS preserved, one datastore/DR, swap-later hedge).
 - **D2 — Real-time transport** (E7/E11): WebSocket vs SSE; subscription model.
 - **D3 — AI architecture** (E13): model, RAG, guardrails, isolation, cost.
 - **D4 — Connector isolation/runtime** (E11/E12): in-process vs sandboxed/out-of-process.
