@@ -18,10 +18,17 @@
    you're touching. Every increment honors §3 — no exceptions.
 2. **Find `▶ CURRENT`.** That is the next thing to build. One front at a time per
    dependency chain; independent epics may run in parallel on separate branches.
-3. **Build → independent review (mutation-tested) → CTO commit → merge.** Nothing
-   merges on an implementer's own claim. Commit to the branch BEFORE review (a
-   reviewer's mutation-cleanup `git restore` must never wipe uncommitted work —
-   this bit us once).
+3. **Build → review → CTO commit → merge.** Nothing merges on an implementer's
+   own claim. Commit to the branch BEFORE review (a reviewer's mutation-cleanup
+   `git restore` must never wipe uncommitted work — this bit us once).
+   **Calibrated review depth (2026-08-03):** a FULL independent mutation-testing
+   review agent for any increment touching security, tenant-isolation,
+   concurrency, data-integrity, or hardened migrations (where the gate has caught
+   every real breach). A FAST CTO self-review (verify build + tests + RLS +
+   contract + guards directly, no separate agent) for genuinely low-risk additive
+   increments (CRUD, DTOs, read-only projections, docs). Safe parallelism via
+   worktrees is unavailable here (repo is the `oneops/` subdir, not the workspace
+   root), so increments run sequentially — calibrated depth is the speed lever.
 4. **When an item lands, update its checkbox here and move `▶`** in the same
    change. A stale plan is the failure this file exists to prevent.
 5. **Scope discipline:** an increment is one coherent, reviewable story. If a
@@ -149,15 +156,15 @@ Signals about assets: metrics, logs, traces, synthetics. The scale extreme.
 - [~] E2.1b Retention + downsampling over telemetry_sample — **implemented, pending review**. FINDING: TimescaleDB's `add_retention_policy`/continuous-aggregate features require the Timescale License; the pinned image (`*-oss`, ADR-TELEMETRY-001) carries only Apache — verified live. ADR-TELEMETRY-002 records the (in-scope) alternative actually shipped: `TelemetryRetentionWorker`/`TelemetryRollupWorker` drive Apache-licensed `drop_chunks`/`time_bucket` directly; downsampling is a second platform-owned hypertable (`telemetry_rollup_5m`) carrying the SAME RLS as every tenant-owned table (stronger tenant-isolation position than a native continuous aggregate, whose backing object is unproven under RLS — mutation-tested live). Raw retention horizon is an operator-tunable Setting (`telemetry_raw_retention_days`, platform-scoped — per-tenant retention deferred, documented, not faked). `QueryRange` gained a `resolution` param (raw/rollup_5m/auto) with correct wide→rollup, narrow→raw selection. Also folds the E2.1 review nits (first-write-wins documented; pagination/natural-key comment). Relicensing to the Timescale-licensed image for native policies is a separate, undecided ADR-level choice.  ▶ CURRENT (pending reviewer gate)
 - [x] E2.1b Retention + downsampling — **merged** (ADR-TELEMETRY-002: Apache-primitive workers; rollup is a 2nd owned RLS hypertable; OneOps stays Apache-only for telemetry — standing decision). Follow-ups: PKG extraction-budget guard tightening (217/200ms under load); retention-error metric/alert; setting-decode diagnostic log.
 - E2.2 Agentless collectors — SPLIT:
-  - [~] E2.2a Collector framework (leader-gated scheduler + per-asset target config) + HTTP uptime/synthetic check (SSRF-guarded via safehttp; writes up/latency samples to telemetry tied to the asset) — **implemented, pending review**. `collector_check` (tenant-owned + RLS + FORCE, `asset_id` tenant-re-verified on write per ADR-ASSET-001 §6) is polled by `internal/collector.Scheduler`, leader-gated via `ops.RunAsLeader`, a due-scan (not a claim — see `collector.Store`'s doc comment for why idempotent-sample dedup makes that sufficient), bounded concurrency + a hard per-check timeout so a hanging target cannot stall the scheduler. The HTTP executor is wired with `safehttp.Client` — the same SSRF-guarded client webhook/notification delivery use — mutation-proven live (a loopback target's handler is never reached; up=0 recorded, not an error). Writes `<metric_prefix>_up/_latency_ms/_status_code` telemetry samples (status_code only when a response was actually received). `last_run_at`/`last_status` are scheduler-only writes that deliberately do NOT bump `row_version` (mutation-proven: an operator's PATCH survives a concurrent scheduler run). CRUD at `/admin/collector-checks` (PermAdmin, tenant-scoped, OpenAPI exact). Deferred to E2.2b/c: SNMP/cloud check types (the `type`/`Store` dispatch is already open for them), credential storage, a manual "run now" endpoint.  ▶ CURRENT (pending reviewer gate)
+  - [x] E2.2a Collector framework + HTTP uptime check — **merged** (leader-gated scheduler, SSRF-guarded via safehttp at DIAL time [DNS-rebinding refused], tenant-verified asset, RLS; writes up/latency/status telemetry). SECURITY-GUARD FOLLOW-UP (tracked): the SSRF arch guard `TestOutboundClients_AreSSRFGuarded` gives illusory coverage — it only catches a bare `&http.Client{}` LITERAL and doesn't sweep `cmd/` (the composition root), so it can't catch an SSRF regression for ANY of the 3 outbound clients (webhook/registry/collector). Shipped code is safe; harden the sweep to include cmd/. Also: up=any-status masks 5xx (future health-semantics); due-scan starvation at very high check counts.
   - [ ] E2.2b SNMP collector (network devices) — protocol dep + credential (community/v3) storage
   - [ ] E2.2c Cloud/API pollers (AWS/etc.) — credential storage + connector pattern (see E11 connector framework)
 - [ ] E2.3 Agent/push ingestion (app/APM, custom metrics), log ingestion
 - [ ] E2.4 Distributed tracing ingestion; correlation to CIs
 - **Edge cases:** high cardinality, ingestion backpressure/quotas per tenant, out-of-order & late data, clock skew, collector disconnection, storage growth — none of these are addressed by E2.1's spine and remain open for E2.1b/E2.2/E2.3.
 
-### E3 — Alerting (derived) + suppression  `[ ]`
-- [ ] E3.1 Alert rules (threshold, rate-of-change, absence-of-data, anomaly hook) over telemetry
+### E3 — Alerting (derived) + suppression  `[~]`
+- [~] E3.1 Alert **rules** (threshold first; rate-of-change/absence/anomaly later) over telemetry + leader-gated evaluator that fires on transition → Notification. `AlertRule` is config; a firing is DERIVED (no reified `Alert` type — §4). ▶ CURRENT *(sequenced ahead of E2.2b SNMP: alerting makes the telemetry collectors now produce actionable — the visible payoff — and is independent of more collector types)*
 - [ ] E3.2 Derivation engine → notifications/incidents; severity; dedup; flap suppression
 - [ ] E3.3 Maintenance windows / blackout; dependency-aware suppression (suppress downstream when a root CI is down — uses the CMDB graph)
 - **Edge cases:** alert storms, self-referential suppression, rule changes mid-fire, per-tenant rule isolation.
