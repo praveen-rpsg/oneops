@@ -16,10 +16,18 @@ import (
 const (
 	assetColumns = `asset_id, tenant_id, type, name, attributes, status,
 		environment, criticality, owner_team_id, owner_user_id,
+		source, external_ref,
 		row_version, created_at, updated_at`
 	assetRelColumns    = `relationship_id, tenant_id, from_asset_id, to_asset_id, type, row_version, created_at, updated_at`
 	assetChangeColumns = `change_id, tenant_id, asset_id, kind, field, old_value, new_value, actor, row_version, occurred_at`
 )
+
+// maxAssetDuplicateRows bounds the read-only duplicate-detection projection
+// (Duplicates): a CMDB with an unbounded number of candidates would turn a
+// GET into an unbounded scan/result (docs/PLATFORM-BUILD-PLAN.md §3). It is
+// a report, not a paginated list — a caller with more candidates than this
+// re-runs it after reconciling the first batch (E1.4b owns actual merge).
+const maxAssetDuplicateRows = 2000
 
 // defaultAssetPageSize bounds an unbounded List; maxAssetPageSize caps what a
 // caller may ask for. Same shape as the other tenant-owned stores.
@@ -90,6 +98,7 @@ func scanAsset(s scanner) (*domain.Asset, error) {
 	if err := s.Scan(
 		&a.AssetID, &a.TenantID, &a.Type, &a.Name, &attrsBytes, &status,
 		&environment, &criticality, &a.OwnerTeamID, &a.OwnerUserID,
+		&a.Source, &a.ExternalRef,
 		&a.RowVersion, &a.CreatedAt, &a.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -129,13 +138,48 @@ func (s *AssetStore) Create(ctx context.Context, a *domain.Asset) (*domain.Asset
 	if err := a.Validate(); err != nil {
 		return nil, err
 	}
-	if !a.Status.ValidInitialStatus() {
-		return nil, domain.NewValidationError("status",
-			"must be one of: planned, active at creation; maintenance and retired are reached by transition")
-	}
 	actor, ok := domain.ActorFrom(ctx)
 	if !ok {
 		return nil, domain.ErrNoActor
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	created, err := s.insertAssetRowTx(ctx, tx, a)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.recordChange(ctx, tx, created.TenantID, created.AssetID,
+		domain.AssetChangeCreated, "", nil, nil, actor, created.RowVersion); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return created, nil
+}
+
+// insertAssetRowTx performs only the INSERT itself (validation, owner
+// re-verification, the row, its error mapping) inside an already-open
+// transaction — it writes no history row. It is the shared core of Create
+// (which records AssetChangeCreated itself, immediately after, in its own
+// body) and Upsert's not-found branch (which does the same in ITS own body).
+// Splitting the INSERT out from the recordChange call, instead of sharing a
+// single helper that does both, keeps every recordChange call site inside a
+// function whose own transaction demonstrably serialises on a lock —
+// Create's on nothing (a brand-new asset_id can never collide with a
+// concurrent Create, which mints its own asset_id), Upsert's on the
+// SELECT ... FOR UPDATE a few lines above it — rather than hiding that
+// property behind a third function name (ADR-AUDIT-006; see
+// arch.TestEveryAuditAppendPath_SerialisesOnItsChainHead).
+func (s *AssetStore) insertAssetRowTx(ctx context.Context, tx pgx.Tx, a *domain.Asset) (*domain.Asset, error) {
+	if !a.Status.ValidInitialStatus() {
+		return nil, domain.NewValidationError("status",
+			"must be one of: planned, active at creation; maintenance and retired are reached by transition")
 	}
 	if a.OwnerTeamID != nil {
 		if err := s.verifyOwnerTeamExists(ctx, *a.OwnerTeamID); err != nil {
@@ -152,23 +196,25 @@ func (s *AssetStore) Create(ctx context.Context, a *domain.Asset) (*domain.Asset
 		return nil, fmt.Errorf("marshal asset attributes: %w", err)
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
 	row := tx.QueryRow(ctx, `
-		INSERT INTO asset (asset_id, tenant_id, type, name, attributes, status, environment, criticality, owner_team_id, owner_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO asset (asset_id, tenant_id, type, name, attributes, status, environment, criticality, owner_team_id, owner_user_id, source, external_ref)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		RETURNING `+assetColumns,
 		a.AssetID, a.TenantID, a.Type, a.Name, attrs, string(a.Status),
-		string(a.Environment), string(a.Criticality), a.OwnerTeamID, a.OwnerUserID)
+		string(a.Environment), string(a.Criticality), a.OwnerTeamID, a.OwnerUserID,
+		a.Source, a.ExternalRef)
 
 	created, err := scanAsset(row)
 	if err != nil {
 		switch {
 		case isUniqueViolation(err):
+			// Covers both asset_id (never observed in practice — a ULID
+			// collision) and a race on ux_asset_tenant_source_external_ref:
+			// a concurrent importer inserting the same (tenant, source,
+			// external_ref) between Upsert's SELECT ... FOR UPDATE finding
+			// nothing and this INSERT running. The database, not application
+			// logic that merely checked first, is what makes this refusal
+			// certain (E1.4).
 			return nil, domain.ErrConflict
 		case isForeignKeyViolation(err):
 			// Belt-and-suspenders against a TOCTOU between the existence
@@ -182,15 +228,146 @@ func (s *AssetStore) Create(ctx context.Context, a *domain.Asset) (*domain.Asset
 			return nil, fmt.Errorf("insert asset: %w", err)
 		}
 	}
+	return created, nil
+}
 
-	if err := s.recordChange(ctx, tx, created.TenantID, created.AssetID,
-		domain.AssetChangeCreated, "", nil, nil, actor, created.RowVersion); err != nil {
-		return nil, err
+// Upsert inserts or updates an asset by (tenant, source, external_ref) — see
+// domain.AssetRepository.Upsert's doc comment for the full match/replace/
+// history contract this implements.
+func (s *AssetStore) Upsert(ctx context.Context, a *domain.Asset) (*domain.Asset, bool, error) {
+	if err := a.Validate(); err != nil {
+		return nil, false, err
+	}
+	actor, ok := domain.ActorFrom(ctx)
+	if !ok {
+		return nil, false, domain.ErrNoActor
+	}
+
+	// No natural key to match against: this row is created every time it is
+	// imported, exactly as a caller of Create already gets.
+	if a.ExternalRef == nil {
+		created, err := s.Create(ctx, a)
+		return created, true, err
+	}
+
+	if a.OwnerTeamID != nil {
+		if err := s.verifyOwnerTeamExists(ctx, *a.OwnerTeamID); err != nil {
+			return nil, false, err
+		}
+	}
+	if a.OwnerUserID != nil {
+		if err := s.verifyOwnerUserExists(ctx, *a.OwnerUserID); err != nil {
+			return nil, false, err
+		}
+	}
+	attrs, err := json.Marshal(a.Attributes)
+	if err != nil {
+		return nil, false, fmt.Errorf("marshal asset attributes: %w", err)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// FOR UPDATE holds the row lock for the rest of this transaction —
+	// exactly Update/SetStatus's own reasoning (see getForUpdateTx) — so a
+	// second concurrent import of the same (tenant, source, external_ref)
+	// serialises on this row rather than racing to decide "create or
+	// update" against a value the other has already superseded.
+	row := tx.QueryRow(ctx,
+		`SELECT `+assetColumns+` FROM asset WHERE source = $1 AND external_ref = $2 FOR UPDATE`,
+		a.Source, *a.ExternalRef)
+	existing, ferr := scanAsset(row)
+	if errors.Is(ferr, pgx.ErrNoRows) {
+		created, err := s.insertAssetRowTx(ctx, tx, a)
+		if err != nil {
+			return nil, false, err
+		}
+		if err := s.recordChange(ctx, tx, created.TenantID, created.AssetID,
+			domain.AssetChangeCreated, "", nil, nil, actor, created.RowVersion); err != nil {
+			return nil, false, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, false, fmt.Errorf("commit: %w", err)
+		}
+		return created, true, nil
+	}
+	if ferr != nil {
+		return nil, false, fmt.Errorf("find asset for upsert: %w", ferr)
+	}
+
+	// The diff is computed BEFORE any write, against the full-replace
+	// semantics domain.AssetRepository.Upsert documents: the import row is
+	// the source system's current view of this CI, so every field it
+	// carries is compared to the stored value as if it were about to
+	// overwrite it. Status and the (source, external_ref) identity itself
+	// are deliberately excluded: a bulk import is not a lifecycle authority
+	// (E1.3), and the identity is what selected this row in the first place.
+	existingAttrsJSON, jerr := json.Marshal(existing.Attributes)
+	if jerr != nil {
+		return nil, false, fmt.Errorf("marshal existing asset attributes: %w", jerr)
+	}
+	existingAttrsStr, newAttrsStr := string(existingAttrsJSON), string(attrs)
+
+	var changed []assetFieldChange
+	for _, c := range []assetFieldChange{
+		{"type", strPtr(existing.Type), strPtr(a.Type)},
+		{"name", strPtr(existing.Name), strPtr(a.Name)},
+		{"attributes", &existingAttrsStr, &newAttrsStr},
+		{"environment", strPtr(string(existing.Environment)), strPtr(string(a.Environment))},
+		{"criticality", strPtr(string(existing.Criticality)), strPtr(string(a.Criticality))},
+		{"owner_team_id", existing.OwnerTeamID, a.OwnerTeamID},
+		{"owner_user_id", existing.OwnerUserID, a.OwnerUserID},
+	} {
+		if !strPtrEqual(c.old, c.new) {
+			changed = append(changed, c)
+		}
+	}
+
+	// THE idempotency guarantee: re-importing an identical payload finds no
+	// field changed, so nothing is written at all — no UPDATE, no bumped
+	// row_version or updated_at, no history row. Committing an empty
+	// transaction here would be indistinguishable from doing nothing; the
+	// deferred Rollback cleans up the read-only SELECT ... FOR UPDATE.
+	if len(changed) == 0 {
+		return existing, false, nil
+	}
+
+	updateRow := tx.QueryRow(ctx, `
+		UPDATE asset
+		   SET type          = $2,
+		       name          = $3,
+		       attributes    = $4,
+		       environment   = $5,
+		       criticality   = $6,
+		       owner_team_id = $7,
+		       owner_user_id = $8,
+		       row_version   = row_version + 1,
+		       updated_at    = now()
+		 WHERE asset_id = $1
+		RETURNING `+assetColumns,
+		existing.AssetID, a.Type, a.Name, attrs, string(a.Environment), string(a.Criticality),
+		a.OwnerTeamID, a.OwnerUserID)
+	updated, uerr := scanAsset(updateRow)
+	if uerr != nil {
+		if isForeignKeyViolation(uerr) {
+			return nil, false, domain.ErrNotFound
+		}
+		return nil, false, fmt.Errorf("update asset (upsert): %w", uerr)
+	}
+
+	for _, c := range changed {
+		if err := s.recordChange(ctx, tx, updated.TenantID, updated.AssetID,
+			domain.AssetChangeUpdated, c.field, c.old, c.new, actor, updated.RowVersion); err != nil {
+			return nil, false, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
+		return nil, false, fmt.Errorf("commit: %w", err)
 	}
-	return created, nil
+	return updated, false, nil
 }
 
 // recordChange appends one asset_change_history row inside tx, so it commits
@@ -649,6 +826,140 @@ func (s *AssetStore) History(
 		return nil, fmt.Errorf("iterate asset change history: %w", err)
 	}
 	return out, nil
+}
+
+// Export returns a page of EVERY asset regardless of status, INCLUDING
+// retired — unlike List, nothing here is soft-retire-filtered, because an
+// export exists to reconstruct the CMDB exactly as it stands (backup/
+// migration, E1.4), not as an operator browses it. Keyset-paginated over
+// asset_id, the same shape List uses.
+func (s *AssetStore) Export(ctx context.Context, limit int, after string) ([]*domain.Asset, error) {
+	limit = clampAssetPage(limit)
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+assetColumns+`
+		  FROM asset
+		 WHERE ($1 = '' OR asset_id > $1)
+		 ORDER BY asset_id
+		 LIMIT $2`, after, limit)
+	if err != nil {
+		return nil, fmt.Errorf("export assets: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*domain.Asset, 0, limit)
+	for rows.Next() {
+		a, err := scanAsset(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan asset: %w", err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate assets: %w", err)
+	}
+	return out, nil
+}
+
+// Duplicates returns groups of assets likely representing the same
+// real-world Configuration Item (E1.4) — see domain.AssetRepository.
+// Duplicates' doc comment for the two matching rules. Read-only: no row is
+// touched. Bounded by maxAssetDuplicateRows per rule, per
+// docs/PLATFORM-BUILD-PLAN.md §3's "no unbounded scans" rule — this is a
+// report, not a paginated list.
+func (s *AssetStore) Duplicates(ctx context.Context) ([]*domain.AssetDuplicateGroup, error) {
+	byKey := map[string]*domain.AssetDuplicateGroup{}
+	var order []string
+	record := func(reason domain.AssetDuplicateReason, key string, m domain.AssetDuplicateMember) {
+		k := string(reason) + "\x00" + key
+		g, ok := byKey[k]
+		if !ok {
+			g = &domain.AssetDuplicateGroup{Reason: reason, Key: key}
+			byKey[k] = g
+			order = append(order, k)
+		}
+		g.Members = append(g.Members, m)
+	}
+
+	// Rule 1: the same external_ref reported by two or more DIFFERENT
+	// sources. ux_asset_tenant_source_external_ref already forbids the same
+	// source reporting one external_ref twice, so every group produced here
+	// spans at least two sources by construction.
+	extRows, err := s.pool.Query(ctx, `
+		SELECT asset_id, type, name, source, external_ref, status
+		  FROM asset
+		 WHERE external_ref IN (
+		         SELECT external_ref FROM asset
+		          WHERE external_ref IS NOT NULL
+		          GROUP BY external_ref
+		         HAVING COUNT(DISTINCT source) > 1)
+		 ORDER BY external_ref, asset_id
+		 LIMIT $1`, maxAssetDuplicateRows)
+	if err != nil {
+		return nil, fmt.Errorf("query external_ref duplicates: %w", err)
+	}
+	for extRows.Next() {
+		m, status, err := scanAssetDuplicateMember(extRows)
+		if err != nil {
+			extRows.Close()
+			return nil, fmt.Errorf("scan external_ref duplicate: %w", err)
+		}
+		m.Status = status
+		record(domain.AssetDuplicateSameExternalRef, *m.ExternalRef, m)
+	}
+	if err := extRows.Err(); err != nil {
+		extRows.Close()
+		return nil, fmt.Errorf("iterate external_ref duplicates: %w", err)
+	}
+	extRows.Close()
+
+	// Rule 2: the same type and the same name after normalization (trimmed,
+	// case-folded) — the manual-entry case, where two operators registered
+	// the same box under names differing only in case or whitespace.
+	nameRows, err := s.pool.Query(ctx, `
+		SELECT asset_id, type, name, source, external_ref, status
+		  FROM asset
+		 WHERE (type, lower(trim(name))) IN (
+		         SELECT type, lower(trim(name)) FROM asset
+		          GROUP BY type, lower(trim(name))
+		         HAVING COUNT(*) > 1)
+		 ORDER BY type, lower(trim(name)), asset_id
+		 LIMIT $1`, maxAssetDuplicateRows)
+	if err != nil {
+		return nil, fmt.Errorf("query type/name duplicates: %w", err)
+	}
+	defer nameRows.Close()
+	for nameRows.Next() {
+		m, status, err := scanAssetDuplicateMember(nameRows)
+		if err != nil {
+			return nil, fmt.Errorf("scan type/name duplicate: %w", err)
+		}
+		m.Status = status
+		key := m.Type + ":" + strings.ToLower(strings.TrimSpace(m.Name))
+		record(domain.AssetDuplicateSameTypeName, key, m)
+	}
+	if err := nameRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate type/name duplicates: %w", err)
+	}
+
+	out := make([]*domain.AssetDuplicateGroup, 0, len(order))
+	for _, k := range order {
+		out = append(out, byKey[k])
+	}
+	return out, nil
+}
+
+// scanAssetDuplicateMember scans one row shared by both Duplicates queries:
+// asset_id, type, name, source, external_ref, status, in that order.
+func scanAssetDuplicateMember(s scanner) (domain.AssetDuplicateMember, domain.AssetStatus, error) {
+	var (
+		m      domain.AssetDuplicateMember
+		status string
+	)
+	if err := s.Scan(&m.AssetID, &m.Type, &m.Name, &m.Source, &m.ExternalRef, &status); err != nil {
+		return domain.AssetDuplicateMember{}, "", err
+	}
+	return m, domain.AssetStatus(status), nil
 }
 
 func scanAssetChangeEntry(s scanner) (*domain.AssetChangeEntry, error) {

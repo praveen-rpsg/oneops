@@ -14,12 +14,16 @@ import (
 type fakeAssets struct {
 	creates, gets, lists, patches, deletes, setStatuses, histories int
 	relCreates, relDeletes, relFroms, relTos                       int
+	upserts, exports, duplicates                                   int
 	lastTenant                                                     string
 	createRelErr                                                   error
 	createErr                                                      error
 	updateErr                                                      error
 	setStatusErr                                                   error
 	historyErr                                                     error
+	upsertErr                                                      error
+	exportErr                                                      error
+	duplicatesErr                                                  error
 	lastCreated                                                    *domain.Asset
 	lastPatch                                                      domain.AssetPatch
 	lastStatus                                                     domain.AssetStatus
@@ -27,6 +31,10 @@ type fakeAssets struct {
 	getType                                                        string
 	getStatus                                                      domain.AssetStatus
 	historyItems                                                   []*domain.AssetChangeEntry
+	lastUpserted                                                   *domain.Asset
+	upsertCreated                                                  bool
+	exportItems                                                    []*domain.Asset
+	duplicateGroups                                                []*domain.AssetDuplicateGroup
 }
 
 func (f *fakeAssets) Create(_ context.Context, a *domain.Asset) (*domain.Asset, error) {
@@ -102,9 +110,37 @@ func (f *fakeAssets) RelationshipsTo(context.Context, string) ([]*domain.AssetRe
 	f.relTos++
 	return nil, nil
 }
+func (f *fakeAssets) Upsert(_ context.Context, a *domain.Asset) (*domain.Asset, bool, error) {
+	f.upserts++
+	f.lastTenant = a.TenantID
+	f.lastUpserted = a
+	if f.upsertErr != nil {
+		return nil, false, f.upsertErr
+	}
+	created := f.upsertCreated
+	out := *a
+	if out.AssetID == "" {
+		out.AssetID = "a1"
+	}
+	return &out, created, nil
+}
+func (f *fakeAssets) Export(_ context.Context, _ int, _ string) ([]*domain.Asset, error) {
+	f.exports++
+	if f.exportErr != nil {
+		return nil, f.exportErr
+	}
+	return f.exportItems, nil
+}
+func (f *fakeAssets) Duplicates(context.Context) ([]*domain.AssetDuplicateGroup, error) {
+	f.duplicates++
+	if f.duplicatesErr != nil {
+		return nil, f.duplicatesErr
+	}
+	return f.duplicateGroups, nil
+}
 func (f *fakeAssets) touched() int {
 	return f.creates + f.gets + f.lists + f.patches + f.deletes + f.setStatuses + f.histories +
-		f.relCreates + f.relDeletes + f.relFroms + f.relTos
+		f.relCreates + f.relDeletes + f.relFroms + f.relTos + f.upserts + f.exports + f.duplicates
 }
 
 // Asset is tenant-owned, so the authorization tier is tenant administration —
@@ -121,6 +157,9 @@ func TestAssets_Authorization(t *testing.T) {
 		{http.MethodDelete, "/v1/admin/assets/relationships/r1", ""},
 		{http.MethodGet, "/v1/admin/assets/a1/relationships", ""},
 		{http.MethodGet, "/v1/admin/assets/a1/history", ""},
+		{http.MethodPost, "/v1/admin/assets/import", `{"items":[{"type":"server","name":"host"}]}`},
+		{http.MethodGet, "/v1/admin/assets/export", ""},
+		{http.MethodGet, "/v1/admin/assets/duplicates", ""},
 	}
 	cases := []struct {
 		name  string
@@ -738,4 +777,257 @@ type fakeAssetsNotFound struct {
 func (f *fakeAssetsNotFound) Get(context.Context, string) (*domain.Asset, error) {
 	f.gets++
 	return nil, domain.ErrNotFound
+}
+
+// importAssets builds one domain.Asset per row and upserts it — a happy-path
+// row reaches the store exactly once, tagged with the caller's resolved
+// tenant, never one the request body might have tried to name.
+func TestImportAssets_HappyPathUpsertsEachRow(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{upsertCreated: true}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/assets/import", strings.NewReader(`{"items":[
+		{"type":"server","name":"host-1","source":"aws","external_ref":"i-0123"}
+	]}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if spy.upserts != 1 {
+		t.Fatalf("store reached %d time(s), want 1", spy.upserts)
+	}
+	if spy.lastTenant != "t-acme" {
+		t.Errorf("imported asset tenant = %q, want the caller's resolved tenant", spy.lastTenant)
+	}
+	if spy.lastUpserted == nil || spy.lastUpserted.Source != "aws" ||
+		spy.lastUpserted.ExternalRef == nil || *spy.lastUpserted.ExternalRef != "i-0123" {
+		t.Errorf("source/external_ref not forwarded: %+v", spy.lastUpserted)
+	}
+
+	var body importAssetsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Results) != 1 || body.Results[0].Outcome != "created" || body.Results[0].Index != 0 {
+		t.Errorf("unexpected result: %+v", body.Results)
+	}
+}
+
+// One malformed row is reported as failed AT ITS OWN INDEX and never reaches
+// the store — the rows around it are unaffected.
+func TestImportAssets_OneBadRowFailsIndependently(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{upsertCreated: true}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/assets/import", strings.NewReader(`{"items":[
+		{"type":"server","name":"good-1"},
+		{"type":"Not Valid!","name":"bad-1"},
+		{"type":"server","name":"good-2"}
+	]}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if spy.upserts != 2 {
+		t.Errorf("store reached %d time(s), want 2 (the bad row must never reach it)", spy.upserts)
+	}
+	var body importAssetsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Results) != 3 {
+		t.Fatalf("results = %d, want 3 (one per row, in order)", len(body.Results))
+	}
+	if body.Results[0].Outcome != "created" || body.Results[2].Outcome != "created" {
+		t.Errorf("the good rows must succeed: %+v", body.Results)
+	}
+	if body.Results[1].Outcome != "failed" || body.Results[1].Reason == "" || body.Results[1].Index != 1 {
+		t.Errorf("the bad row must fail at its own index with a reason: %+v", body.Results[1])
+	}
+}
+
+// An owner reference the tenant cannot see fails that row with the same
+// message createAsset/patchAsset already give, not a raw internal error.
+func TestImportAssets_OwnerRefNotFoundFailsThatRow(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{upsertErr: domain.ErrNotFound}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/assets/import",
+		strings.NewReader(`{"items":[{"type":"server","name":"host-1","owner_team_id":"other-tenants-team"}]}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var body importAssetsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Results) != 1 || body.Results[0].Outcome != "failed" || body.Results[0].Reason == "" {
+		t.Errorf("unexpected result: %+v", body.Results)
+	}
+	if spy.upserts != 1 {
+		t.Errorf("store reached %d time(s), want 1", spy.upserts)
+	}
+}
+
+func TestImportAssets_RejectsEmptyItems(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/assets/import", strings.NewReader(`{"items":[]}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	if spy.upserts != 0 {
+		t.Error("an empty import reached the store")
+	}
+}
+
+// A batch over the bound is refused entirely, before any row reaches the
+// store — bulk ops must be bounded, not truncated silently.
+func TestImportAssets_RejectsBatchOverTheBound(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{}
+	srv.SetAssets(spy)
+
+	var b strings.Builder
+	b.WriteString(`{"items":[`)
+	for i := 0; i < maxAssetImportBatch+1; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(`{"type":"server","name":"host"}`)
+	}
+	b.WriteString(`]}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/assets/import", strings.NewReader(b.String()))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	if spy.upserts != 0 {
+		t.Error("an over-the-bound import reached the store")
+	}
+}
+
+func TestExportAssets_HappyPath(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{exportItems: []*domain.Asset{
+		{AssetID: "a1", Type: "server", Name: "host-1", Status: domain.AssetRetired, Source: "manual"},
+	}}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/export", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if spy.exports != 1 {
+		t.Fatalf("store reached %d time(s), want 1", spy.exports)
+	}
+	var body struct {
+		Items []assetDTO `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// The point of export, unlike list: a retired asset is included.
+	if len(body.Items) != 1 || body.Items[0].Status != "retired" {
+		t.Errorf("export must include a retired asset: %+v", body.Items)
+	}
+}
+
+func TestExportAssets_NotConfiguredReturns501(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/export", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDuplicateAssets_HappyPath(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	ref := "i-0123"
+	spy := &fakeAssets{duplicateGroups: []*domain.AssetDuplicateGroup{
+		{
+			Reason: domain.AssetDuplicateSameExternalRef, Key: ref,
+			Members: []domain.AssetDuplicateMember{
+				{AssetID: "a1", Type: "server", Name: "host-1", Source: "aws", ExternalRef: &ref, Status: domain.AssetActive},
+				{AssetID: "a2", Type: "server", Name: "host-1-discovered", Source: "discovery", ExternalRef: &ref, Status: domain.AssetActive},
+			},
+		},
+	}}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/duplicates", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if spy.duplicates != 1 {
+		t.Fatalf("store reached %d time(s), want 1", spy.duplicates)
+	}
+	var body struct {
+		Groups []assetDuplicateGroupDTO `json:"groups"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Groups) != 1 || body.Groups[0].Reason != "same_external_ref_different_source" ||
+		len(body.Groups[0].Members) != 2 {
+		t.Errorf("unexpected response: %+v", body.Groups)
+	}
+}
+
+func TestDuplicateAssets_NotConfiguredReturns501(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/duplicates", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501: %s", rec.Code, rec.Body.String())
+	}
 }

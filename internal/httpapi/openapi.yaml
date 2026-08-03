@@ -1276,6 +1276,82 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/assets/import:
+    post:
+      summary: Bulk-upsert Configuration Items by (tenant, source, external_ref)
+      description: >-
+        The idempotent multi-source CMDB ingestion path (E1.4). A row without
+        external_ref always creates; a row whose external_ref matches an
+        existing (tenant, source, external_ref) triple is updated, replacing
+        every field the row carries and recording change history for each
+        field that actually changed (the E1.3 path) — re-importing an
+        identical payload therefore creates no new rows and writes no
+        history. Each row is processed and reported independently at its
+        own index; one bad row (a validation failure, an owner reference the
+        tenant cannot see) does not abort the rows around it. Bounded to
+        1000 rows per call.
+      operationId: importAssets
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ImportAssetsRequest' }
+      responses:
+        '200':
+          description: One result per input row, in input order
+          content: { application/json: { schema: { $ref: '#/components/schemas/ImportAssetsResponse' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/assets/export:
+    get:
+      summary: Paginated full export of the caller's tenant's CMDB
+      description: >-
+        Every asset, every field, every status — INCLUDING retired — for
+        backup or migration (E1.4). Unlike GET /admin/assets, retirement
+        does not filter this view. Paging is keyset over `asset_id`, the
+        same shape listAssets uses. Relationship export is deferred to a
+        later increment (E1.4b).
+      operationId: exportAssets
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last asset_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of every asset, regardless of status
+          content: { application/json: { schema: { $ref: '#/components/schemas/AssetList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/assets/duplicates:
+    get:
+      summary: Report likely-duplicate Configuration Items (read-only)
+      description: >-
+        Groups of assets AssetRepository.Duplicates believes represent the
+        same real-world CI (E1.4): the same external_ref reported by two or
+        more DIFFERENT sources, and/or the same type with the same name
+        after normalization (trimmed, case-folded). This is a projection —
+        nothing here merges or mutates anything. Controlled merge/resolution
+        is E1.4b, a separately gated later increment.
+      operationId: duplicateAssets
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Grouped duplicate candidates
+          content: { application/json: { schema: { $ref: '#/components/schemas/AssetDuplicateGroupList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
   /v1/admin/assets/relationships:
     post:
       summary: Create a CMDB relationship between two assets
@@ -2203,6 +2279,20 @@ components:
           type: string
           nullable: true
           description: The individual accountable for this asset, or absent when unowned.
+        source:
+          type: string
+          description: >-
+            The system that produced this CI: manual (the default),
+            discovery, aws, snmp, ... Open but validated, mirrors `type`
+            (E1.4).
+        external_ref:
+          type: string
+          nullable: true
+          description: >-
+            The natural key `source` uses for this CI, or absent for a
+            manually-entered asset with no external identity. Unique per
+            (tenant, source) when present — the key POST .../import matches
+            on (E1.4).
         row_version: { type: integer, format: int64 }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -2240,6 +2330,16 @@ components:
           enum: [critical, high, medium, low, unknown]
         owner_team_id: { type: string }
         owner_user_id: { type: string }
+        source:
+          type: string
+          description: Defaults to "manual" when omitted or blank (E1.4).
+        external_ref:
+          type: string
+          description: >-
+            The natural key an external source uses for this CI. Setting it
+            here does not make the call idempotent — a second createAsset
+            call always creates a second row; use POST .../import to
+            upsert by (tenant, source, external_ref).
     PatchAssetRequest:
       type: object
       required: [row_version]
@@ -2357,6 +2457,93 @@ components:
         items:
           type: array
           items: { $ref: '#/components/schemas/AssetChangeEntry' }
+    ImportAssetRow:
+      type: object
+      required: [type, name]
+      description: >-
+        Same shape as CreateAssetRequest, matched by (tenant, source,
+        external_ref) on import (E1.4). ExternalRef absent always creates;
+        present and matching an existing row replaces every field this row
+        carries. status is optional and defaults to "active"; only planned
+        is otherwise accepted — maintenance/retired are reached only by a
+        later PATCH .../status transition, never by import.
+      properties:
+        type: { type: string }
+        name: { type: string, maxLength: 200 }
+        attributes:
+          type: object
+          additionalProperties: true
+        status: { type: string, enum: [planned, active] }
+        environment:
+          type: string
+          enum: [production, staging, development, unknown]
+        criticality:
+          type: string
+          enum: [critical, high, medium, low, unknown]
+        owner_team_id: { type: string }
+        owner_user_id: { type: string }
+        source:
+          type: string
+          description: Defaults to "manual" when omitted or blank.
+        external_ref:
+          type: string
+          description: The natural key this row's source uses for the CI.
+    ImportAssetsRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 1000
+          items: { $ref: '#/components/schemas/ImportAssetRow' }
+    AssetImportResult:
+      type: object
+      description: >-
+        One input row's outcome, at that row's input index — always present
+        even when the row failed, so a caller can correlate a failure back
+        to the request it sent.
+      properties:
+        index: { type: integer }
+        outcome: { type: string, enum: [created, updated, failed] }
+        asset_id: { type: string, description: Present when outcome is created or updated. }
+        reason: { type: string, description: Present when outcome is failed. }
+    ImportAssetsResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/AssetImportResult' }
+    AssetDuplicateMember:
+      type: object
+      description: One Configuration Item inside a duplicate group (E1.4).
+      properties:
+        asset_id: { type: string }
+        type: { type: string }
+        name: { type: string }
+        source: { type: string }
+        external_ref: { type: string, nullable: true }
+        status: { type: string, enum: [planned, active, maintenance, retired] }
+    AssetDuplicateGroup:
+      type: object
+      description: >-
+        A set of Configuration Items likely representing the same
+        real-world CI (E1.4). key is the shared external_ref for
+        same_external_ref_different_source, or "type:normalized_name" for
+        same_type_and_name.
+      properties:
+        reason:
+          type: string
+          enum: [same_external_ref_different_source, same_type_and_name]
+        key: { type: string }
+        members:
+          type: array
+          items: { $ref: '#/components/schemas/AssetDuplicateMember' }
+    AssetDuplicateGroupList:
+      type: object
+      properties:
+        groups:
+          type: array
+          items: { $ref: '#/components/schemas/AssetDuplicateGroup' }
     Setting:
       type: object
       description: >-

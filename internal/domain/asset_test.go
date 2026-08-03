@@ -263,6 +263,147 @@ func TestAsset_ApplyClassification_RejectsUndefinedEnumValues(t *testing.T) {
 	}
 }
 
+// NewAsset alone defaults Source to "manual" with no external_ref — the
+// common case of a human registering a CI by hand, mirroring the column's
+// own DEFAULT (E1.4).
+func TestNewAsset_DefaultsSourceToManual(t *testing.T) {
+	a, err := NewAsset("tn-1", "server", "host-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Source != DefaultAssetSource {
+		t.Errorf("source = %q, want %q", a.Source, DefaultAssetSource)
+	}
+	if a.ExternalRef != nil {
+		t.Errorf("external_ref = %v, want nil", a.ExternalRef)
+	}
+}
+
+func TestAsset_ApplySource_DefaultsBlankToManual(t *testing.T) {
+	a, err := NewAsset("tn-1", "server", "host-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ApplySource("", nil); err != nil {
+		t.Fatalf("ApplySource: %v", err)
+	}
+	if a.Source != DefaultAssetSource {
+		t.Errorf("source = %q, want %q", a.Source, DefaultAssetSource)
+	}
+	if a.ExternalRef != nil {
+		t.Errorf("external_ref = %v, want nil", a.ExternalRef)
+	}
+}
+
+func TestAsset_ApplySource_SetsSourceAndExternalRef(t *testing.T) {
+	a, err := NewAsset("tn-1", "server", "host-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := " i-0123abc "
+	if err := a.ApplySource("aws", &ref); err != nil {
+		t.Fatalf("ApplySource: %v", err)
+	}
+	if a.Source != "aws" {
+		t.Errorf("source = %q, want aws", a.Source)
+	}
+	if a.ExternalRef == nil || *a.ExternalRef != "i-0123abc" {
+		t.Errorf("external_ref = %v, want i-0123abc (trimmed)", a.ExternalRef)
+	}
+}
+
+// A blank external_ref ("" after trimming) is stored as nil, never as an
+// empty string — AssetRepository.Upsert treats nil as "no natural key,
+// always create", so an accidental empty string must never masquerade as a
+// real one.
+func TestAsset_ApplySource_BlankExternalRefBecomesNil(t *testing.T) {
+	a, err := NewAsset("tn-1", "server", "host-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blank := "   "
+	if err := a.ApplySource("aws", &blank); err != nil {
+		t.Fatalf("ApplySource: %v", err)
+	}
+	if a.ExternalRef != nil {
+		t.Errorf("external_ref = %v, want nil for a blank value", a.ExternalRef)
+	}
+}
+
+// ApplySource always sets both fields from its own arguments — a
+// construction-time setter, not a partial patch — so calling it again with a
+// nil externalRef clears a previously-set one rather than leaving it.
+func TestAsset_ApplySource_IsAFullReplace(t *testing.T) {
+	a, err := NewAsset("tn-1", "server", "host-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := "i-0123"
+	if err := a.ApplySource("aws", &ref); err != nil {
+		t.Fatalf("ApplySource: %v", err)
+	}
+	if err := a.ApplySource("discovery", nil); err != nil {
+		t.Fatalf("ApplySource: %v", err)
+	}
+	if a.Source != "discovery" || a.ExternalRef != nil {
+		t.Errorf("second ApplySource did not fully replace: source=%q external_ref=%v", a.Source, a.ExternalRef)
+	}
+}
+
+// Source is open (any identifier is a candidate) but validated, exactly as
+// Type is — they share the same format.
+func TestAsset_SourceIsOpenButValidated(t *testing.T) {
+	a, err := NewAsset("tn-1", "server", "host-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, valid := range []string{"manual", "discovery", "aws", "snmp", "cloud_poller"} {
+		if err := a.ApplySource(valid, nil); err != nil {
+			t.Errorf("source %q should be accepted (open set): %v", valid, err)
+		}
+	}
+	for _, invalid := range []string{"AWS", "cloud poller", "aws!", "1aws"} {
+		if err := a.ApplySource(invalid, nil); err == nil {
+			t.Errorf("source %q should be rejected (must be lower-case snake_case)", invalid)
+		}
+	}
+}
+
+func TestAsset_ValidateRejectsAnOverlongSource(t *testing.T) {
+	a, err := NewAsset("tn-1", "server", "host-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Source = strings.Repeat("a", MaxAssetSourceLength+1)
+	if err := a.Validate(); err == nil {
+		t.Error("an overlong source was accepted")
+	}
+}
+
+func TestAsset_ValidateRejectsAnOverlongExternalRef(t *testing.T) {
+	a, err := NewAsset("tn-1", "server", "host-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlong := strings.Repeat("x", MaxAssetExternalRefLength+1)
+	a.ExternalRef = &overlong
+	if err := a.Validate(); err == nil {
+		t.Error("an overlong external_ref was accepted")
+	}
+}
+
+func TestAsset_ValidateRejectsBlankExternalRef(t *testing.T) {
+	a, err := NewAsset("tn-1", "server", "host-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blank := "   "
+	a.ExternalRef = &blank
+	if err := a.Validate(); err == nil {
+		t.Error("a blank external_ref was accepted directly on the struct")
+	}
+}
+
 func TestAsset_ValidateRejectsBlankOwnerIDs(t *testing.T) {
 	blank := "   "
 	a, err := NewAsset("tn-1", "server", "Host", nil)
