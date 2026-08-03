@@ -199,9 +199,26 @@ func (s *TelemetryStore) QueryRange(
 // QueryRangeForTenant is QueryRange's privileged-pool counterpart — see
 // domain.TelemetryRepository's doc comment for why an explicit tenant_id
 // predicate is required here and not merely relied on as an ambient
-// connection property. Raw samples only, ordered by ts ascending, bounded by
-// MaxTelemetryQueryLimit — the same "no unbounded query" rule QueryRange's
-// own LIMIT enforces.
+// connection property. Raw samples only, bounded by MaxTelemetryQueryLimit —
+// the same "no unbounded query" rule QueryRange's own LIMIT enforces.
+//
+// The database query is `ORDER BY ts DESC LIMIT MaxTelemetryQueryLimit` — the
+// MOST RECENT samples in the window, not the oldest. This method's only
+// caller (the alert-rule evaluator) needs to know "is this breaching now",
+// and for a window whose sample count exceeds the cap (a long ForDuration
+// over a high-frequency metric, e.g. 24h at one sample/10s ≈ 8640 > 5000) the
+// two orderings disagree: `ORDER BY ts ASC LIMIT N` — the original
+// implementation — returns the OLDEST N samples and never reaches the most
+// recent ones at all, so a metric that breached early in the window and then
+// recovered keeps reading as a sustained breach for hours after recovering,
+// because the recovery is past the cap and never fetched. Fetching the most
+// recent N instead means a truncated window is always missing PAST context,
+// never the present — the correct side to lose when only one side can be
+// kept. The rows are reversed into ascending order before returning so the
+// slice this method hands back reads oldest-to-newest exactly like
+// QueryRange's, and so alerting.sustainedBreach's window-start coverage
+// check (comparing samples[0]) keeps working unchanged for the common,
+// unbounded case.
 func (s *TelemetryStore) QueryRangeForTenant(
 	ctx context.Context, tenantID, assetID, metric string, from, to time.Time,
 ) ([]domain.Sample, error) {
@@ -210,7 +227,7 @@ func (s *TelemetryStore) QueryRangeForTenant(
 		  FROM telemetry_sample
 		 WHERE tenant_id = $1 AND asset_id = $2 AND metric = $3
 		   AND ts >= $4 AND ts <= $5
-		 ORDER BY ts
+		 ORDER BY ts DESC
 		 LIMIT $6`,
 		tenantID, assetID, metric, from, to, domain.MaxTelemetryQueryLimit)
 	if err != nil {
@@ -228,6 +245,11 @@ func (s *TelemetryStore) QueryRangeForTenant(
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate telemetry samples: %w", err)
+	}
+	// out was fetched newest-first (DESC); reverse in place to hand back
+	// oldest-first, matching QueryRange's ordering contract.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
 	}
 	return out, nil
 }

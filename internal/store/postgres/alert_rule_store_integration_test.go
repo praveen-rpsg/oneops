@@ -330,3 +330,83 @@ func TestTelemetryStore_QueryRangeForTenantIsolatesTenant(t *testing.T) {
 		t.Fatalf("tenant b's query returned %+v, want exactly its own sample (value=222)", gotB)
 	}
 }
+
+// TestTelemetryStore_QueryRangeForTenantReturnsMostRecentWhenWindowExceedsCap
+// is the store-level bite test for the spurious-alert fix: a window whose
+// true sample count exceeds domain.MaxTelemetryQueryLimit must be answered
+// with the MOST RECENT cap-worth of samples, not the oldest.
+//
+// domain.MaxTelemetryQueryLimit+50 samples are bulk-inserted one second
+// apart, breaching for all but the newest 50 (a recent recovery). If the
+// query still favoured the oldest rows (the pre-fix `ORDER BY ts ASC LIMIT
+// N`), every one of the MaxTelemetryQueryLimit rows returned would be a
+// pre-recovery, still-breaching value and the recovery would never be
+// visible at all — exactly the spurious-alert bug this fix closes.
+func TestTelemetryStore_QueryRangeForTenantReturnsMostRecentWhenWindowExceedsCap(t *testing.T) {
+	priv := testPool(t)
+	tn := assetTenant(t, NewTenantStore(priv), "tel-cap-recent")
+
+	scoped := tenantScopedPool(t)
+	asset := telemetryAsset(t, NewAssetStore(scoped), assetTestCtx(tn), tn.TenantID, "cap-recent-host")
+
+	const metric = "cpu_utilization"
+	const total = domain.MaxTelemetryQueryLimit + 50
+	const recoveredTail = 50
+	// A distant, unused base avoids colliding with the rollup worker's
+	// global, unfiltered aggregation window — see the isolation test above.
+	base := time.Date(2032, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Bulk insert via generate_series: `total` one-row INSERTs would dominate
+	// this test's runtime for no reason relevant to what it proves. Value is
+	// 95 (breaching a >90 threshold) for every row except the most recent
+	// `recoveredTail`, which recovered to 10.
+	if _, err := priv.Exec(context.Background(), `
+		INSERT INTO telemetry_sample (tenant_id, asset_id, metric, ts, value, labels)
+		SELECT $1, $2, $3, $4::timestamptz + (i * interval '1 second'),
+		       CASE WHEN i >= $5 THEN 10 ELSE 95 END, '{}'
+		  FROM generate_series(0, $6 - 1) AS i`,
+		tn.TenantID, asset.AssetID, metric, base, total-recoveredTail, total); err != nil {
+		t.Fatalf("bulk insert samples: %v", err)
+	}
+
+	store := NewTelemetryStore(priv)
+	from := base
+	to := base.Add(time.Duration(total) * time.Second)
+	got, err := store.QueryRangeForTenant(context.Background(), tn.TenantID, asset.AssetID, metric, from, to)
+	if err != nil {
+		t.Fatalf("query range for tenant: %v", err)
+	}
+	if len(got) != domain.MaxTelemetryQueryLimit {
+		t.Fatalf("returned %d samples, want exactly the cap (%d)", len(got), domain.MaxTelemetryQueryLimit)
+	}
+
+	// Ascending order is the documented contract: the LAST returned sample
+	// must be the most recent one written (the tail of the window), not
+	// merely the last of an early, stale slice.
+	last := got[len(got)-1]
+	wantLastTS := base.Add(time.Duration(total-1) * time.Second)
+	if !last.Timestamp.Equal(wantLastTS) {
+		t.Fatalf("last returned sample ts = %v, want %v (the window's true last sample) — "+
+			"the query is not favouring the most recent rows", last.Timestamp, wantLastTS)
+	}
+
+	// The recovered tail must be present and visible at the end of the
+	// returned slice — this is the actual bug this fix closes: under the
+	// pre-fix ASC ordering, none of these would ever be returned at all.
+	recoveredSeen := 0
+	for _, s := range got[len(got)-recoveredTail:] {
+		if s.Value == 10 {
+			recoveredSeen++
+		}
+	}
+	if recoveredSeen != recoveredTail {
+		t.Fatalf("recovered samples visible in the returned tail = %d, want %d", recoveredSeen, recoveredTail)
+	}
+
+	// And the fetch was genuinely truncated from the front: the earliest
+	// breaching sample (ts=base) must NOT be among what was returned.
+	if got[0].Timestamp.Equal(base) {
+		t.Fatalf("the window's very first (oldest) sample was returned — the query is not " +
+			"truncating from the front, so this test proves nothing about the fix")
+	}
+}

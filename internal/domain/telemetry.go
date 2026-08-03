@@ -329,10 +329,19 @@ type TelemetryRepository interface {
 	// asset_id/metric and trust that no two tenants' rows can ever match
 	// them. tenantID is therefore a required, explicit SQL predicate rather
 	// than an ambient assumption — the same posture ADR-TENANCY-009 requires
-	// of a privileged mutation, applied here to a privileged read. Returns
-	// raw samples only, ordered by Timestamp ascending, bounded by
-	// MaxTelemetryQueryLimit; there is no resolution/rollup selection because
-	// ForDuration (MaxAlertRuleForDurationSeconds = 24h) never approaches
+	// of a privileged mutation, applied here to a privileged read (see
+	// ADR-TENANCY-012). Returns raw samples only, ordered by Timestamp
+	// ascending, bounded by MaxTelemetryQueryLimit; there is no
+	// resolution/rollup selection because ForDuration
+	// (MaxAlertRuleForDurationSeconds = 24h) never approaches
 	// AutoResolutionRawWindow's territory.
+	//
+	// When a window holds more than MaxTelemetryQueryLimit samples, the
+	// samples kept are the MOST RECENT ones, not the oldest — the
+	// implementation fetches newest-first and reverses before returning. A
+	// truncated window is missing PAST context, never present context: the
+	// evaluator's "is this breaching right now" question must never be
+	// answered from stale data that predates a recovery the cap pushed out of
+	// view.
 	QueryRangeForTenant(ctx context.Context, tenantID, assetID, metric string, from, to time.Time) ([]Sample, error)
 }

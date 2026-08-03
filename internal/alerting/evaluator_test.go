@@ -126,6 +126,124 @@ func TestEvaluator_NoDataDoesNotFire(t *testing.T) {
 	}
 }
 
+// TestEvaluator_LongWindowSeesRecentRecoveryNotStaleBreach is the bite test
+// for the truncation direction TelemetryReader.QueryRangeForTenant's doc
+// comment records: a window whose true sample count exceeds
+// domain.MaxTelemetryQueryLimit must be evaluated over its MOST RECENT
+// cap-worth of samples, not its oldest.
+//
+// A 24h ForDuration on a metric reporting more often than once per ~17s
+// produces more than MaxTelemetryQueryLimit (5000) samples in one window
+// (e.g. one every 10s ≈ 8640). This test gives the evaluator exactly the two
+// shapes of MaxTelemetryQueryLimit-sized slice QueryRangeForTenant could, in
+// principle, hand back for such a window: fetched-newest (the fix — recovery
+// near "now" is visible) and fetched-oldest (the bug this guards against —
+// only stale, still-breaching data from early in the window is visible,
+// because the recovery lives past where an oldest-first LIMIT would ever
+// reach). Only the newest-first shape may result in a fire.
+func TestEvaluator_LongWindowSeesRecentRecoveryNotStaleBreach(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	rule := mkRule(t, "tenant-a", "asset-1", "cpu_utilization", domain.ComparatorGT, 90, 24*3600)
+	from := now.Add(-24 * time.Hour)
+
+	n := domain.MaxTelemetryQueryLimit
+	step := 24 * time.Hour / time.Duration(n+1)
+
+	// What QueryRangeForTenant now actually returns for such a window: the
+	// most recent n samples, oldest-first — a breach through most of the cap,
+	// recovered in the final few samples nearest "now".
+	mostRecent := make([]domain.Sample, n)
+	for i := 0; i < n; i++ {
+		value := 95.0
+		if i >= n-10 {
+			value = 10.0 // recovered in the tail closest to "now"
+		}
+		mostRecent[i] = domain.Sample{Timestamp: from.Add(step * time.Duration(i+1)), Value: value}
+	}
+
+	store := newFakeStore(rule)
+	tel := newFakeTelemetry()
+	tel.set(rule.TenantID, rule.AssetID, rule.Metric, mostRecent)
+	notifier := &fakeNotifier{}
+	e := newTestEvaluator(store, tel, notifier, now)
+
+	e.RunOnce(context.Background())
+
+	if got := notifier.count(); got != 0 {
+		t.Fatalf("notifications for a long window whose recent tail recovered = %d, want 0 "+
+			"(the evaluator must see the recovery, not just stale early-window breach data)", got)
+	}
+	if got := store.get(rule.RuleID).LastState; got != domain.AlertRuleStateOK {
+		t.Fatalf("last_state = %q, want ok", got)
+	}
+
+	// Sanity check / regression guard: what the OLD `ORDER BY ts ASC LIMIT n`
+	// would have handed back for the identical real-world window — the
+	// oldest n samples, none of which have recovered yet, because the
+	// recovery is past the cap in timestamp order. This shape must still
+	// fire; if it stopped firing too, sustainedBreach's capped-window branch
+	// would be broken in the other direction (never firing a real, sustained,
+	// still-current breach).
+	oldestFirst := make([]domain.Sample, n)
+	for i := 0; i < n; i++ {
+		oldestFirst[i] = domain.Sample{Timestamp: from.Add(step * time.Duration(i+1)), Value: 95}
+	}
+	store2 := newFakeStore(rule)
+	tel2 := newFakeTelemetry()
+	tel2.set(rule.TenantID, rule.AssetID, rule.Metric, oldestFirst)
+	notifier2 := &fakeNotifier{}
+	e2 := newTestEvaluator(store2, tel2, notifier2, now)
+
+	e2.RunOnce(context.Background())
+
+	if got := notifier2.count(); got != 1 {
+		t.Fatalf("sanity check failed: a capped, fully-breaching sample set must still fire "+
+			"(notifications = %d, want 1) — otherwise the capped branch never fires anything", got)
+	}
+}
+
+// TestSustainedBreach_CappedWindowSkipsStartCoverageCheck is the direct,
+// white-box proof of sustainedBreach's capped branch: a metric reporting far
+// more often than ForDuration/MaxTelemetryQueryLimit fills the cap with
+// samples that do NOT reach back to the window's nominal start at all (e.g.
+// one sample/second against a 24h ForDuration: the most recent
+// MaxTelemetryQueryLimit samples span only its most recent ~83 minutes). That
+// must still fire on what it has — refusing to fire a genuinely sustained,
+// currently-breaching metric merely because the window is long and the
+// metric is high-frequency would be a regression in the opposite direction
+// from the one this fix closes.
+func TestSustainedBreach_CappedWindowSkipsStartCoverageCheck(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	from := now.Add(-24 * time.Hour)
+
+	n := domain.MaxTelemetryQueryLimit
+	samples := make([]domain.Sample, n)
+	for i := 0; i < n; i++ {
+		samples[i] = domain.Sample{Timestamp: now.Add(-time.Duration(n-i) * time.Second), Value: 95}
+	}
+	// samples[0] is ~83 minutes before "now" — nowhere near `from` (24h ago).
+
+	if !sustainedBreach(samples, domain.ComparatorGT, 90, from) {
+		t.Fatal("a fully-breaching, capped, most-recent sample set must fire even though it " +
+			"does not reach back to the window's nominal start")
+	}
+}
+
+// TestSustainedBreach_UncappedWindowStillRequiresStartCoverage proves the
+// capped branch above did not weaken the common, unbounded case: a short
+// breach that does not cover the window's start must still not count as
+// sustained (TestEvaluator_ShortBreachDoesNotFire's proof, restated directly
+// against sustainedBreach).
+func TestSustainedBreach_UncappedWindowStillRequiresStartCoverage(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	from := now.Add(-300 * time.Second)
+	samples := []domain.Sample{{Timestamp: now.Add(-20 * time.Second), Value: 95}}
+
+	if sustainedBreach(samples, domain.ComparatorGT, 90, from) {
+		t.Fatal("a short, uncapped breach must not count as sustained")
+	}
+}
+
 // TestEvaluator_CrossTenantTelemetryIsolation is the make-or-break proof for
 // E3.1's #1 risk: the evaluator processes every tenant's rules from one
 // privileged process, concurrently (Config.Concurrency > 1). A rule for

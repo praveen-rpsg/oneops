@@ -160,7 +160,8 @@ func (e *Evaluator) RunOnce(ctx context.Context) {
 // crashing before the notification would instead silently lose the alert
 // forever. Between "duplicate" and "missed", this package always chooses
 // duplicate (the same priority ADR-CONCURRENCY-*'s at-least-once delivery
-// choices make elsewhere in this platform).
+// choices make elsewhere in this platform; recorded as its own decision in
+// ADR-TENANCY-012 §2).
 func (e *Evaluator) evaluateRule(ctx context.Context, rule *domain.AlertRule, now time.Time) {
 	e.metrics.IncEvaluated()
 
@@ -214,11 +215,22 @@ func (e *Evaluator) evaluateRule(ctx context.Context, rule *domain.AlertRule, no
 // sustained a breach for the full ForDuration even though every sample it
 // does have breaches. samples must be ordered by Timestamp ascending (the
 // TelemetryReader contract).
+//
+// A window whose true sample count exceeds domain.MaxTelemetryQueryLimit is
+// a special case: TelemetryReader.QueryRangeForTenant then hands back only
+// the MOST RECENT MaxTelemetryQueryLimit samples (its own doc comment
+// explains why), so samples[0] is not actually the window's start at all —
+// it is simply the oldest sample that fit under the cap, and comparing it
+// against `from` would wrongly refuse a genuinely sustained, currently-firing
+// breach just because the window is long and the metric is high-frequency
+// (e.g. a 24h ForDuration on a 10s-interval metric ≈ 8640 samples > 5000).
+// In that case every fetched sample breaching IS the answer: "is it
+// breaching now, for as much of the recent window as this cap can see" —
+// the operationally correct question when the whole window cannot be
+// examined at all. The window-start coverage check therefore applies only
+// when the fetch was NOT capped.
 func sustainedBreach(samples []domain.Sample, cmp domain.AlertComparator, threshold float64, from time.Time) bool {
 	if len(samples) == 0 {
-		return false
-	}
-	if samples[0].Timestamp.After(from.Add(evaluationCoverageSlack)) {
 		return false
 	}
 	for _, s := range samples {
@@ -226,7 +238,11 @@ func sustainedBreach(samples []domain.Sample, cmp domain.AlertComparator, thresh
 			return false
 		}
 	}
-	return true
+	capped := len(samples) >= domain.MaxTelemetryQueryLimit
+	if capped {
+		return true
+	}
+	return !samples[0].Timestamp.After(from.Add(evaluationCoverageSlack))
 }
 
 // notify builds and enqueues the transition's Notification. Recipient is the
