@@ -37,7 +37,7 @@ func TestOutboundClients_AreSSRFGuarded(t *testing.T) {
 		t.Fatalf("parse main: %v", err)
 	}
 	// The constructors that receive the outbound HTTP client.
-	guarded := map[string]bool{"NewDispatcher": true, "DefaultRegistry": true}
+	guarded := map[string]bool{"NewDispatcher": true, "DefaultRegistry": true, "NewScheduler": true}
 	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {

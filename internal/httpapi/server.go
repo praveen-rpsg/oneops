@@ -101,6 +101,13 @@ type Server struct {
 	// needs an exemption from row-level security (ADR-TELEMETRY-001).
 	telemetry domain.TelemetryRepository
 
+	// Collector check registry (E2.2a); nil until SetCollectorChecks.
+	// collector_check is TENANT-OWNED, like asset above, so nothing here
+	// needs an exemption from row-level security. The scheduler that
+	// executes these checks is wired separately (collector.Scheduler, over
+	// the privileged pool) — this field is only the admin CRUD surface.
+	collectorChecks domain.CollectorCheckRepository
+
 	// Notification registry (read-only); nil until SetNotifications.
 	// notification is TENANT-OWNED, like team above, so nothing here needs an
 	// exemption from row-level security.
@@ -399,6 +406,18 @@ func (s *Server) routes() *chi.Mux {
 		// two verbs, the same shape /admin/assets uses for list/create.
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/telemetry", s.ingestTelemetry)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/telemetry", s.queryTelemetry)
+
+		// Collector check administration (E2.2a). collector_check is
+		// TENANT-OWNED, exactly like asset/telemetry above, so the permission
+		// tier is tenant administration, not requirePlatformAdmin. A manual
+		// "run now" endpoint is deferred (docs/PLATFORM-BUILD-PLAN.md E2.2a):
+		// the leader-gated scheduler is the only producer of a check's result
+		// in this increment.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/collector-checks", s.listCollectorChecks)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/collector-checks", s.createCollectorCheck)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/collector-checks/{id}", s.getCollectorCheck)
+		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/collector-checks/{id}", s.patchCollectorCheck)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/collector-checks/{id}", s.deleteCollectorCheck)
 
 		// Notification administration (read-only). notification is TENANT-OWNED,
 		// exactly like team above, so the permission tier is tenant

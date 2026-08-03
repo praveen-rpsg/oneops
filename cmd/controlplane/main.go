@@ -17,6 +17,7 @@ import (
 	"github.com/rpsg/oneops/internal/audit"
 	"github.com/rpsg/oneops/internal/auth"
 	"github.com/rpsg/oneops/internal/authority"
+	"github.com/rpsg/oneops/internal/collector"
 	"github.com/rpsg/oneops/internal/compliance"
 	"github.com/rpsg/oneops/internal/config"
 	"github.com/rpsg/oneops/internal/diag"
@@ -531,6 +532,28 @@ func run(logger *slog.Logger) error {
 	telemetryRollupWorker := postgres.NewTelemetryRollupWorker(pool, logger, postgres.TelemetryRollupConfig{})
 	telemetryRetentionWorker := postgres.NewTelemetryRetentionWorker(pool, logger, postgres.TelemetryRetentionConfig{})
 	workers = append(workers, telemetryRollupWorker.Run, telemetryRetentionWorker.Run)
+
+	// Collector check administration + the agentless collector framework
+	// (E2.2a): collector_check is tenant-owned and under row-level security,
+	// exactly like asset above, so the admin CRUD API is built from the
+	// tenant-scoped pool. The scheduler, like the telemetry workers above, is
+	// a cross-tenant background worker: it due-scans every tenant's checks
+	// from one process, so it is built from the PRIVILEGED pool instead —
+	// one CollectorCheckStore type, two roles, exactly mirroring
+	// NotificationStore/notificationStore+notificationAdminStore above.
+	collectorCheckAdminStore := postgres.NewCollectorCheckStore(appPool)
+	collectorCheckStore := postgres.NewCollectorCheckStore(pool)
+	srv.SetCollectorChecks(collectorCheckAdminStore)
+	// A check target is customer-supplied — a URL to poll — exactly the same
+	// SSRF vector a webhook delivery target is, so the executor shares the
+	// SSRF-safe client (ADR-SECURITY-001): it refuses to dial loopback,
+	// link-local (cloud metadata), or private addresses unless explicitly
+	// allowed.
+	collectorHTTPClient := safehttp.Client(15*time.Second, cfg.WebhookAllowPrivateTargets)
+	collectorMetrics := collector.NewPromMetrics(metrics.Registry())
+	collectorScheduler := collector.NewScheduler(
+		collectorCheckStore, postgres.NewTelemetryStore(pool), collectorHTTPClient, collectorMetrics, logger, collector.Config{})
+	workers = append(workers, collectorScheduler.Run)
 
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.

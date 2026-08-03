@@ -1701,6 +1701,101 @@ paths:
         '422': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/collector-checks:
+    get:
+      summary: List the caller's tenant's collector checks (E2.2a)
+      operationId: listCollectorChecks
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last check_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of collector checks
+          content: { application/json: { schema: { $ref: '#/components/schemas/CollectorCheckList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Register a collector check target (E2.2a)
+      description: >-
+        asset_id must already name a Configuration Item visible to the
+        caller's tenant, re-verified server-side before the row is written
+        (ADR-ASSET-001 §6, extended here) — a cross-tenant or nonexistent
+        asset_id is rejected with 404.
+      operationId: createCollectorCheck
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCollectorCheckRequest' }
+      responses:
+        '201':
+          description: The created collector check
+          content: { application/json: { schema: { $ref: '#/components/schemas/CollectorCheck' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/collector-checks/{id}:
+    get:
+      summary: Get one collector check by identifier
+      operationId: getCollectorCheck
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The collector check
+          content: { application/json: { schema: { $ref: '#/components/schemas/CollectorCheck' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Change one or more fields of a collector check
+      operationId: patchCollectorCheck
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchCollectorCheckRequest' }
+      responses:
+        '200':
+          description: The updated collector check
+          content: { application/json: { schema: { $ref: '#/components/schemas/CollectorCheck' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    delete:
+      summary: Remove a collector check
+      operationId: deleteCollectorCheck
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/notifications:
     get:
       summary: List the caller's tenant's notifications
@@ -2767,6 +2862,79 @@ components:
         items:
           type: array
           items: { $ref: '#/components/schemas/Sample' }
+    CollectorCheck:
+      type: object
+      description: >-
+        A polled check target (E2.2a): the agentless collector framework's
+        config. Its result is written as telemetry samples named
+        <metric_prefix>_up, <metric_prefix>_latency_ms and
+        <metric_prefix>_status_code — never a reified Alert/Metric.
+      properties:
+        check_id: { type: string }
+        asset_id: { type: string }
+        type:
+          type: string
+          description: >-
+            Open but validated: lower-case snake_case. "http" is the only
+            type with an executor today (E2.2a); SNMP (E2.2b) and cloud/API
+            pollers (E2.2c) add more values later.
+        target:
+          type: string
+          description: Interpreted according to `type` — a URL for "http".
+        interval_seconds: { type: integer, minimum: 30, maximum: 2592000 }
+        enabled: { type: boolean }
+        metric_prefix:
+          type: string
+          maxLength: 80
+          description: Lower-case snake_case, e.g. checkout_api.
+        last_run_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Set only by the scheduler. Absent means never run.
+        last_status:
+          type: string
+          enum: [ok, down, unsupported]
+          description: Set only by the scheduler. Absent means never run.
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CollectorCheckList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/CollectorCheck' }
+    CreateCollectorCheckRequest:
+      type: object
+      required: [asset_id, target, interval_seconds, metric_prefix]
+      description: >-
+        `type` defaults to "http" when omitted. `enabled` defaults to true.
+        When the resulting type is "http", `target` is validated as an
+        http(s) URL with a host at creation time; the authoritative SSRF
+        egress guard (non-public addresses) is enforced at dial time by
+        every poll (ADR-SECURITY-001).
+      properties:
+        asset_id: { type: string }
+        type: { type: string }
+        target: { type: string, maxLength: 500 }
+        interval_seconds: { type: integer, minimum: 30, maximum: 2592000 }
+        metric_prefix: { type: string, maxLength: 80 }
+        enabled: { type: boolean }
+    PatchCollectorCheckRequest:
+      type: object
+      required: [row_version]
+      description: >-
+        Supply one or more of type, target, interval_seconds, enabled or
+        metric_prefix. asset_id cannot be changed — delete and recreate the
+        check instead.
+      properties:
+        row_version: { type: integer, format: int64 }
+        type: { type: string }
+        target: { type: string, maxLength: 500 }
+        interval_seconds: { type: integer, minimum: 30, maximum: 2592000 }
+        enabled: { type: boolean }
+        metric_prefix: { type: string, maxLength: 80 }
     Setting:
       type: object
       description: >-

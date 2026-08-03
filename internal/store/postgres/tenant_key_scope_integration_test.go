@@ -95,6 +95,9 @@ var keyScopeJustifications = map[string]string{
 
 	// CI lifecycle + append-only change history (E1.3).
 	"asset_change_history.asset_change_history_pkey": "change_id is platform-generated (domain.NewID() in AssetStore.recordChange); clients never supply it and there is no route that accepts one",
+
+	// Collector check-target configuration (E2.2a).
+	"collector_check.collector_check_pkey": "check_id is platform-generated (domain.NewCollectorCheck); clients never supply it and there is no create route that accepts one",
 }
 
 func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {
