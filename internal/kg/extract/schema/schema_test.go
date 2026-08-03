@@ -56,7 +56,7 @@ func TestEveryTableIsANode(t *testing.T) {
 		"audit_chain_head", "audit_event", "audit_event_default", "configuration_metadata",
 		"configuration_object", "dependency_edge", "idempotency_key", "invitation",
 		"membership", "notification", "organization", "policy", "policy_cursor", "policy_execution",
-		"setting", "team", "team_membership", "telemetry_sample", "tenant", "webhook", "webhook_cursor",
+		"setting", "team", "team_membership", "telemetry_rollup_5m", "telemetry_sample", "tenant", "webhook", "webhook_cursor",
 		"webhook_delivery", "webhook_replay_job",
 	}
 	for _, w := range want {
@@ -283,7 +283,7 @@ func TestCorpusCensus(t *testing.T) {
 		got[n.Kind]++
 	}
 	want := map[string]int{
-		kindTable: 31, kindColumn: 270, kindIndex: 66, kindConstraint: 81, kindTrigger: 6,
+		kindTable: 32, kindColumn: 278, kindIndex: 66, kindConstraint: 83, kindTrigger: 6,
 	}
 	for kind, w := range want {
 		if got[kind] != w {
@@ -400,17 +400,17 @@ func TestMultiLineAlterTableIsExtracted(t *testing.T) {
 		}
 	}
 
-	// Twenty-five tables carry the discriminator (E2.1 adds
-	// telemetry_sample). Anything less is a wrong answer to the question the
-	// graph exists to answer.
+	// Twenty-six tables carry the discriminator (E2.1 added telemetry_sample;
+	// E2.1b adds telemetry_rollup_5m). Anything less is a wrong answer to the
+	// question the graph exists to answer.
 	scoped := 0
 	for _, n := range nodes {
 		if strings.HasSuffix(n.ID, ".tenant_id") && n.Kind == kindColumn {
 			scoped++
 		}
 	}
-	if scoped != 25 {
-		t.Errorf("%d tables carry tenant_id, want 25", scoped)
+	if scoped != 26 {
+		t.Errorf("%d tables carry tenant_id, want 26", scoped)
 	}
 
 	// A multi-line declaration must still be owned by its table.

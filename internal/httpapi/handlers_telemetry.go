@@ -119,19 +119,27 @@ func (s *Server) ingestTelemetry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ingestTelemetryResponse{Results: results})
 }
 
-// sampleDTO is one telemetry observation on the wire.
+// sampleDTO is one telemetry observation on the wire. Min/Max/Count are
+// present only when the response came from the rollup (resolution=rollup_5m,
+// or resolution=auto over a wide window) — see domain.Sample's doc comment.
 type sampleDTO struct {
 	AssetID   string            `json:"asset_id"`
 	Metric    string            `json:"metric"`
 	Value     float64           `json:"value"`
 	Timestamp time.Time         `json:"timestamp"`
 	Labels    map[string]string `json:"labels"`
+	Min       *float64          `json:"min,omitempty"`
+	Max       *float64          `json:"max,omitempty"`
+	Count     *int64            `json:"count,omitempty"`
 }
 
 // toSampleDTO deliberately omits tenant_id, the same choice toAssetDTO makes:
 // the caller is already inside exactly one tenant.
 func toSampleDTO(sm domain.Sample) sampleDTO {
-	return sampleDTO{AssetID: sm.AssetID, Metric: sm.Metric, Value: sm.Value, Timestamp: sm.Timestamp, Labels: sm.Labels}
+	return sampleDTO{
+		AssetID: sm.AssetID, Metric: sm.Metric, Value: sm.Value, Timestamp: sm.Timestamp, Labels: sm.Labels,
+		Min: sm.Min, Max: sm.Max, Count: sm.Count,
+	}
 }
 
 // queryTelemetry serves GET /admin/telemetry: a bounded, keyset-paginated
@@ -189,7 +197,13 @@ func (s *Server) queryTelemetry(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 
-	items, err := s.telemetry.QueryRange(r.Context(), assetID, metric, from, to, limit, after)
+	resolution, err := domain.ParseTelemetryResolution(q.Get("resolution"))
+	if err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+
+	items, err := s.telemetry.QueryRange(r.Context(), assetID, metric, from, to, limit, after, resolution)
 	if err != nil {
 		s.mapError(w, r, err)
 		return

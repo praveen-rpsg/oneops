@@ -196,6 +196,17 @@ var SettingDefinitions = map[string]SettingDefinition{
 			"reproduces single-actor approval exactly.",
 		Min: 1, Max: 10,
 	},
+	TelemetryRawRetentionDaysKey: {
+		Key:     TelemetryRawRetentionDaysKey,
+		Type:    SettingTypeInt,
+		Default: strconv.Itoa(DefaultTelemetryRawRetentionDays),
+		Description: "How many days a raw telemetry_sample row is kept before the retention " +
+			"worker drops its chunk (E2.1b, ADR-TELEMETRY-002). PLATFORM-scoped: only the " +
+			"override stored under the system tenant takes effect — see this key's own doc " +
+			"comment in internal/domain/telemetry.go for why per-tenant values are not " +
+			"honoured.",
+		Min: 1, Max: 3650,
+	},
 }
 
 // GovernanceRequiredApprovalsKey names the tenant-scoped multi-approver quorum

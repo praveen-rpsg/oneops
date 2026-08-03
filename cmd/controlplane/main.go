@@ -522,6 +522,15 @@ func run(logger *slog.Logger) error {
 	// security, exactly like asset above — a TimescaleDB hypertable is a
 	// regular table to this wiring rule (ADR-TELEMETRY-001).
 	srv.SetTelemetry(postgres.NewTelemetryStore(appPool))
+	// Telemetry retention + downsampling (E2.1b, ADR-TELEMETRY-002): both
+	// workers process every tenant's chunks/buckets from one process, the
+	// same category of background worker the webhook dispatcher and policy
+	// consumer already are, so they are built from the PRIVILEGED pool, not
+	// appPool — there is no single tenant's connection a whole-hypertable
+	// drop_chunks or a cross-tenant aggregation could run on.
+	telemetryRollupWorker := postgres.NewTelemetryRollupWorker(pool, logger, postgres.TelemetryRollupConfig{})
+	telemetryRetentionWorker := postgres.NewTelemetryRetentionWorker(pool, logger, postgres.TelemetryRetentionConfig{})
+	workers = append(workers, telemetryRollupWorker.Run, telemetryRetentionWorker.Run)
 
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.

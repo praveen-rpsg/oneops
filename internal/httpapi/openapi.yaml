@@ -1683,6 +1683,15 @@ paths:
         - name: limit
           in: query
           schema: { type: integer, minimum: 1, maximum: 5000 }
+        - name: resolution
+          in: query
+          description: >-
+            "raw" for individual samples, "rollup_5m" for the 5-minute
+            avg/min/max/count rollup, or omitted for automatic selection
+            (raw for a short window, rollup_5m for a wide one, E2.1b).
+            An explicit "raw" over a very wide window is rejected (422):
+            request rollup_5m, or narrow the window.
+          schema: { type: string, enum: [raw, rollup_5m] }
       responses:
         '200':
           description: A page of samples, ordered by timestamp ascending
@@ -2736,6 +2745,11 @@ components:
           items: { $ref: '#/components/schemas/SampleWriteResult' }
     Sample:
       type: object
+      description: >-
+        min/max/count are present only when this row came from the 5-minute
+        rollup (resolution=rollup_5m, or resolution=auto over a wide window,
+        E2.1b): value is then the bucket's average, timestamp is the bucket's
+        start, and min/max/count describe the raw samples it summarises.
       properties:
         asset_id: { type: string }
         metric: { type: string }
@@ -2744,6 +2758,9 @@ components:
         labels:
           type: object
           additionalProperties: { type: string }
+        min: { type: number, format: double }
+        max: { type: number, format: double }
+        count: { type: integer, format: int64 }
     SampleList:
       type: object
       properties:
