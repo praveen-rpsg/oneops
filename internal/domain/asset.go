@@ -126,6 +126,23 @@ const MaxAssetNameLength = 200
 // MaxAssetTypeLength bounds the type identifier.
 const MaxAssetTypeLength = 100
 
+// DefaultAssetSource is the provenance of an asset nobody has attributed to
+// an external system — the common case of a human registering a CI by hand
+// (E1.4). NewAsset defaults to it, mirroring the column's own DEFAULT.
+const DefaultAssetSource = "manual"
+
+// MaxAssetSourceLength bounds the source identifier, the same bound
+// MaxAssetTypeLength applies to Type — they share a format (assetTypePattern)
+// for the same reason: fit to appear in a filter, a metric label, or a route.
+const MaxAssetSourceLength = 100
+
+// MaxAssetExternalRefLength bounds the natural key an external source system
+// uses for a CI (e.g. a cloud provider's ARN or instance id). Unlike
+// Source/Type this is opaque, foreign data, not an identifier this schema
+// mints or filters on, so it carries no format constraint — only a length
+// bound generous enough for the identifiers real source systems use.
+const MaxAssetExternalRefLength = 500
+
 // assetTypePattern is the format Asset.Type must satisfy. The set of types is
 // deliberately open — server, service, network_device, application, database
 // and whatever downstream monitoring/ITSM increments need next, none of which
@@ -133,7 +150,8 @@ const MaxAssetTypeLength = 100
 // lower-case snake_case identifier, the same discipline
 // configuration_object's own identifiers hold elsewhere in this schema, so a
 // type is fit to appear in a filter, a metric label, or a route without
-// escaping.
+// escaping. Reused as-is for Asset.Source (E1.4): manual/discovery/aws/snmp
+// are the same shape of open-but-validated identifier Type already is.
 var assetTypePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
 // RelationshipType is the kind of edge the CMDB graph carries between two
@@ -242,6 +260,17 @@ type Asset struct {
 	// cannot be trusted (ADR-ASSET-001 §6, extended to ownership).
 	OwnerTeamID *string
 	OwnerUserID *string
+	// Source identifies the system that produced this row — manual (the
+	// default), discovery, aws, snmp, or whatever a future integration
+	// registers — open but validated exactly like Type (E1.4).
+	Source string
+	// ExternalRef is the natural key Source uses for this CI, or nil for a
+	// manually-entered asset with no external identity. When set, it is
+	// unique per (tenant_id, source) at the database level — see the E1.4
+	// migration — and is the match key AssetRepository.Upsert imports
+	// against, which is what makes re-importing the same source data
+	// idempotent instead of creating a duplicate row each time.
+	ExternalRef *string
 	RowVersion  int64
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
@@ -291,6 +320,25 @@ func (a *Asset) Validate() error {
 	if a.OwnerUserID != nil && strings.TrimSpace(*a.OwnerUserID) == "" {
 		return newValidation("owner_user_id", "must not be blank when supplied; omit it to leave the asset unowned")
 	}
+	source := strings.TrimSpace(a.Source)
+	if source == "" {
+		return newValidation("source", "must not be empty")
+	}
+	if len(source) > MaxAssetSourceLength {
+		return newValidation("source", "must be at most 100 characters")
+	}
+	if !assetTypePattern.MatchString(source) {
+		return newValidation("source", "must be lower-case snake_case, e.g. manual, discovery, aws, snmp")
+	}
+	if a.ExternalRef != nil {
+		ref := strings.TrimSpace(*a.ExternalRef)
+		if ref == "" {
+			return newValidation("external_ref", "must not be blank when supplied; omit it for a source with no natural key")
+		}
+		if len(ref) > MaxAssetExternalRefLength {
+			return newValidation("external_ref", "must be at most 500 characters")
+		}
+	}
 	return nil
 }
 
@@ -317,6 +365,7 @@ func NewAsset(tenantID, assetType, name string, attributes map[string]any) (*Ass
 		Status:      AssetActive,
 		Environment: AssetEnvironmentUnknown,
 		Criticality: AssetCriticalityUnknown,
+		Source:      DefaultAssetSource,
 	}
 	if err := a.Validate(); err != nil {
 		return nil, err
@@ -346,6 +395,31 @@ func (a *Asset) ApplyClassification(environment, criticality string, ownerTeamID
 	a.Criticality = AssetCriticality(crit)
 	a.OwnerTeamID = ownerTeamID
 	a.OwnerUserID = ownerUserID
+	return a.Validate()
+}
+
+// ApplySource sets the provenance a source system carries for this
+// Configuration Item (E1.4): which system produced the row and, optionally,
+// the natural key that system uses for it. An empty/blank source defaults to
+// "manual" — the same default NewAsset and the migration's column default
+// both apply — and a blank externalRef ("" or nil) is stored as nil, never
+// as an empty string: AssetRepository.Upsert treats a nil ExternalRef as "no
+// natural key, always create" (there is nothing to match a re-import
+// against), so an accidental empty string must never be silently treated as
+// a real one. Like ApplyClassification, this always sets both fields from
+// its arguments — it is a construction-time setter, not a partial patch.
+func (a *Asset) ApplySource(source string, externalRef *string) error {
+	src := strings.TrimSpace(source)
+	if src == "" {
+		src = DefaultAssetSource
+	}
+	a.Source = src
+	a.ExternalRef = nil
+	if externalRef != nil {
+		if trimmed := strings.TrimSpace(*externalRef); trimmed != "" {
+			a.ExternalRef = &trimmed
+		}
+	}
 	return a.Validate()
 }
 
@@ -490,6 +564,77 @@ type AssetChangeEntry struct {
 	OccurredAt time.Time
 }
 
+// AssetImportOutcome classifies one row of a bulk import (E1.4).
+type AssetImportOutcome string
+
+const (
+	// AssetImportCreated is a row whose (tenant, source, external_ref) —
+	// or, absent an external_ref, the row itself — had no existing match.
+	AssetImportCreated AssetImportOutcome = "created"
+	// AssetImportUpdated is a row that matched an existing asset and
+	// replaced its fields, recording change history for each field that
+	// actually changed.
+	AssetImportUpdated AssetImportOutcome = "updated"
+	// AssetImportFailed is a row that was rejected — a validation failure,
+	// or an owner reference the tenant cannot see — without touching the
+	// database. One failed row does not abort the rows around it.
+	AssetImportFailed AssetImportOutcome = "failed"
+)
+
+// AssetImportResult is the outcome of one row of a bulk import — always one
+// per input row, at that row's input index, so a caller can correlate a
+// failure back to the request it sent without re-transmitting the payload.
+type AssetImportResult struct {
+	Index   int
+	Outcome AssetImportOutcome
+	AssetID string
+	Reason  string
+}
+
+// AssetDuplicateReason names why two or more Configuration Items were
+// grouped by AssetRepository.Duplicates (E1.4) as likely describing the same
+// real-world thing. Detection is read-only: nothing that produces this value
+// merges rows or mutates data — controlled merge is E1.4b, a separate, later
+// increment.
+type AssetDuplicateReason string
+
+const (
+	// AssetDuplicateSameExternalRef groups CIs that share one external_ref
+	// value across two or more DIFFERENT sources — e.g. an "aws" poller and
+	// a "discovery" scanner both reporting instance i-0123 as if they were
+	// two CIs. Two rows from the SAME source sharing an external_ref cannot
+	// occur: (tenant_id, source, external_ref) is a database uniqueness
+	// constraint (the E1.4 migration).
+	AssetDuplicateSameExternalRef AssetDuplicateReason = "same_external_ref_different_source"
+	// AssetDuplicateSameTypeName groups CIs of the same type whose name is
+	// identical after normalization (trimmed, case-folded) — the CMDB
+	// equivalent of two manual entries for "db-primary-01" made by two
+	// different operators.
+	AssetDuplicateSameTypeName AssetDuplicateReason = "same_type_and_name"
+)
+
+// AssetDuplicateMember is one Configuration Item inside a duplicate group —
+// enough to identify it and show why it matched, without forcing a second
+// round-trip through Get.
+type AssetDuplicateMember struct {
+	AssetID     string
+	Type        string
+	Name        string
+	Source      string
+	ExternalRef *string
+	Status      AssetStatus
+}
+
+// AssetDuplicateGroup is one set of Configuration Items AssetRepository.
+// Duplicates believes represent the same real-world thing. Key is the value
+// they matched on: the shared external_ref for AssetDuplicateSameExternalRef,
+// or "type:normalized_name" for AssetDuplicateSameTypeName.
+type AssetDuplicateGroup struct {
+	Reason  AssetDuplicateReason
+	Key     string
+	Members []AssetDuplicateMember
+}
+
 // AssetRepository administers the CMDB: assets, the relationships between
 // them, and each asset's append-only change history.
 //
@@ -548,6 +693,40 @@ type AssetRepository interface {
 	// uses. Never returns a row this store, or any caller, can update or
 	// delete: asset_change_history is append-only at the schema level.
 	History(ctx context.Context, assetID string, limit int, after string) ([]*AssetChangeEntry, error)
+
+	// Upsert inserts or updates an asset by (tenant, source, external_ref) —
+	// the idempotent bulk-import path (E1.4). a.ExternalRef == nil always
+	// creates (there is no natural key to match a re-import against, so a
+	// manual entry is created every time, exactly as Create already
+	// behaves). When a.ExternalRef is set and a row already exists at
+	// (tenant, a.Source, *a.ExternalRef), every field a carries — type,
+	// name, attributes, environment, criticality, ownership — REPLACES the
+	// stored value (a sync from the source of truth, not a partial patch),
+	// and each field that actually changed is recorded through the E1.3
+	// change-history path in the same transaction as the write. Importing
+	// the identical payload a second time therefore computes identical
+	// values, finds no field changed, and creates no new row and writes no
+	// history — the idempotency this method exists to guarantee. a.Status
+	// only decides a newly created row's initial status (ValidInitialStatus,
+	// exactly as Create requires); an existing row's status is left
+	// untouched — a bulk import is not a lifecycle authority; SetStatus
+	// remains the only door for a transition. Owner references are
+	// re-verified exactly as Create/Update re-verify them. Returns the
+	// resulting asset and whether it was created (true) or an existing row
+	// was matched and updated (false).
+	Upsert(ctx context.Context, a *Asset) (result *Asset, created bool, err error)
+	// Export returns a page of EVERY asset regardless of status — INCLUDING
+	// retired — for backup/migration (E1.4). Unlike List, nothing here is
+	// soft-retire-filtered: an export exists to reconstruct the CMDB exactly
+	// as it stands, not as an operator browses it. Keyset-paginated over
+	// asset_id, the same shape List uses. Relationship export is deferred
+	// (E1.4b).
+	Export(ctx context.Context, limit int, after string) ([]*Asset, error)
+	// Duplicates returns groups of assets likely representing the same
+	// real-world Configuration Item, for a human to reconcile (E1.4). It is
+	// a read-only projection: it mutates nothing. Controlled merge is
+	// E1.4b, a separate, later increment.
+	Duplicates(ctx context.Context) ([]*AssetDuplicateGroup, error)
 
 	// CreateRelationship inserts a relationship. Both endpoints must already
 	// be visible to the caller's tenant; a from/to id the tenant cannot see

@@ -368,6 +368,11 @@ func (s *Server) routes() *chi.Mux {
 		// uses next to /admin/webhooks/{id}.
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets", s.listAssets)
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/assets", s.createAsset)
+		// Bulk import/export/duplicate-detection (E1.4), static collections
+		// mounted alongside /admin/assets/relationships for the same reason.
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/assets/import", s.importAssets)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/export", s.exportAssets)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/duplicates", s.duplicateAssets)
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/assets/relationships", s.createAssetRelationship)
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/assets/relationships/{id}", s.deleteAssetRelationship)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/{id}", s.getAsset)

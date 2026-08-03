@@ -165,3 +165,73 @@ this table.
   tenant's asset returns `ErrNotFound` and no row is created.
 - `postgres.TestAssetIsolation_*` (integration) proves list/get isolation the
   same way `TestTeamIsolation_*` does for Team.
+
+> **Amended by OPS-CMDB-004 (E1.4), 2026-08-03.** A real CMDB is fed by
+> several sources — manual entry, discovery scanners, cloud pollers, SNMP —
+> and re-running an import must not duplicate a CI it already knows about.
+> This amendment adds provenance to Asset and a bulk ingestion path built on
+> it, without touching the lifecycle §5 established or the tenancy model §4
+> already covers.
+>
+> **7. `asset.source`/`asset.external_ref` are the identity a source system
+> gave a CI.** `source` is open-but-validated exactly like `type` (§1) —
+> `manual` (the default), `discovery`, `aws`, `snmp`, ... are seeded
+> examples, not a closed set, so a new integration never needs a schema
+> change to be accepted. `external_ref` is the natural key that source uses
+> for the CI, or absent for a manual entry with no external identity; it
+> carries no format constraint (it is foreign data, not an identifier this
+> schema mints or filters on) — only a length bound.
+>
+> **8. `(tenant_id, source, external_ref)` is a database-enforced partial
+> unique index, not merely an application check.** A source cannot report
+> the same external_ref twice inside one tenant. It is PARTIAL
+> (`WHERE external_ref IS NOT NULL`) because a manual entry usually has no
+> natural key at all — a NULL external_ref never collides with another NULL,
+> by explicit predicate rather than by incidental reliance on how NULL
+> happens to compare in a UNIQUE index. `tenant_id` leads the key (the same
+> tenant-key-scope discipline §6's re-verification serves), so the
+> uniqueness sweeps (`postgres.TestEveryTenantScopedUniqueKey_IsTenantScoped`)
+> pass without a named justification.
+>
+> **9. `AssetRepository.Upsert` is the idempotent import authority — a
+> full-replace sync, not a partial patch.** Matched by
+> `(tenant, source, external_ref)`: absent `external_ref` always creates
+> (there is no natural key to match a re-import against, so a manual entry
+> behaves exactly as `Create` already does); a match REPLACES every field
+> the import row carries — type, name, attributes, environment,
+> criticality, ownership — because the import row is the source system's
+> current view of the CI, not a delta. The diff against the stored row is
+> computed BEFORE any write: when nothing differs, `Upsert` performs no
+> `UPDATE` at all — no bumped `row_version`, no `updated_at` churn, no
+> `asset_change_history` row — which is what makes re-importing an
+> identical payload produce zero side effects rather than merely zero
+> *visible* ones. `Upsert` never touches `status`: a bulk import is not a
+> lifecycle authority; `SetStatus` (§5) remains the only door for a
+> transition. Owner references are re-verified exactly as `Create`/`Update`
+> already do (§6, extended to ownership).
+>
+> Enforcement: `postgres.TestAssetStore_Upsert_ReimportIsIdempotent` and
+> `TestAsset_SourceExternalRefUniqueness_IsEnforcedByTheDatabase` (integration)
+> are the live proofs for points 8–9 — a re-import creates no row and writes
+> no history, and a raw SQL `INSERT` bypassing `Upsert` entirely is still
+> refused by the database. `TestAssetImport_RLSIsolatesByTenant` proves
+> `Export`/`Duplicates`/`Upsert` are all tenant-scoped, including the case
+> where two tenants use the identical `(source, external_ref)`.
+>
+> **10. Duplicate detection is a READ-ONLY projection; it merges nothing.**
+> `AssetRepository.Duplicates` reports two kinds of candidate group: the
+> same `external_ref` reported by two or more DIFFERENT sources (impossible
+> from the same source, per point 8's constraint), and the same `type` with
+> the same name after normalization (trimmed, case-folded) — the manual
+> double-entry case. Nothing here mutates a row. Controlled merge —
+> reconciling two rows' relationships and history into one — is deliberately
+> deferred to a later increment (E1.4b): merging is a materially riskier
+> operation (it can silently drop or misattribute history and graph edges)
+> and deserves its own gate, not a rider on a detection endpoint.
+>
+> **11. `Export` is deliberately NOT soft-retire-filtered.** Unlike `List`
+> (§5's soft-retire default), `Export` returns every asset regardless of
+> status: it exists to reconstruct the CMDB for backup/migration, not to be
+> browsed. Relationship export is out of scope for this amendment (E1.4b
+> also owns it, alongside merge, since a relationship-aware export interacts
+> with the same reconciliation questions a merge does).

@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,6 +14,12 @@ import (
 
 	"github.com/rpsg/oneops/internal/domain"
 )
+
+// maxAssetImportBatch bounds one import call — the same "no unbounded
+// memory/query" rule every bulk op in this schema honors
+// (docs/PLATFORM-BUILD-PLAN.md §3). A larger inventory is imported in
+// several calls.
+const maxAssetImportBatch = 1000
 
 // SetAssets wires the CMDB asset repository. Until it is called the endpoints
 // report 501 rather than 404, so a deployment that has not enabled the CMDB
@@ -28,6 +36,8 @@ type assetDTO struct {
 	Criticality string         `json:"criticality"`
 	OwnerTeamID *string        `json:"owner_team_id,omitempty"`
 	OwnerUserID *string        `json:"owner_user_id,omitempty"`
+	Source      string         `json:"source"`
+	ExternalRef *string        `json:"external_ref,omitempty"`
 	RowVersion  int64          `json:"row_version"`
 	CreatedAt   time.Time      `json:"created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"`
@@ -40,8 +50,10 @@ func toAssetDTO(a *domain.Asset) assetDTO {
 	return assetDTO{
 		AssetID: a.AssetID, Type: a.Type, Name: a.Name, Attributes: a.Attributes,
 		Status: string(a.Status), Environment: string(a.Environment), Criticality: string(a.Criticality),
-		OwnerTeamID: a.OwnerTeamID, OwnerUserID: a.OwnerUserID, RowVersion: a.RowVersion,
-		CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
+		OwnerTeamID: a.OwnerTeamID, OwnerUserID: a.OwnerUserID,
+		Source: a.Source, ExternalRef: a.ExternalRef,
+		RowVersion: a.RowVersion,
+		CreatedAt:  a.CreatedAt, UpdatedAt: a.UpdatedAt,
 	}
 }
 
@@ -110,6 +122,14 @@ type createAssetRequest struct {
 	Criticality string         `json:"criticality"`
 	OwnerTeamID *string        `json:"owner_team_id"`
 	OwnerUserID *string        `json:"owner_user_id"`
+	// Source/ExternalRef are the E1.4 provenance fields. Source defaults to
+	// "manual" when omitted or blank; ExternalRef is the natural key an
+	// external source uses for this CI, or absent for a manual entry.
+	// Setting ExternalRef here does not make this call idempotent — that is
+	// what POST .../import (AssetRepository.Upsert) is for; a second
+	// createAsset call always creates a second row.
+	Source      string  `json:"source"`
+	ExternalRef *string `json:"external_ref"`
 }
 
 // patchAssetRequest changes one or more non-lifecycle fields in a single
@@ -211,6 +231,10 @@ func (s *Server) createAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.ApplyClassification(req.Environment, req.Criticality, req.OwnerTeamID, req.OwnerUserID); err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+	if err := a.ApplySource(req.Source, req.ExternalRef); err != nil {
 		s.mapError(w, r, err)
 		return
 	}
@@ -603,4 +627,201 @@ func (s *Server) getAssetHistory(w http.ResponseWriter, r *http.Request) {
 		out = append(out, toAssetChangeEntryDTO(e))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+// importAssetRow is one row of a bulk import (E1.4): the same shape as
+// createAssetRequest, matched by (tenant, source, external_ref). See
+// AssetRepository.Upsert's doc comment for the exact match/replace/history
+// semantics: ExternalRef nil always creates; a non-nil ExternalRef that
+// matches an existing (tenant, source, external_ref) triple updates it,
+// replacing every field this row carries.
+type importAssetRow struct {
+	Type        string         `json:"type"`
+	Name        string         `json:"name"`
+	Attributes  map[string]any `json:"attributes"`
+	Status      string         `json:"status"`
+	Environment string         `json:"environment"`
+	Criticality string         `json:"criticality"`
+	OwnerTeamID *string        `json:"owner_team_id"`
+	OwnerUserID *string        `json:"owner_user_id"`
+	Source      string         `json:"source"`
+	ExternalRef *string        `json:"external_ref"`
+}
+
+type importAssetsRequest struct {
+	Items []importAssetRow `json:"items"`
+}
+
+// assetImportResultDTO is one row's outcome, always one per input row and at
+// that row's input index, so a caller can correlate a failure back to the
+// request it sent without re-transmitting the payload.
+type assetImportResultDTO struct {
+	Index   int    `json:"index"`
+	Outcome string `json:"outcome"`
+	AssetID string `json:"asset_id,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+type importAssetsResponse struct {
+	Results []assetImportResultDTO `json:"results"`
+}
+
+// importAssets bulk-upserts Configuration Items by (tenant, source,
+// external_ref) — the idempotent multi-source ingestion path (E1.4).
+// Re-importing the same payload creates no new rows and writes no spurious
+// change history: see AssetStore.Upsert's doc comment. Each row is built,
+// validated and upserted independently and reported at its own index — one
+// bad row (a validation failure, an owner reference the tenant cannot see)
+// does not abort the rows around it, unlike bulkCreateArtifacts's single
+// all-or-nothing transaction, because a multi-source import of hundreds of
+// CIs must not be held hostage by one malformed record.
+func (s *Server) importAssets(w http.ResponseWriter, r *http.Request) {
+	if s.assets == nil {
+		writeProblem(w, r, http.StatusNotImplemented, "not implemented", "asset administration is not configured")
+		return
+	}
+	var req importAssetsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeProblem(w, r, http.StatusBadRequest, "invalid request body", "body must be JSON")
+		return
+	}
+	if len(req.Items) == 0 {
+		writeProblem(w, r, http.StatusUnprocessableEntity, "validation failed", "items must not be empty")
+		return
+	}
+	if len(req.Items) > maxAssetImportBatch {
+		writeProblem(w, r, http.StatusUnprocessableEntity, "validation failed",
+			fmt.Sprintf("items must not exceed %d per import", maxAssetImportBatch))
+		return
+	}
+
+	tenant, ok := domain.TenantFrom(r.Context())
+	if !ok {
+		writeProblem(w, r, http.StatusForbidden, "forbidden", "no tenant is bound to this request")
+		return
+	}
+
+	results := make([]assetImportResultDTO, len(req.Items))
+	for i, row := range req.Items {
+		results[i] = s.importAssetRow(r.Context(), tenant.TenantID, i, row)
+	}
+	writeJSON(w, http.StatusOK, importAssetsResponse{Results: results})
+}
+
+// importAssetRow builds, validates and upserts a single import row, never
+// returning transport-level errors of its own — every outcome, including a
+// validation or owner-reference failure, is reported in the result at the
+// row's index so one row's failure cannot take the whole call down with a
+// single error response.
+func (s *Server) importAssetRow(ctx context.Context, tenantID string, index int, row importAssetRow) assetImportResultDTO {
+	a, err := domain.NewAsset(tenantID, row.Type, row.Name, row.Attributes)
+	if err == nil {
+		err = a.ApplyClassification(row.Environment, row.Criticality, row.OwnerTeamID, row.OwnerUserID)
+	}
+	if err == nil {
+		err = a.ApplySource(row.Source, row.ExternalRef)
+	}
+	if err == nil {
+		if status := domain.AssetStatus(strings.TrimSpace(row.Status)); status != "" {
+			if !status.ValidInitialStatus() {
+				err = domain.NewValidationError("status",
+					"must be one of: planned, active at creation; maintenance and retired are reached by transition")
+			} else {
+				a.Status = status
+			}
+		}
+	}
+	if err != nil {
+		return assetImportResultDTO{Index: index, Outcome: string(domain.AssetImportFailed), Reason: err.Error()}
+	}
+
+	result, created, err := s.assets.Upsert(ctx, a)
+	if err != nil {
+		reason := err.Error()
+		if errors.Is(err, domain.ErrNotFound) {
+			reason = "owner_team_id or owner_user_id does not name a team or user visible to this tenant"
+		}
+		return assetImportResultDTO{Index: index, Outcome: string(domain.AssetImportFailed), Reason: reason}
+	}
+	outcome := domain.AssetImportUpdated
+	if created {
+		outcome = domain.AssetImportCreated
+	}
+	return assetImportResultDTO{Index: index, Outcome: string(outcome), AssetID: result.AssetID}
+}
+
+// exportAssets serves a paginated full export of the caller's tenant's CMDB
+// — every field, every status (including retired) — for backup or migration
+// (E1.4). Unlike listAssets, retirement does not filter this view: an export
+// exists to reconstruct the CMDB exactly as it stands, not as an operator
+// browses it. Relationship export is deferred (E1.4b's scope note).
+func (s *Server) exportAssets(w http.ResponseWriter, r *http.Request) {
+	if s.assets == nil {
+		writeProblem(w, r, http.StatusNotImplemented, "not implemented", "asset administration is not configured")
+		return
+	}
+	limit := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			writeProblem(w, r, http.StatusUnprocessableEntity, "invalid limit", "limit must be an integer")
+			return
+		}
+		limit = n
+	}
+	items, err := s.assets.Export(r.Context(), limit, r.URL.Query().Get("after"))
+	if err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+	out := make([]assetDTO, 0, len(items))
+	for _, a := range items {
+		out = append(out, toAssetDTO(a))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+// assetDuplicateMemberDTO is one Configuration Item inside a duplicate group.
+type assetDuplicateMemberDTO struct {
+	AssetID     string  `json:"asset_id"`
+	Type        string  `json:"type"`
+	Name        string  `json:"name"`
+	Source      string  `json:"source"`
+	ExternalRef *string `json:"external_ref,omitempty"`
+	Status      string  `json:"status"`
+}
+
+type assetDuplicateGroupDTO struct {
+	Reason  string                    `json:"reason"`
+	Key     string                    `json:"key"`
+	Members []assetDuplicateMemberDTO `json:"members"`
+}
+
+// duplicateAssets serves GET /admin/assets/duplicates: a read-only report of
+// Configuration Items likely describing the same real-world thing (E1.4).
+// Nothing here merges or mutates anything — see domain.AssetRepository.
+// Duplicates' doc comment. Controlled merge/resolution is E1.4b, a
+// separately gated later increment.
+func (s *Server) duplicateAssets(w http.ResponseWriter, r *http.Request) {
+	if s.assets == nil {
+		writeProblem(w, r, http.StatusNotImplemented, "not implemented", "asset administration is not configured")
+		return
+	}
+	groups, err := s.assets.Duplicates(r.Context())
+	if err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+	out := make([]assetDuplicateGroupDTO, 0, len(groups))
+	for _, g := range groups {
+		members := make([]assetDuplicateMemberDTO, 0, len(g.Members))
+		for _, m := range g.Members {
+			members = append(members, assetDuplicateMemberDTO{
+				AssetID: m.AssetID, Type: m.Type, Name: m.Name, Source: m.Source,
+				ExternalRef: m.ExternalRef, Status: string(m.Status),
+			})
+		}
+		out = append(out, assetDuplicateGroupDTO{Reason: string(g.Reason), Key: g.Key, Members: members})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"groups": out})
 }
