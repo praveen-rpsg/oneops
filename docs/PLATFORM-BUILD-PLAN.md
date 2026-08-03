@@ -146,8 +146,8 @@ The typed configuration-item model + relationship graph everything references.
 ### E2 — Telemetry & Monitoring ingestion  `[ ]`
 Signals about assets: metrics, logs, traces, synthetics. The scale extreme.
 - [x] E2.1 Ingestion data model + API (metrics/time-series tied to CIs), spine only — **merged** (ADR-TELEMETRY-001: Postgres + TimescaleDB hypertables behind `domain.TelemetryRepository`, D1 resolved; `telemetry_sample` tenant-owned + RLS + FORCE; `asset_id` tenant-re-verified on write per-sample, same defense as ADR-ASSET-001 §6; bounded ingest batch (1000) + bounded/paginated range query (5000, keyset over timestamp); infra-gate proved the Timescale image swap regresses nothing in the pre-existing suite)
-- [ ] E2.1b Retention policy + downsampling/continuous aggregates over telemetry_sample (TimescaleDB `add_retention_policy`/`add_continuous_aggregate_policy`) — deferred follow-on, does not block epic sequencing (mirrors E1.4b's "detected but not yet built" shape)
-- [ ] E2.2 Agentless collectors: SNMP (network), API/cloud pollers, uptime/synthetic checks  ▶ CURRENT
+- [~] E2.1b Retention policy + downsampling/continuous aggregates over telemetry_sample (TimescaleDB `add_retention_policy`/`add_continuous_aggregate_policy`); also folds the E2.1 review nits (document first-write-wins on duplicate-ts; pagination/natural-key comment)  ▶ CURRENT
+- [ ] E2.2 Agentless collectors: SNMP (network), API/cloud pollers, uptime/synthetic checks — **large; SPLIT when reached** (E2.2a collector framework + HTTP/uptime check; E2.2b SNMP; E2.2c cloud/API pollers — each needs credential storage + leader-gated scheduling + target config)
 - [ ] E2.3 Agent/push ingestion (app/APM, custom metrics), log ingestion
 - [ ] E2.4 Distributed tracing ingestion; correlation to CIs
 - **Edge cases:** high cardinality, ingestion backpressure/quotas per tenant, out-of-order & late data, clock skew, collector disconnection, storage growth — none of these are addressed by E2.1's spine and remain open for E2.1b/E2.2/E2.3.
