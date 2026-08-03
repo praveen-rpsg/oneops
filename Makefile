@@ -25,7 +25,12 @@ OASDIFF_VERSION := v1.11.7
 # use the postgres image matching the database rather than a generic runner.
 # Attaching to the compose network lets the container reach postgres by name,
 # so this works identically regardless of host port remapping.
-PG_IMAGE   := postgres:16
+#
+# Pinned to the same Timescale-enabled image docker-compose.yml runs (D1/
+# ADR-TELEMETRY-001): pg_dump/pg_restore ship in it unchanged from the plain
+# postgres:16 image, so backup/DR tooling needs nothing else to keep working
+# against telemetry_sample's hypertable chunks.
+PG_IMAGE   := timescale/timescaledb:2.19.3-pg16-oss
 PG_NETWORK := oneops_default
 PG_URL     := postgres://oneops:dev@oneops-postgres:5432/oneops?sslmode=disable
 PGTOOLS    := docker run --rm --network $(PG_NETWORK) -v "$(PWD)":/src -w /src -e "ONEOPS_DB_URL=$(PG_URL)" $(PG_IMAGE)

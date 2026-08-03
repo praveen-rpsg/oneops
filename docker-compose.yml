@@ -3,7 +3,17 @@ name: oneops
 services:
   postgres:
     container_name: oneops-postgres
-    image: postgres:16-alpine
+    # Timescale-enabled, pg16-compatible (D1/ADR-TELEMETRY-001): telemetry_sample
+    # is a TimescaleDB hypertable, a regular Postgres table under the hood, so
+    # RLS still applies unchanged. This image is the official postgres:16
+    # image with the timescaledb extension compiled in and
+    # shared_preload_libraries pre-configured — everything else about it
+    # (env vars, entrypoint, data directory, port) is unchanged from
+    # postgres:16-alpine. -oss is the Apache-2.0-licensed build (no
+    # Timescale-License-only features), pinned rather than :latest-pg16 for
+    # the same reproducibility reason every other pulled image/tool in this
+    # repo is pinned (see OASDIFF_VERSION, GOLANGCI_VERSION in the Makefile).
+    image: timescale/timescaledb:2.19.3-pg16-oss
     environment:
       POSTGRES_DB: oneops
       POSTGRES_USER: oneops

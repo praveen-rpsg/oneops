@@ -96,6 +96,11 @@ type Server struct {
 	assetGraph     *graph.Service
 	assetGraphRepo domain.GraphTraversal
 
+	// Telemetry ingestion/query registry (E2.1); nil until SetTelemetry.
+	// telemetry_sample is TENANT-OWNED, like asset above, so nothing here
+	// needs an exemption from row-level security (ADR-TELEMETRY-001).
+	telemetry domain.TelemetryRepository
+
 	// Notification registry (read-only); nil until SetNotifications.
 	// notification is TENANT-OWNED, like team above, so nothing here needs an
 	// exemption from row-level security.
@@ -387,6 +392,13 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/{id}/dependents", s.getAssetDependents)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/{id}/service-map", s.getAssetServiceMap)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/{id}/history", s.getAssetHistory)
+
+		// Telemetry ingestion + range query (E2.1). telemetry_sample is
+		// TENANT-OWNED, exactly like asset above, so the permission tier is
+		// tenant administration, not requirePlatformAdmin. One collection,
+		// two verbs, the same shape /admin/assets uses for list/create.
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/telemetry", s.ingestTelemetry)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/telemetry", s.queryTelemetry)
 
 		// Notification administration (read-only). notification is TENANT-OWNED,
 		// exactly like team above, so the permission tier is tenant

@@ -41,4 +41,5 @@ var TenantOwnedTables = []string{
 	"asset",
 	"asset_relationship",
 	"asset_change_history",
+	"telemetry_sample",
 }
