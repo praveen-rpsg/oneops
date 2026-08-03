@@ -3307,6 +3307,12 @@ components:
         status:
           type: string
           enum: [open, acknowledged, investigating, resolved, closed, reopened]
+        source:
+          type: string
+          enum: [manual, alert]
+          description: >-
+            Read-only. manual: filed via this API. alert: created or linked
+            by E4.1's alert-correlation pipeline off an alert-rule firing.
         asset_id:
           type: string
           nullable: true
@@ -3331,10 +3337,12 @@ components:
       type: object
       required: [title, severity]
       description: >-
-        Always created IncidentOpen. asset_id/assignee_user_id are optional;
-        when set, each is re-verified against the caller's tenant before the
-        incident is written — a mismatch returns 404 (see POST
-        /admin/incidents' description).
+        Always created IncidentOpen, source manual — there is no field here
+        to request source alert; that is set only by E4.1's correlation
+        pipeline. asset_id/assignee_user_id are optional; when set, each is
+        re-verified against the caller's tenant before the incident is
+        written — a mismatch returns 404 (see POST /admin/incidents'
+        description).
       properties:
         title: { type: string, maxLength: 200 }
         description: { type: string, maxLength: 10000 }
@@ -3377,11 +3385,12 @@ components:
       description: >-
         One append-only row of an incident's case timeline (E5.1). field/
         old_value/new_value are absent for the single "created" row — there
-        is no prior state to diff against.
+        is no prior state to diff against. alert_note (E4.1) is written only
+        by the alert-correlation pipeline, never via this API.
       properties:
         event_id: { type: string }
         incident_id: { type: string }
-        kind: { type: string, enum: [created, status_transitioned, assigned] }
+        kind: { type: string, enum: [created, status_transitioned, assigned, alert_note] }
         field: { type: string }
         old_value: { type: string, nullable: true }
         new_value: { type: string, nullable: true }

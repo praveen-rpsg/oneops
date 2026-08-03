@@ -165,18 +165,19 @@ Signals about assets: metrics, logs, traces, synthetics. The scale extreme.
 
 ### E3 — Alerting (derived) + suppression  `[~]`
 - [x] E3.1 Alert **rules** (threshold first; rate-of-change/absence/anomaly later) over telemetry + leader-gated evaluator that fires on transition → Notification. `AlertRule` is config; a firing is DERIVED (no reified `Alert` type — §4). Cross-tenant telemetry isolation enforced by an explicit tenant_id predicate (`TelemetryRepository.QueryRangeForTenant`), mutation-verified.
-- [ ] E3.2 Dedup / flap suppression / severity routing (beyond E3.1's transition-only). READ-SIDE GUARD FOLLOW-UP (tracked, ADR-TENANCY-012): build a failing arch guard that sweeps privileged `SELECT`s on `TenantOwnedTables` for an explicit tenant predicate — the read analogue of `TestPrivilegedMutations_AreScopedToAnOwner`. Do this when next touching alerting/correlation.
+- [ ] E3.2 Dedup / flap suppression / severity routing (beyond E3.1's transition-only). Read-side privileged-SELECT arch guard follow-up now tracked under E4.1-GUARD below (ADR-TENANCY-012).
 - [ ] E3.3 Maintenance windows / blackout; dependency-aware suppression (suppress downstream when a root CI is down — uses the CMDB graph)
 - **Edge cases:** alert storms, self-referential suppression, rule changes mid-fire, per-tenant rule isolation.
 
 ### E4 — Event Correlation & AIOps-lite  `[~]`
-- [~] E4.1 Correlate an alert firing into an incident (E4.1a: create-or-link by affected CI — connects E3→E5; topology-window grouping via CMDB graph = E4.2). Includes building the tracked read-side privileged-SELECT arch guard (ADR-TENANCY-012) since correlation reads across the tenant's alerting+incident state on the leader pool.  ▶ CURRENT *(sequenced ahead of E5.2: makes the detect→incident pipeline AUTOMATIC — the core payoff — vs manual incident creation)*
-- [ ] E4.2 Noise reduction, grouping, root-cause candidate suggestion (heuristic first; ML later in E13)
-- **Edge cases:** correlation never crosses tenants; window tuning; late-arriving correlated signals.
+- [x] E4.1 Correlate an alert firing into an incident: create-or-link by affected CI (connects E3→E5). `Incident.Source` (manual|alert) gates correlation so an operator's own incident is never auto-annexed; `alert_rule.current_incident_id` is the LINK (a column, not a reified Alert/Event). Wired into the evaluator's ok→firing (find-or-create, DB-uniqueness-backed — no duplicate even under true concurrency) / firing→ok (append recovery note, clear link, never auto-resolve/close) transitions. Every privileged correlation read/write carries an explicit `tenant_id` predicate (ADR-TENANCY-012), mutation-verified (`AppendAlertNote`'s tenant check bites; the no-duplicate unique index bites). READ-SIDE GUARD still NOT built (tracked below, ADR-TENANCY-012's own follow-up) — flagged rather than forced: a general sweep risks false positives against every dual-role store (AlertRuleStore/CollectorCheckStore/IncidentStore) whose SAME methods serve both the tenant-scoped and privileged pools depending only on which pool constructs them, which the type system cannot currently distinguish.
+- [ ] E4.1-GUARD (carried over) Build the failing arch guard sweeping privileged `SELECT`s on `TenantOwnedTables` for an explicit tenant predicate (ADR-TENANCY-012's read analogue of `TestPrivilegedMutations_AreScopedToAnOwner`). Needs a way to identify "this store instance is privileged" that survives the dual-role pattern (e.g. a wiring-level sweep like `TestServerWiringUsesTenantScopedPool`, not a per-method text sweep) — do this as its own scoped story before E4.2.  ▶ CURRENT
+- [ ] E4.2 Noise reduction, grouping, root-cause candidate suggestion (heuristic first; ML later in E13); topology-window grouping via the CMDB graph
+- **Edge cases:** correlation never crosses tenants (E4.1 done); window tuning; late-arriving correlated signals.
 
 ### E5 — ITSM core: Incident / Problem / Change  `[ ]`
 Stateful work items on the workflow + state-machine primitives.
-- [x] E5.1 Incident lifecycle (manual now; alert/correlation→incident wires in at E4), assignment, append-only timeline *(sequenced ahead of E3.2/E4: after "notify", operators need to TRACK work — incidents are the NOC's operational heart; independent of alerting refinements)*
+- [x] E5.1 Incident lifecycle (manual and, since E4.1, alert-correlated), assignment, append-only timeline *(sequenced ahead of E3.2/E4: after "notify", operators need to TRACK work — incidents are the NOC's operational heart; independent of alerting refinements)*
 - [ ] E5.2 On-call, scheduling & paging (rotations, escalation policies, notify via E-notification)
 - [ ] E5.3 SLA/SLO tracking on work items (business hours, pause-on-hold, breach escalation)
 - [ ] E5.4 Problem management (root cause, known errors) linked to incidents/CIs

@@ -101,6 +101,18 @@ func TestAppUserMigration_AppliesAndRollsBackOnPopulatedDatabase(t *testing.T) {
 		t.Fatalf("roll back team before app_user: %v", err)
 	}
 
+	// alert_rule.current_incident_id (E4.1) references incident, so that
+	// migration's rollback must run before incident's own — the same
+	// ordering protection this whole chain already documents (see this
+	// rollback script's own header comment).
+	arDown, err := os.ReadFile("../migrate/rollback/20260826000002_alert_rule_current_incident.down.sql")
+	if err != nil {
+		t.Fatalf("read alert_rule current_incident_id rollback: %v", err)
+	}
+	if _, err := tx.Exec(ctx, string(arDown)); err != nil {
+		t.Fatalf("roll back alert_rule.current_incident_id before incident: %v", err)
+	}
+
 	// incident.assignee_user_id (E5.1) also references app_user, so that
 	// migration's rollback must run first too — the same ordering protection
 	// every other referencing table's rollback documents here.

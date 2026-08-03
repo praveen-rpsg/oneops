@@ -75,6 +75,30 @@ func (s IncidentStatus) Valid() bool {
 	}
 }
 
+// IncidentSource distinguishes an incident an operator filed directly
+// (manual, the only kind before E4) from one internal/alerting's evaluator
+// created or linked off an alert-rule firing (alert, E4.1). It is the ONLY
+// thing that gates auto-correlation: FindOrCreateOpenAlertIncident only ever
+// considers incidents whose Source is alert, so a later firing on the same
+// CI can never silently annex an operator's own manually-filed incident —
+// nothing else about the two shapes would otherwise tell them apart.
+type IncidentSource string
+
+const (
+	IncidentSourceManual IncidentSource = "manual"
+	IncidentSourceAlert  IncidentSource = "alert"
+)
+
+// Valid reports whether s is a defined source.
+func (s IncidentSource) Valid() bool {
+	switch s {
+	case IncidentSourceManual, IncidentSourceAlert:
+		return true
+	default:
+		return false
+	}
+}
+
 // incidentTransitions is the whole lifecycle, as data rather than as a chain
 // of conditionals — mirrors assetTransitions/userTransitions. A transition
 // absent here is refused, so adding a state means stating every edge it has
@@ -165,6 +189,14 @@ type Incident struct {
 	Description string
 	Severity    IncidentSeverity
 	Status      IncidentStatus
+	// Source distinguishes an operator-filed incident from one E4.1's
+	// correlation pipeline created or linked off an alert-rule firing.
+	// Written once at Create and never changed afterward — there is no
+	// Update path for it, the same immutable-after-create treatment
+	// Asset.Source(E1.4) does NOT get (that one is mutable via reconciliation);
+	// an incident's provenance, unlike a CMDB record's, is a fact about how it
+	// came to exist, not a value a later import can correct.
+	Source IncidentSource
 	// AssetID is the affected Configuration Item, or nil when the incident is
 	// not (yet) tied to one. When set, IncidentRepository re-verifies it
 	// against the caller's own tenant-scoped connection before writing — see
@@ -223,6 +255,12 @@ func (i *Incident) Validate() error {
 	if !i.Status.Valid() {
 		return newValidation("status", "must be one of: open, acknowledged, investigating, resolved, closed, reopened")
 	}
+	if !i.Source.Valid() {
+		return newValidation("source", "must be one of: manual, alert")
+	}
+	if i.Source == IncidentSourceAlert && (i.AssetID == nil || strings.TrimSpace(*i.AssetID) == "") {
+		return newValidation("asset_id", "must be set for an alert-sourced incident — correlation always names the CI the firing rule watches")
+	}
 	if i.AssetID != nil && strings.TrimSpace(*i.AssetID) == "" {
 		return newValidation("asset_id", "must not be blank when supplied; omit it to leave the incident unlinked")
 	}
@@ -232,9 +270,12 @@ func (i *Incident) Validate() error {
 	return nil
 }
 
-// NewIncident builds a freshly opened Incident. Status is always IncidentOpen
-// — there is no caller-chosen initial status (see IncidentOpen's doc
-// comment): an Incident is filed because something has already happened.
+// NewIncident builds a freshly opened, manually-filed Incident. Status is
+// always IncidentOpen — there is no caller-chosen initial status (see
+// IncidentOpen's doc comment): an Incident is filed because something has
+// already happened. Source is always IncidentSourceManual — this is the
+// caller-facing constructor the HTTP admin API uses; NewAlertIncident is
+// E4.1's counterpart for the evaluator's own correlation pipeline.
 func NewIncident(tenantID, title, description string, severity IncidentSeverity, assetID, assigneeUserID *string) (*Incident, error) {
 	inc := &Incident{
 		IncidentID:     NewID(),
@@ -243,8 +284,33 @@ func NewIncident(tenantID, title, description string, severity IncidentSeverity,
 		Description:    description,
 		Severity:       severity,
 		Status:         IncidentOpen,
+		Source:         IncidentSourceManual,
 		AssetID:        assetID,
 		AssigneeUserID: assigneeUserID,
+	}
+	if err := inc.Validate(); err != nil {
+		return nil, err
+	}
+	return inc, nil
+}
+
+// NewAlertIncident builds a freshly opened, alert-sourced Incident — the
+// shape internal/alerting's evaluator creates on an ok->firing transition
+// that finds no existing OPEN alert-sourced incident for the firing rule's
+// own asset (E4.1). Unlike NewIncident's optional AssetID, assetID is
+// required here: a correlation always names the CI the firing rule watches,
+// and IncidentSourceAlert without one is refused by Validate.
+func NewAlertIncident(tenantID, title, description string, severity IncidentSeverity, assetID string) (*Incident, error) {
+	trimmed := strings.TrimSpace(assetID)
+	inc := &Incident{
+		IncidentID:  NewID(),
+		TenantID:    strings.TrimSpace(tenantID),
+		Title:       strings.TrimSpace(title),
+		Description: description,
+		Severity:    severity,
+		Status:      IncidentOpen,
+		Source:      IncidentSourceAlert,
+		AssetID:     &trimmed,
 	}
 	if err := inc.Validate(); err != nil {
 		return nil, err
@@ -280,12 +346,15 @@ type IncidentPatch struct {
 // asset_change_history's "one row per field changed" shape. A Patch to
 // title/description/severity/asset_id is not recorded here: the timeline is
 // the case narrative an operator reads top to bottom (what happened, who
-// acted, when), not a compliance field-audit. Comment support (an operator's
-// own note dropped into the timeline) is a documented member of the target
-// vocabulary but has no write path in E5.1: no HTTP endpoint accepts one, and
-// SCOPE(in) §5 enumerates exactly create/get/list/patch/transition/assign/
-// timeline — a later increment that adds "add a comment" wires it into this
-// same append-only table rather than opening a second one.
+// acted, when), not a compliance field-audit. General operator comment
+// support (a free-text note an operator drops into the timeline) remains a
+// documented member of the target vocabulary with no HTTP write path — E5.1's
+// SCOPE(in) §5 still enumerates exactly create/get/list/patch/transition/
+// assign/timeline. IncidentEventAlertNote (E4.1) is NOT that: it is written
+// exclusively by internal/alerting's evaluator, never by an HTTP handler, so
+// it does not open the general comment surface — a later increment that adds
+// an operator-facing "add a comment" endpoint still wires into this same
+// append-only table rather than opening a second one.
 type IncidentEventKind string
 
 const (
@@ -299,12 +368,22 @@ const (
 	// IncidentEventAssigned is written by Assign. Field is always
 	// "assignee_user_id"; old/new are user ids, or nil for unassigned.
 	IncidentEventAssigned IncidentEventKind = "assigned"
+	// IncidentEventAlertNote is a free-text timeline note the alert-
+	// correlation pipeline appends (E4.1): "alert <metric> fired" when a
+	// second rule's firing links to an already-open alert incident, and
+	// "alert <metric> recovered" when the linked rule's firing clears. Field
+	// is always "alert"; NewValue carries the note text; OldValue is always
+	// nil — there is no "old" note to diff against, the same shape
+	// IncidentEventCreated uses. Actor is always the evaluator's own system
+	// identity, never ActorFrom(ctx) — this is a background write, not a
+	// request-attributed one.
+	IncidentEventAlertNote IncidentEventKind = "alert_note"
 )
 
 // Valid reports whether k is a value the database will accept.
 func (k IncidentEventKind) Valid() bool {
 	switch k {
-	case IncidentEventCreated, IncidentEventStatusTransitioned, IncidentEventAssigned:
+	case IncidentEventCreated, IncidentEventStatusTransitioned, IncidentEventAssigned, IncidentEventAlertNote:
 		return true
 	default:
 		return false
@@ -341,7 +420,14 @@ type IncidentEvent struct {
 }
 
 // IncidentRepository administers Incidents: the work item, its lifecycle, its
-// assignment, and its append-only timeline.
+// assignment, and its append-only timeline. This is the tenant-scoped,
+// request-path surface (the HTTP admin API). E4.1's alert-correlation
+// pipeline does NOT go through it: internal/alerting.IncidentCorrelator is a
+// separate, narrower port implemented by the same *postgres.IncidentStore
+// built over the PRIVILEGED pool instead — the same dual-role split
+// AlertRuleStore/alerting.Store already uses — because a privileged,
+// cross-tenant background worker cannot rely on this interface's ambient,
+// RLS-enforced tenant boundary (ADR-TENANCY-012).
 //
 // incident and incident_event are TENANT-OWNED: both are in
 // postgres.TenantOwnedTables and carry row-level security, so this

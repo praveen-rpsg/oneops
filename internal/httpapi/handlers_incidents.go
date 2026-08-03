@@ -20,11 +20,16 @@ import (
 func (s *Server) SetIncidents(repo domain.IncidentRepository) { s.incidents = repo }
 
 type incidentDTO struct {
-	IncidentID     string     `json:"incident_id"`
-	Title          string     `json:"title"`
-	Description    string     `json:"description"`
-	Severity       string     `json:"severity"`
-	Status         string     `json:"status"`
+	IncidentID  string `json:"incident_id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Severity    string `json:"severity"`
+	Status      string `json:"status"`
+	// Source is read-only: manual (operator-filed, via this API) or alert
+	// (E4.1's correlation pipeline created or linked it). There is no
+	// caller-settable field for it — createIncidentRequest always produces
+	// manual (domain.NewIncident's own default).
+	Source         string     `json:"source"`
 	AssetID        *string    `json:"asset_id,omitempty"`
 	AssigneeUserID *string    `json:"assignee_user_id,omitempty"`
 	RowVersion     int64      `json:"row_version"`
@@ -40,7 +45,7 @@ type incidentDTO struct {
 func toIncidentDTO(inc *domain.Incident) incidentDTO {
 	return incidentDTO{
 		IncidentID: inc.IncidentID, Title: inc.Title, Description: inc.Description,
-		Severity: string(inc.Severity), Status: string(inc.Status),
+		Severity: string(inc.Severity), Status: string(inc.Status), Source: string(inc.Source),
 		AssetID: inc.AssetID, AssigneeUserID: inc.AssigneeUserID,
 		RowVersion: inc.RowVersion, CreatedAt: inc.CreatedAt, UpdatedAt: inc.UpdatedAt,
 		AcknowledgedAt: inc.AcknowledgedAt, ResolvedAt: inc.ResolvedAt, ClosedAt: inc.ClosedAt,

@@ -9,11 +9,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/rpsg/oneops/internal/alerting"
 	"github.com/rpsg/oneops/internal/domain"
 )
 
 const (
-	incidentColumns = `incident_id, tenant_id, title, description, severity, status,
+	incidentColumns = `incident_id, tenant_id, title, description, severity, status, source,
 		asset_id, assignee_user_id, row_version, created_at, updated_at,
 		acknowledged_at, resolved_at, closed_at`
 	incidentEventColumns = `event_id, tenant_id, incident_id, kind, field, old_value, new_value, actor, row_version, occurred_at`
@@ -59,9 +60,10 @@ func scanIncident(s scanner) (*domain.Incident, error) {
 		inc      domain.Incident
 		severity string
 		status   string
+		source   string
 	)
 	if err := s.Scan(
-		&inc.IncidentID, &inc.TenantID, &inc.Title, &inc.Description, &severity, &status,
+		&inc.IncidentID, &inc.TenantID, &inc.Title, &inc.Description, &severity, &status, &source,
 		&inc.AssetID, &inc.AssigneeUserID, &inc.RowVersion, &inc.CreatedAt, &inc.UpdatedAt,
 		&inc.AcknowledgedAt, &inc.ResolvedAt, &inc.ClosedAt,
 	); err != nil {
@@ -69,6 +71,7 @@ func scanIncident(s scanner) (*domain.Incident, error) {
 	}
 	inc.Severity = domain.IncidentSeverity(severity)
 	inc.Status = domain.IncidentStatus(status)
+	inc.Source = domain.IncidentSource(source)
 	return &inc, nil
 }
 
@@ -187,11 +190,11 @@ func (s *IncidentStore) Create(ctx context.Context, inc *domain.Incident) (*doma
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	row := tx.QueryRow(ctx, `
-		INSERT INTO incident (incident_id, tenant_id, title, description, severity, status, asset_id, assignee_user_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO incident (incident_id, tenant_id, title, description, severity, status, source, asset_id, assignee_user_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING `+incidentColumns,
 		inc.IncidentID, inc.TenantID, inc.Title, inc.Description, string(inc.Severity), string(inc.Status),
-		inc.AssetID, inc.AssigneeUserID)
+		string(inc.Source), inc.AssetID, inc.AssigneeUserID)
 
 	created, err := scanIncident(row)
 	if err != nil {
@@ -560,4 +563,136 @@ func (s *IncidentStore) explainMissedUpdate(ctx context.Context, incidentID stri
 		return err
 	}
 	return domain.ErrVersionMismatch
+}
+
+// ---------------------------------------------------------------------------
+// E4.1 correlation (alerting.IncidentCorrelator): the alert-firing -> Incident
+// wiring. These two methods are the ONLY ones on this type meant to be called
+// from an *IncidentStore built over the PRIVILEGED pool — the same dual-role
+// split AlertRuleStore/alerting.Store already uses (see alerting.Store's doc
+// comment): the tenant-scoped instance backs domain.IncidentRepository above,
+// the privileged instance backs alerting.IncidentCorrelator below. Every
+// statement here carries an explicit tenant_id predicate, sourced from the
+// caller's own alert_rule row (never assumed from RLS): this connection has
+// row-level security switched off (ADR-TENANCY-012).
+var _ alerting.IncidentCorrelator = (*IncidentStore)(nil)
+
+// FindOrCreateOpenAlertIncident implements alerting.IncidentCorrelator. want
+// must already be alert-sourced with a non-empty AssetID (domain.
+// NewAlertIncident's shape) — Validate is re-run here defensively, the same
+// belt-and-suspenders every other Store method applies to its domain object.
+//
+// Atomicity is the database's, not Go's: the INSERT below races
+// ux_incident_open_alert_per_asset via ON CONFLICT ... DO NOTHING, so two
+// evaluator goroutines correlating different rules' firings on the same
+// (tenant, asset) at once cannot both create a row — Postgres serializes the
+// second INSERT behind the first's uncommitted one, then evaluates the
+// conflict once it commits. Whichever goroutine's INSERT is skipped falls
+// through to the SELECT ... FOR UPDATE below, which is then guaranteed (by
+// the same commit ordering) to see the winner's row.
+func (s *IncidentStore) FindOrCreateOpenAlertIncident(
+	ctx context.Context, want *domain.Incident, actor, noteOnLink string,
+) (string, error) {
+	if err := want.Validate(); err != nil {
+		return "", err
+	}
+	if want.Source != domain.IncidentSourceAlert {
+		return "", fmt.Errorf("find-or-create alert incident: want.Source must be alert, got %q", want.Source)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row := tx.QueryRow(ctx, `
+		INSERT INTO incident (incident_id, tenant_id, title, description, severity, status, source, asset_id)
+		VALUES ($1, $2, $3, $4, $5, $6, 'alert', $7)
+		ON CONFLICT (tenant_id, asset_id) WHERE source = 'alert' AND status NOT IN ('resolved', 'closed')
+		DO NOTHING
+		RETURNING `+incidentColumns,
+		want.IncidentID, want.TenantID, want.Title, want.Description, string(want.Severity), string(domain.IncidentOpen), want.AssetID)
+
+	created, err := scanIncident(row)
+	switch {
+	case err == nil:
+		if err := s.recordEvent(ctx, tx, created.TenantID, created.IncidentID,
+			domain.IncidentEventCreated, "", nil, nil, actor, created.RowVersion); err != nil {
+			return "", err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return "", fmt.Errorf("commit: %w", err)
+		}
+		return created.IncidentID, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		// ON CONFLICT ... DO NOTHING skipped the row: an OPEN alert-sourced
+		// incident already exists for this (tenant, asset) — fall through to
+		// find and link it instead.
+	default:
+		if isForeignKeyViolation(err) {
+			return "", domain.ErrNotFound
+		}
+		return "", fmt.Errorf("insert alert incident: %w", err)
+	}
+
+	// Explicit tenant_id predicate (ADR-TENANCY-012): this connection has RLS
+	// switched off, so nothing else confines this read to want.TenantID.
+	existing := tx.QueryRow(ctx, `
+		SELECT `+incidentColumns+`
+		  FROM incident
+		 WHERE tenant_id = $1 AND asset_id = $2 AND source = 'alert' AND status NOT IN ('resolved', 'closed')
+		 FOR UPDATE`,
+		want.TenantID, want.AssetID)
+	current, err := scanIncident(existing)
+	if err != nil {
+		return "", fmt.Errorf("read existing open alert incident: %w", err)
+	}
+
+	note := noteOnLink
+	if err := s.recordEvent(ctx, tx, current.TenantID, current.IncidentID,
+		domain.IncidentEventAlertNote, "alert", nil, &note, actor, current.RowVersion); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit: %w", err)
+	}
+	return current.IncidentID, nil
+}
+
+// AppendAlertNote implements alerting.IncidentCorrelator: it appends one
+// alert_note timeline row to incidentID, having first re-verified — under an
+// explicit tenant_id predicate, not the FK alone — that incidentID actually
+// names a row owned by tenantID. This is the correlation write's tenant
+// boundary (ADR-TENANCY-012): alert_rule.current_incident_id is written by
+// this same package but is never trusted, on its own, to have stayed inside
+// tenantID — this check is what makes a bug or a forged pointer elsewhere
+// fail closed (domain.ErrNotFound) instead of writing into another tenant's
+// incident.
+func (s *IncidentStore) AppendAlertNote(ctx context.Context, tenantID, incidentID, note, actor string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row := tx.QueryRow(ctx, `
+		SELECT `+incidentColumns+`
+		  FROM incident
+		 WHERE incident_id = $1 AND tenant_id = $2
+		 FOR UPDATE`, incidentID, tenantID)
+	current, err := scanIncident(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("get incident for alert note: %w", err)
+	}
+
+	newVal := note
+	if err := s.recordEvent(ctx, tx, current.TenantID, current.IncidentID,
+		domain.IncidentEventAlertNote, "alert", nil, &newVal, actor, current.RowVersion); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

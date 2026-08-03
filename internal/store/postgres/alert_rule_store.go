@@ -19,7 +19,7 @@ const (
 )
 
 const alertRuleCols = `rule_id, tenant_id, asset_id, metric, comparator, threshold, for_duration_seconds,
-	severity, enabled, last_state, last_transition_at, row_version, created_at, updated_at`
+	severity, enabled, last_state, last_transition_at, current_incident_id, row_version, created_at, updated_at`
 
 // AlertRuleStore administers alert_rule: the admin CRUD API's tenant-scoped
 // reads/writes (domain.AlertRuleRepository) AND, when built over the
@@ -66,7 +66,7 @@ func scanAlertRule(sc scanner) (*domain.AlertRule, error) {
 	)
 	if err := sc.Scan(
 		&r.RuleID, &r.TenantID, &r.AssetID, &r.Metric, &comparator, &r.Threshold, &r.ForDuration,
-		&severity, &r.Enabled, &lastState, &lastTransitionAt, &r.RowVersion, &r.CreatedAt, &r.UpdatedAt,
+		&severity, &r.Enabled, &lastState, &lastTransitionAt, &r.CurrentIncidentID, &r.RowVersion, &r.CreatedAt, &r.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -261,21 +261,25 @@ func (s *AlertRuleStore) EnabledRules(ctx context.Context, limit int, after stri
 }
 
 // RecordTransition implements alerting.Store: a fenced, single-row CAS update
-// of last_state/last_transition_at, keyed on the rule's own primary key —
-// the same single-row-by-id shape NotificationStore.MarkSent and
-// CollectorCheckStore.RecordRun already use from the privileged pool, so
-// ADR-TENANCY-009's owning-predicate rule (which targets a caller-supplied
-// *id set*, e.g. `id = ANY($)`) has nothing to re-derive here: this is one
-// row, named by the id the evaluator's own prior read just returned.
+// of last_state/last_transition_at/current_incident_id, keyed on the rule's
+// own primary key — the same single-row-by-id shape NotificationStore.
+// MarkSent and CollectorCheckStore.RecordRun already use from the privileged
+// pool, so ADR-TENANCY-009's owning-predicate rule (which targets a
+// caller-supplied *id set*, e.g. `id = ANY($)`) has nothing to re-derive
+// here: this is one row, named by the id the evaluator's own prior read just
+// returned. currentIncidentID (E4.1) travels in the SAME statement as the
+// state transition rather than a second write — see alerting.Store.
+// RecordTransition's and Evaluator.correlate's doc comments for why.
 func (s *AlertRuleStore) RecordTransition(
-	ctx context.Context, ruleID string, rowVersion int64, state domain.AlertRuleState, at time.Time,
+	ctx context.Context, ruleID string, rowVersion int64, state domain.AlertRuleState, at time.Time, currentIncidentID *string,
 ) (*domain.AlertRule, error) {
 	row := s.pool.QueryRow(ctx, `
 		UPDATE alert_rule
-		   SET last_state = $3, last_transition_at = $4, row_version = row_version + 1, updated_at = now()
+		   SET last_state = $3, last_transition_at = $4, current_incident_id = $5,
+		       row_version = row_version + 1, updated_at = now()
 		 WHERE rule_id = $1 AND row_version = $2
 		RETURNING `+alertRuleCols,
-		ruleID, rowVersion, string(state), at)
+		ruleID, rowVersion, string(state), at, currentIncidentID)
 
 	updated, err := scanAlertRule(row)
 	if errors.Is(err, pgx.ErrNoRows) {
