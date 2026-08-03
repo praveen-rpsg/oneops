@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/rpsg/oneops/internal/alerting"
 	"github.com/rpsg/oneops/internal/audit"
 	"github.com/rpsg/oneops/internal/auth"
 	"github.com/rpsg/oneops/internal/authority"
@@ -554,6 +555,26 @@ func run(logger *slog.Logger) error {
 	collectorScheduler := collector.NewScheduler(
 		collectorCheckStore, postgres.NewTelemetryStore(pool), collectorHTTPClient, collectorMetrics, logger, collector.Config{})
 	workers = append(workers, collectorScheduler.Run)
+
+	// Alert rule administration + the leader-gated evaluator (E3.1):
+	// alert_rule is tenant-owned and under row-level security, exactly like
+	// collector_check above, so the admin CRUD API is built from the
+	// tenant-scoped pool. The evaluator, like the telemetry and collector
+	// workers above, is a cross-tenant background worker: it re-evaluates
+	// every tenant's enabled rules from one process, so it is built from the
+	// PRIVILEGED pool instead — one AlertRuleStore type, two roles, exactly
+	// mirroring CollectorCheckStore above. Its telemetry read goes through
+	// QueryRangeForTenant, not QueryRange: an explicit tenant_id predicate
+	// rather than a bound-connection assumption, because this connection has
+	// no single tenant bound to it (domain.TelemetryRepository's doc
+	// comment). A firing is DERIVED and delivered through notificationSvc
+	// (built above) — there is no separate alert-delivery path.
+	srv.SetAlertRules(postgres.NewAlertRuleStore(appPool))
+	alertRuleStore := postgres.NewAlertRuleStore(pool)
+	alertingMetrics := alerting.NewPromMetrics(metrics.Registry())
+	alertEvaluator := alerting.NewEvaluator(
+		alertRuleStore, postgres.NewTelemetryStore(pool), notificationSvc, alertingMetrics, logger, alerting.Config{})
+	workers = append(workers, alertEvaluator.Run)
 
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.

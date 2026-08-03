@@ -317,4 +317,31 @@ type TelemetryRepository interface {
 	// identically because telemetry_rollup_5m carries the same
 	// (tenant_id, asset_id, metric, bucket) uniqueness telemetry_sample does.
 	QueryRange(ctx context.Context, assetID, metric string, from, to time.Time, limit int, after time.Time, resolution TelemetryResolution) ([]Sample, error)
+
+	// QueryRangeForTenant is QueryRange's privileged-pool counterpart (E3.1).
+	// QueryRange's own doc comment states its isolation is "enforced by
+	// row-level security on this store's tenant-scoped connection" — it has
+	// no tenant predicate of its own because it has never needed one. The
+	// alert-rule evaluator is the first caller that reads telemetry from a
+	// privileged, cross-tenant connection (the same category of background
+	// worker TelemetryRollupWorker already is), where row-level security does
+	// not apply at all: calling QueryRange there would filter on nothing but
+	// asset_id/metric and trust that no two tenants' rows can ever match
+	// them. tenantID is therefore a required, explicit SQL predicate rather
+	// than an ambient assumption — the same posture ADR-TENANCY-009 requires
+	// of a privileged mutation, applied here to a privileged read (see
+	// ADR-TENANCY-012). Returns raw samples only, ordered by Timestamp
+	// ascending, bounded by MaxTelemetryQueryLimit; there is no
+	// resolution/rollup selection because ForDuration
+	// (MaxAlertRuleForDurationSeconds = 24h) never approaches
+	// AutoResolutionRawWindow's territory.
+	//
+	// When a window holds more than MaxTelemetryQueryLimit samples, the
+	// samples kept are the MOST RECENT ones, not the oldest — the
+	// implementation fetches newest-first and reverses before returning. A
+	// truncated window is missing PAST context, never present context: the
+	// evaluator's "is this breaching right now" question must never be
+	// answered from stale data that predates a recovery the cap pushed out of
+	// view.
+	QueryRangeForTenant(ctx context.Context, tenantID, assetID, metric string, from, to time.Time) ([]Sample, error)
 }

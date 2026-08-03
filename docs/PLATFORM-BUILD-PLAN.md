@@ -164,8 +164,8 @@ Signals about assets: metrics, logs, traces, synthetics. The scale extreme.
 - **Edge cases:** high cardinality, ingestion backpressure/quotas per tenant, out-of-order & late data, clock skew, collector disconnection, storage growth — none of these are addressed by E2.1's spine and remain open for E2.1b/E2.2/E2.3.
 
 ### E3 — Alerting (derived) + suppression  `[~]`
-- [~] E3.1 Alert **rules** (threshold first; rate-of-change/absence/anomaly later) over telemetry + leader-gated evaluator that fires on transition → Notification. `AlertRule` is config; a firing is DERIVED (no reified `Alert` type — §4). ▶ CURRENT *(sequenced ahead of E2.2b SNMP: alerting makes the telemetry collectors now produce actionable — the visible payoff — and is independent of more collector types)*
-- [ ] E3.2 Derivation engine → notifications/incidents; severity; dedup; flap suppression
+- [x] E3.1 Alert **rules** (threshold first; rate-of-change/absence/anomaly later) over telemetry + leader-gated evaluator that fires on transition → Notification. `AlertRule` is config; a firing is DERIVED (no reified `Alert` type — §4). Cross-tenant telemetry isolation enforced by an explicit tenant_id predicate (`TelemetryRepository.QueryRangeForTenant`), mutation-verified.
+- [ ] E3.2 Derivation engine → notifications/incidents; severity; dedup; flap suppression ▶ CURRENT
 - [ ] E3.3 Maintenance windows / blackout; dependency-aware suppression (suppress downstream when a root CI is down — uses the CMDB graph)
 - **Edge cases:** alert storms, self-referential suppression, rule changes mid-fire, per-tenant rule isolation.
 
