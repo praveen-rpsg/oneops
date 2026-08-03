@@ -165,7 +165,7 @@ Signals about assets: metrics, logs, traces, synthetics. The scale extreme.
 
 ### E3 — Alerting (derived) + suppression  `[~]`
 - [x] E3.1 Alert **rules** (threshold first; rate-of-change/absence/anomaly later) over telemetry + leader-gated evaluator that fires on transition → Notification. `AlertRule` is config; a firing is DERIVED (no reified `Alert` type — §4). Cross-tenant telemetry isolation enforced by an explicit tenant_id predicate (`TelemetryRepository.QueryRangeForTenant`), mutation-verified.
-- [ ] E3.2 Derivation engine → notifications/incidents; severity; dedup; flap suppression ▶ CURRENT
+- [ ] E3.2 Dedup / flap suppression / severity routing (beyond E3.1's transition-only). READ-SIDE GUARD FOLLOW-UP (tracked, ADR-TENANCY-012): build a failing arch guard that sweeps privileged `SELECT`s on `TenantOwnedTables` for an explicit tenant predicate — the read analogue of `TestPrivilegedMutations_AreScopedToAnOwner`. Do this when next touching alerting/correlation.
 - [ ] E3.3 Maintenance windows / blackout; dependency-aware suppression (suppress downstream when a root CI is down — uses the CMDB graph)
 - **Edge cases:** alert storms, self-referential suppression, rule changes mid-fire, per-tenant rule isolation.
 
@@ -176,7 +176,7 @@ Signals about assets: metrics, logs, traces, synthetics. The scale extreme.
 
 ### E5 — ITSM core: Incident / Problem / Change  `[ ]`
 Stateful work items on the workflow + state-machine primitives.
-- [ ] E5.1 Incident lifecycle (from correlated alerts or manual), assignment, queues, escalation
+- [~] E5.1 Incident lifecycle (manual now; alert/correlation→incident wires in at E4), assignment, append-only timeline  ▶ CURRENT *(sequenced ahead of E3.2/E4: after "notify", operators need to TRACK work — incidents are the NOC's operational heart; independent of alerting refinements)*
 - [ ] E5.2 On-call, scheduling & paging (rotations, escalation policies, notify via E-notification)
 - [ ] E5.3 SLA/SLO tracking on work items (business hours, pause-on-hold, breach escalation)
 - [ ] E5.4 Problem management (root cause, known errors) linked to incidents/CIs
