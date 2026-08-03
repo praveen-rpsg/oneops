@@ -101,6 +101,17 @@ func TestAppUserMigration_AppliesAndRollsBackOnPopulatedDatabase(t *testing.T) {
 		t.Fatalf("roll back team before app_user: %v", err)
 	}
 
+	// incident.assignee_user_id (E5.1) also references app_user, so that
+	// migration's rollback must run first too — the same ordering protection
+	// every other referencing table's rollback documents here.
+	iDown, err := os.ReadFile("../migrate/rollback/20260825000001_incident.down.sql")
+	if err != nil {
+		t.Fatalf("read incident rollback: %v", err)
+	}
+	if _, err := tx.Exec(ctx, string(iDown)); err != nil {
+		t.Fatalf("roll back incident before app_user: %v", err)
+	}
+
 	// membership and invitation reference app_user, so their rollback must run
 	// first — PostgreSQL refuses to drop a referenced table, which is the
 	// ordering protection documented in 20260804000004's rollback, not an

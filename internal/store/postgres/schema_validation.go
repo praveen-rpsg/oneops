@@ -131,6 +131,10 @@ var immutableAuditTables = []struct {
 	// ENABLE ALWAYS from its first migration rather than hardened after the
 	// fact — see 20260818000001_asset_lifecycle.sql.
 	{"asset_change_history", "trg_asset_change_history_no_row_mutate", "trg_asset_change_history_no_truncate", true},
+	// incident_event (E5.1): tenant-owned ITSM case timeline, armed ENABLE
+	// ALWAYS from its first migration, exactly like asset_change_history —
+	// see 20260825000001_incident.sql.
+	{"incident_event", "trg_incident_event_no_row_mutate", "trg_incident_event_no_truncate", true},
 }
 
 // validateAuditImmutability verifies that every append-only audit table, and

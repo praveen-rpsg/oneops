@@ -1893,6 +1893,203 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/incidents:
+    get:
+      summary: List the caller's tenant's incidents (E5.1)
+      description: >-
+        incident is tenant-owned and under row-level security, exactly like
+        Asset, so the result is confined to the caller's tenant by the
+        database. Paging is keyset over `incident_id`, a ULID and therefore
+        ordered by creation. Unlike GET /admin/assets, there is no default
+        status exclusion — a closed incident remains relevant operational
+        history, not noise to hide.
+      operationId: listIncidents
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last incident_id of the previous page.
+          schema: { type: string }
+        - name: status
+          in: query
+          description: Filter to exactly this status. Omitted, every status is returned.
+          schema: { type: string, enum: [open, acknowledged, investigating, resolved, closed, reopened] }
+      responses:
+        '200':
+          description: A page of incidents
+          content: { application/json: { schema: { $ref: '#/components/schemas/IncidentList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: File a new Incident (E5.1)
+      description: >-
+        Always created IncidentOpen — there is no caller-chosen initial
+        status. The tenant is taken from the bound connection and never from
+        the request, so a caller cannot plant an incident inside another
+        boundary (the same rule createAsset/createTeam enforce). asset_id,
+        when supplied, must already name a Configuration Item visible to the
+        caller's tenant (ADR-ASSET-001 §6); assignee_user_id, when supplied,
+        must name a user with an ACTIVE membership in the caller's tenant —
+        app_user is global, membership is the tenant fact. Either mismatch
+        returns 404.
+      operationId: createIncident
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateIncidentRequest' }
+      responses:
+        '201':
+          description: The incident
+          content: { application/json: { schema: { $ref: '#/components/schemas/Incident' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/incidents/{id}:
+    get:
+      summary: Get an incident by identifier
+      operationId: getIncident
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The incident
+          content: { application/json: { schema: { $ref: '#/components/schemas/Incident' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Change an incident's title, description, severity or linked asset
+      description: >-
+        status and assignee_user_id are excluded from this endpoint — POST
+        .../transition and POST .../assign are their single authorities
+        (mirrors PatchAssetRequest excluding status). asset_id is tri-state:
+        absent leaves the link unchanged, "" clears it, and a non-empty id
+        sets it, re-verified against the caller's tenant first. Writes no
+        timeline row — the timeline records the case narrative (created,
+        transitions, assignment changes), not a field-by-field audit.
+      operationId: patchIncident
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchIncidentRequest' }
+      responses:
+        '200':
+          description: The updated incident
+          content: { application/json: { schema: { $ref: '#/components/schemas/Incident' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/incidents/{id}/transition:
+    post:
+      summary: Perform a lifecycle transition on an incident (E5.1)
+      description: >-
+        The single authority for status changes, checked against
+        domain.IncidentStatus.CanTransitionTo: open -> acknowledged ->
+        investigating -> resolved -> closed, plus resolved -> reopened ->
+        investigating. An illegal move (e.g. open -> resolved, skipping the
+        pipeline) returns 409. acknowledged_at/resolved_at/closed_at are set
+        when the corresponding state is (re-)entered.
+      operationId: transitionIncident
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransitionIncidentRequest' }
+      responses:
+        '200':
+          description: The updated incident
+          content: { application/json: { schema: { $ref: '#/components/schemas/Incident' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/incidents/{id}/assign:
+    post:
+      summary: Assign or unassign an incident (E5.1)
+      description: >-
+        The single authority for the assignee field. assignee_user_id null
+        clears the assignment; a non-null id must name a user with an ACTIVE
+        membership in the caller's tenant, re-verified server-side before the
+        write (app_user is global; membership is the tenant fact).
+      operationId: assignIncident
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssignIncidentRequest' }
+      responses:
+        '200':
+          description: The updated incident
+          content: { application/json: { schema: { $ref: '#/components/schemas/Incident' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/incidents/{id}/timeline:
+    get:
+      summary: An incident's append-only case timeline (E5.1)
+      description: >-
+        Every recorded event on this Incident — created, status transitions,
+        assignment changes — each with actor, old->new value and timestamp,
+        in chronological order. Written by IncidentStore.Create/SetStatus/
+        Assign in the same transaction as the mutation it describes;
+        incident_event is append-only at the schema level (ENABLE ALWAYS
+        triggers + revoked UPDATE/DELETE/TRUNCATE), mirroring
+        asset_change_history. Paging is keyset over `event_id`, a ULID and
+        therefore chronological.
+      operationId: getIncidentTimeline
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last event_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of the incident's timeline
+          content: { application/json: { schema: { $ref: '#/components/schemas/IncidentTimelineList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/notifications:
     get:
       summary: List the caller's tenant's notifications
@@ -3097,6 +3294,106 @@ components:
         for_duration_seconds: { type: integer, minimum: 1, maximum: 86400 }
         severity: { type: string, enum: [critical, warning, info] }
         enabled: { type: boolean }
+    Incident:
+      type: object
+      description: >-
+        A stateful ITSM work item tracking operational work against a CI
+        (E5.1) — the ratified reduced noun, never a reified generic "Ticket".
+      properties:
+        incident_id: { type: string }
+        title: { type: string, maxLength: 200 }
+        description: { type: string, maxLength: 10000 }
+        severity: { type: string, enum: [critical, high, medium, low] }
+        status:
+          type: string
+          enum: [open, acknowledged, investigating, resolved, closed, reopened]
+        asset_id:
+          type: string
+          nullable: true
+          description: The affected Configuration Item, or absent when unlinked.
+        assignee_user_id:
+          type: string
+          nullable: true
+          description: The responder accountable for this incident, or absent when unassigned.
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        acknowledged_at: { type: string, format: date-time, nullable: true }
+        resolved_at: { type: string, format: date-time, nullable: true }
+        closed_at: { type: string, format: date-time, nullable: true }
+    IncidentList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Incident' }
+    CreateIncidentRequest:
+      type: object
+      required: [title, severity]
+      description: >-
+        Always created IncidentOpen. asset_id/assignee_user_id are optional;
+        when set, each is re-verified against the caller's tenant before the
+        incident is written — a mismatch returns 404 (see POST
+        /admin/incidents' description).
+      properties:
+        title: { type: string, maxLength: 200 }
+        description: { type: string, maxLength: 10000 }
+        severity: { type: string, enum: [critical, high, medium, low] }
+        asset_id: { type: string }
+        assignee_user_id: { type: string }
+    PatchIncidentRequest:
+      type: object
+      required: [row_version]
+      description: >-
+        Supply one or more of title, description, severity, asset_id.
+        status and assignee_user_id are excluded — see POST .../transition
+        and POST .../assign. asset_id is tri-state: absent leaves it
+        unchanged, "" clears it, a non-empty id sets it (re-verified first).
+      properties:
+        row_version: { type: integer, format: int64, minimum: 1 }
+        title: { type: string, maxLength: 200 }
+        description: { type: string, maxLength: 10000 }
+        severity: { type: string, enum: [critical, high, medium, low] }
+        asset_id: { type: string }
+    TransitionIncidentRequest:
+      type: object
+      required: [row_version, status]
+      properties:
+        row_version: { type: integer, format: int64, minimum: 1 }
+        status:
+          type: string
+          enum: [open, acknowledged, investigating, resolved, closed, reopened]
+    AssignIncidentRequest:
+      type: object
+      required: [row_version]
+      description: >-
+        assignee_user_id null (or omitted) clears the assignment; a non-null
+        id must name a user with an active membership in the caller's tenant.
+      properties:
+        row_version: { type: integer, format: int64, minimum: 1 }
+        assignee_user_id: { type: string, nullable: true }
+    IncidentEvent:
+      type: object
+      description: >-
+        One append-only row of an incident's case timeline (E5.1). field/
+        old_value/new_value are absent for the single "created" row — there
+        is no prior state to diff against.
+      properties:
+        event_id: { type: string }
+        incident_id: { type: string }
+        kind: { type: string, enum: [created, status_transitioned, assigned] }
+        field: { type: string }
+        old_value: { type: string, nullable: true }
+        new_value: { type: string, nullable: true }
+        actor: { type: string }
+        row_version: { type: integer, format: int64 }
+        occurred_at: { type: string, format: date-time }
+    IncidentTimelineList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/IncidentEvent' }
     Setting:
       type: object
       description: >-
