@@ -53,6 +53,15 @@ type Sample struct {
 	// become an unbounded payload. Nil is stored as an empty object, the same
 	// convention Asset.Attributes uses.
 	Labels map[string]string
+	// Min, Max and Count are set only when this Sample was returned at
+	// ResolutionRollup5m (E2.1b): Value then holds the bucket's average, Min
+	// and Max its extremes, and Count how many raw samples it summarises.
+	// nil/nil/nil is how a caller tells a raw observation from a rollup
+	// bucket apart — a raw Sample never sets these, and a rollup bucket
+	// always sets all three together.
+	Min   *float64
+	Max   *float64
+	Count *int64
 }
 
 // Validate enforces the invariants the database also enforces, so a bad
@@ -147,6 +156,88 @@ const (
 // import.
 const MaxTelemetryIngestBatch = 1000
 
+// TelemetryResolution selects which granularity TelemetryRepository.QueryRange
+// reads from (E2.1b).
+type TelemetryResolution string
+
+const (
+	// ResolutionAuto ("") lets the store pick: raw for a window no wider than
+	// AutoResolutionRawWindow, the rollup otherwise. This is the default a
+	// caller gets by sending no resolution parameter at all.
+	ResolutionAuto TelemetryResolution = ""
+	// ResolutionRaw requests individual samples. Rejected for a window wider
+	// than MaxRawQueryWindow — the bounded-queries rule
+	// (docs/PLATFORM-BUILD-PLAN.md §3) applies to resolution choice, not only
+	// to page size: a caller may not force a full year of per-sample rows
+	// through one keyset-paginated query path.
+	ResolutionRaw TelemetryResolution = "raw"
+	// ResolutionRollup5m requests the 5-minute avg/min/max/count rollup
+	// (telemetry_rollup_5m) instead of raw samples.
+	ResolutionRollup5m TelemetryResolution = "rollup_5m"
+)
+
+// TelemetryRollupBucket is the rollup's bucket width. It is a domain constant,
+// not merely a store detail, because AutoResolutionRawWindow and a caller's
+// expectations about rollup timestamp alignment both depend on it.
+const TelemetryRollupBucket = 5 * time.Minute
+
+// AutoResolutionRawWindow is the window width at or below which
+// ResolutionAuto reads raw samples; above it, ResolutionAuto reads the
+// rollup. Six hours is short enough that per-sample detail is still the
+// useful answer (a dashboard's "last few hours" view), and long enough that a
+// single business day's incident review does not silently fall back to
+// coarse buckets.
+const AutoResolutionRawWindow = 6 * time.Hour
+
+// MaxRawQueryWindow bounds an EXPLICIT ResolutionRaw request. A caller asking
+// for raw samples over, say, a year would force a scan and a page-by-page
+// walk across a dataset the rollup exists precisely to summarise instead;
+// MaxTelemetryQueryLimit bounds one page's row count, not how many chunks a
+// wide raw query has to touch to fill even one page.
+const MaxRawQueryWindow = 7 * 24 * time.Hour
+
+// ParseTelemetryResolution validates a transport-layer `resolution` query
+// parameter. Used only at the transport boundary, the same split
+// ParseTelemetryTimestamp draws for from/to/after.
+func ParseTelemetryResolution(raw string) (TelemetryResolution, error) {
+	switch TelemetryResolution(strings.TrimSpace(raw)) {
+	case ResolutionAuto, ResolutionRaw, ResolutionRollup5m:
+		return TelemetryResolution(strings.TrimSpace(raw)), nil
+	default:
+		return "", newValidation("resolution", `must be "raw", "rollup_5m", or omitted for automatic selection`)
+	}
+}
+
+// DefaultTelemetryRawRetentionDays and DefaultTelemetryRollupRetentionDays are
+// TelemetryRawRetentionDaysKey's registry default and the rollup's fixed
+// retention (E2.1b, ADR-TELEMETRY-002). Only the raw horizon is an operator
+// tunable — see TelemetryRawRetentionDaysKey's doc comment for why the rollup
+// horizon is not.
+const (
+	DefaultTelemetryRawRetentionDays    = 90
+	DefaultTelemetryRollupRetentionDays = 400
+)
+
+// TelemetryRawRetentionDaysKey names the SettingDefinitions entry that bounds
+// how long a raw telemetry_sample row is kept before the retention worker
+// drops its chunk (E2.1b, ADR-TELEMETRY-002).
+//
+// This setting is PLATFORM-scoped, not per-tenant, even though it is stored
+// in the same tenant-owned `setting` table every other setting uses: the
+// retention worker reads it ONLY from SystemTenantID's override (falling back
+// to DefaultTelemetryRawRetentionDays when unset) and applies the result to
+// the whole telemetry_sample hypertable in one pass. A hypertable's chunks
+// span every tenant's rows together — dropping a chunk older than the cutoff
+// drops it for all of them at once — so there is no single retention
+// operation that could honour ten different tenants' ten different horizons
+// without either a hypertable per tenant or a filtered per-tenant DELETE
+// worker, neither of which E2.1b builds. A value stored under any tenant
+// other than "system" is accepted (Setting.Validate does not know which
+// tenant is calling) but has no effect on retention; ADR-TELEMETRY-002
+// records true per-tenant retention as a deferred follow-up rather than
+// pretending this key delivers it today.
+const TelemetryRawRetentionDaysKey = "telemetry_raw_retention_days"
+
 // ParseTelemetryTimestamp parses a transport-layer RFC3339 timestamp
 // parameter (from/to/after). Used only at the transport boundary;
 // TelemetryRepository.QueryRange takes the parsed time.Time, never the raw
@@ -186,9 +277,18 @@ type TelemetryRepository interface {
 	// sample, not as a row naming a cross-tenant asset (ADR-ASSET-001 §6,
 	// extended here). Re-writing an identical (tenant, asset, metric,
 	// timestamp) sample is idempotent: it is accepted again and creates no
-	// second row. Batch size is bounded by the transport layer
-	// (MaxTelemetryIngestBatch); this method itself imposes no additional
-	// cap, the same split AssetRepository.Upsert draws with importAssets.
+	// second row — but idempotent is not the same as "merged". The insert is
+	// ON CONFLICT (tenant_id, asset_id, metric, ts) DO NOTHING, so a SECOND
+	// sample naming the same key with a DIFFERENT value is silently dropped:
+	// the FIRST write for that key wins, permanently, and the caller is told
+	// Accepted with no way to distinguish "this exact value was written" from
+	// "a different value already occupies this timestamp and yours was
+	// discarded". A producer relying on a later correction overwriting an
+	// earlier bad reading at the same timestamp will not observe one; it must
+	// pick a different timestamp instead. Batch size is bounded by the
+	// transport layer (MaxTelemetryIngestBatch); this method itself imposes
+	// no additional cap, the same split AssetRepository.Upsert draws with
+	// importAssets.
 	WriteSamples(ctx context.Context, samples []Sample) ([]SampleWriteResult, error)
 
 	// QueryRange returns a bounded, keyset-paginated page of one asset's one
@@ -199,5 +299,22 @@ type TelemetryRepository interface {
 	// list in this schema clamps its page size. A caller with more samples
 	// than one page fits re-queries with after set to the last Timestamp
 	// received.
-	QueryRange(ctx context.Context, assetID, metric string, from, to time.Time, limit int, after time.Time) ([]Sample, error)
+	//
+	// after's ts-only keyset works ONLY because (tenant_id, asset_id, metric,
+	// ts) is the table's actual uniqueness constraint (uq_telemetry_sample) —
+	// asset_id and metric are already fixed by this call's own arguments, so
+	// ts alone is unique within the page being walked. If a future change
+	// widened that key (e.g. a second producer allowed to report the same
+	// asset/metric/timestamp pair as a distinct row) this cursor would start
+	// silently skipping or repeating rows at a page boundary; anyone changing
+	// the natural key must change this pagination scheme in the same commit.
+	//
+	// resolution selects raw samples or the 5-minute rollup (E2.1b);
+	// ResolutionAuto picks based on the [from, to] window's width — see
+	// AutoResolutionRawWindow. A rollup row is a Sample with Value set to the
+	// bucket's average and Min/Max/Count also populated (see Sample's doc
+	// comment); ts is then the bucket's start, and after/pagination work
+	// identically because telemetry_rollup_5m carries the same
+	// (tenant_id, asset_id, metric, bucket) uniqueness telemetry_sample does.
+	QueryRange(ctx context.Context, assetID, metric string, from, to time.Time, limit int, after time.Time, resolution TelemetryResolution) ([]Sample, error)
 }

@@ -59,7 +59,7 @@ func TestTelemetryStore_IngestQueryRoundTrip(t *testing.T) {
 		}
 	}
 
-	got, err := store.QueryRange(ctx, host.AssetID, "cpu_utilization", base, base.Add(10*time.Minute), 0, time.Time{})
+	got, err := store.QueryRange(ctx, host.AssetID, "cpu_utilization", base, base.Add(10*time.Minute), 0, time.Time{}, domain.ResolutionAuto)
 	if err != nil {
 		t.Fatalf("query range: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestTelemetryStore_IngestQueryRoundTrip(t *testing.T) {
 	if _, err := store.WriteSamples(ctx, samples[:3]); err != nil {
 		t.Fatalf("re-write samples: %v", err)
 	}
-	again, err := store.QueryRange(ctx, host.AssetID, "cpu_utilization", base, base.Add(10*time.Minute), 0, time.Time{})
+	again, err := store.QueryRange(ctx, host.AssetID, "cpu_utilization", base, base.Add(10*time.Minute), 0, time.Time{}, domain.ResolutionAuto)
 	if err != nil {
 		t.Fatalf("query range after re-write: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestTelemetryStore_IngestQueryRoundTrip(t *testing.T) {
 
 	// Keyset pagination: after the first sample's timestamp, only the
 	// remaining two are returned.
-	page, err := store.QueryRange(ctx, host.AssetID, "cpu_utilization", base, base.Add(10*time.Minute), 0, base)
+	page, err := store.QueryRange(ctx, host.AssetID, "cpu_utilization", base, base.Add(10*time.Minute), 0, base, domain.ResolutionAuto)
 	if err != nil {
 		t.Fatalf("query range with after: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestTelemetryStore_RejectsCrossTenantOrNonexistentAsset(t *testing.T) {
 
 	// No row was written naming the victim's asset — checked from tenant A's
 	// own connection, where it would be visible if it existed.
-	gotA, err := store.QueryRange(ctxA, victim.AssetID, "cpu_utilization", ts.Add(-time.Hour), ts.Add(time.Hour), 0, time.Time{})
+	gotA, err := store.QueryRange(ctxA, victim.AssetID, "cpu_utilization", ts.Add(-time.Hour), ts.Add(time.Hour), 0, time.Time{}, domain.ResolutionAuto)
 	if err != nil {
 		t.Fatalf("query range as victim tenant: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestTelemetryIsolation_RLSByTenant(t *testing.T) {
 	// Tenant B can never see tenant A's sample, even naming tenant A's own
 	// asset_id and metric directly — row-level security filters on tenant_id,
 	// not on the caller's chosen filters.
-	gotB, err := store.QueryRange(ctxB, hostA.AssetID, "cpu_utilization", ts.Add(-time.Hour), ts.Add(time.Hour), 0, time.Time{})
+	gotB, err := store.QueryRange(ctxB, hostA.AssetID, "cpu_utilization", ts.Add(-time.Hour), ts.Add(time.Hour), 0, time.Time{}, domain.ResolutionAuto)
 	if err != nil {
 		t.Fatalf("query range as tenant b: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestTelemetryIsolation_RLSByTenant(t *testing.T) {
 		t.Fatalf("tenant B saw tenant A's telemetry: %+v", gotB)
 	}
 
-	gotA, err := store.QueryRange(ctxA, hostA.AssetID, "cpu_utilization", ts.Add(-time.Hour), ts.Add(time.Hour), 0, time.Time{})
+	gotA, err := store.QueryRange(ctxA, hostA.AssetID, "cpu_utilization", ts.Add(-time.Hour), ts.Add(time.Hour), 0, time.Time{}, domain.ResolutionAuto)
 	if err != nil {
 		t.Fatalf("query range as tenant a: %v", err)
 	}
