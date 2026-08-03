@@ -137,8 +137,10 @@ The typed configuration-item model + relationship graph everything references.
 - [x] E1.1 CI model + relationships + CRUD/graph API (reuses `internal/graph`) — **merged to master** (ADR-ASSET-001; cross-tenant edge defense mutation-proven)
 - [x] E1.2 Business-service mapping (service → supporting CIs), criticality, environment, ownership — **merged** (owner refs tenant-verified; service-map = typed graph projection)
 - [x] E1.3 CI lifecycle (planned→active→retired), change history, soft-retire — **merged** (4-state machine per amended ADR-ASSET-001 §5; append-only history hardened ENABLE ALWAYS+REVOKE)
-- [~] E1.4 Bulk import/export; reconciliation & de-duplication of CIs from multiple sources  ▶ CURRENT
-- [ ] E1.5 CMDB health: staleness, orphans, drift detection
+- [x] E1.4 Bulk import/export + duplicate **detection** (source+external_ref, idempotent upsert, DB uniqueness) — **merged**
+- [ ] E1.4b Controlled duplicate **merge/resolution** (reassign relationships+history to a survivor, retire duplicate) — deferred follow-on
+- [~] E1.5 CMDB health: staleness, orphans, data-quality (true drift-vs-reality needs E2 discovery)  ▶ CURRENT
+- [ ] FOLLOW-UP (tech-debt): harden `TestEveryAuditAppendPath_SerialisesOnItsChainHead` — `reachesForUpdate` keys on unqualified method name, so a `Create` can pass via cross-type name-collision (pre-existing; not introduced by E1.x). Also: relationship export (E1.4 exported assets only).
 - **Edge cases:** circular relationships, cross-tenant edges (forbidden), orphaned/duplicate CIs, high-fan-out services, historical point-in-time queries.
 
 ### E2 — Telemetry & Monitoring ingestion  `[ ]`
