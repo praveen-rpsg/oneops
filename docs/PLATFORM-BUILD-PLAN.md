@@ -176,8 +176,8 @@ Signals about assets: metrics, logs, traces, synthetics. The scale extreme.
 
 ### E5 — ITSM core: Incident / Problem / Change  `[ ]`
 Stateful work items on the workflow + state-machine primitives.
-- [~] E5.1 Incident lifecycle (manual now; alert/correlation→incident wires in at E4), assignment, append-only timeline  ▶ CURRENT *(sequenced ahead of E3.2/E4: after "notify", operators need to TRACK work — incidents are the NOC's operational heart; independent of alerting refinements)*
-- [ ] E5.2 On-call, scheduling & paging (rotations, escalation policies, notify via E-notification)
+- [x] E5.1 Incident lifecycle (manual now; alert/correlation→incident wires in at E4), assignment, append-only timeline *(sequenced ahead of E3.2/E4: after "notify", operators need to TRACK work — incidents are the NOC's operational heart; independent of alerting refinements)*
+- [ ] E5.2 On-call, scheduling & paging (rotations, escalation policies, notify via E-notification)  ▶ CURRENT
 - [ ] E5.3 SLA/SLO tracking on work items (business hours, pause-on-hold, breach escalation)
 - [ ] E5.4 Problem management (root cause, known errors) linked to incidents/CIs
 - [ ] E5.5 Change management (change request → CAB approval via approval quorum, change calendar, conflict/collision detection, risk)

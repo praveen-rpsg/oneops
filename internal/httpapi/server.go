@@ -115,6 +115,12 @@ type Server struct {
 	// field is only the admin CRUD surface.
 	alertRules domain.AlertRuleRepository
 
+	// Incident registry (E5.1); nil until SetIncidents. incident/
+	// incident_event are TENANT-OWNED, like asset above, so nothing here
+	// needs an exemption from row-level security. Alert-firing -> Incident
+	// wiring is E4; incidents are created manually via this API until then.
+	incidents domain.IncidentRepository
+
 	// Notification registry (read-only); nil until SetNotifications.
 	// notification is TENANT-OWNED, like team above, so nothing here needs an
 	// exemption from row-level security.
@@ -437,6 +443,23 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/alert-rules/{id}", s.getAlertRule)
 		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/alert-rules/{id}", s.patchAlertRule)
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/alert-rules/{id}", s.deleteAlertRule)
+
+		// Incident administration (E5.1). incident/incident_event are
+		// TENANT-OWNED, exactly like asset/alert_rule above, so the
+		// permission tier is tenant administration, not requirePlatformAdmin.
+		// status and assignee_user_id are excluded from PATCH — POST
+		// .../transition and POST .../assign are their single authorities
+		// (mirrors the asset shape: SetStatus split out of Update). There is
+		// no DELETE: an Incident is operational history from the moment it
+		// exists (domain.IncidentRepository's doc comment) — "removing" one
+		// is a transition to closed, not a row deletion.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/incidents", s.listIncidents)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/incidents", s.createIncident)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/incidents/{id}", s.getIncident)
+		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/incidents/{id}", s.patchIncident)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/incidents/{id}/transition", s.transitionIncident)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/incidents/{id}/assign", s.assignIncident)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/incidents/{id}/timeline", s.getIncidentTimeline)
 
 		// Notification administration (read-only). notification is TENANT-OWNED,
 		// exactly like team above, so the permission tier is tenant

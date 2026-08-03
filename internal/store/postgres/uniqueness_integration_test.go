@@ -71,6 +71,10 @@ var serverGeneratedIdentifiers = map[string]string{
 
 	// Alert rule config + firing-state (E3.1).
 	"alert_rule_pkey": "rule_id is server-minted (domain.NewAlertRule); no create route accepts one from a client",
+
+	// Incident work item + append-only timeline (E5.1).
+	"incident_pkey":       "incident_id is server-minted (domain.NewIncident); no create route accepts one from a client",
+	"incident_event_pkey": "event_id is server-minted (domain.NewID() in IncidentStore.recordEvent); no route accepts one from a client",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

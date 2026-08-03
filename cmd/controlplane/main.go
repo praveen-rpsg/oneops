@@ -576,6 +576,14 @@ func run(logger *slog.Logger) error {
 		alertRuleStore, postgres.NewTelemetryStore(pool), notificationSvc, alertingMetrics, logger, alerting.Config{})
 	workers = append(workers, alertEvaluator.Run)
 
+	// Incident administration (E5.1, the ITSM core): incident/incident_event
+	// are tenant-owned and under row-level security, exactly like asset
+	// above, so the admin CRUD + lifecycle + timeline API is built from the
+	// tenant-scoped pool. Unlike collector_check/alert_rule there is no
+	// background worker here — incidents are created manually via this API
+	// until alert-firing -> incident wiring lands (E4).
+	srv.SetIncidents(postgres.NewIncidentStore(appPool))
+
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.
 	diagBuilder := buildDiagnostics(cfg, startedAt, pool, scheduler)

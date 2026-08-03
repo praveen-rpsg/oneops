@@ -54,7 +54,7 @@ func TestEveryTableIsANode(t *testing.T) {
 		"admin_audit_chain_head", "admin_audit_event", "alert_rule", "app_user", "approval_record", "artifact_version",
 		"asset", "asset_change_history", "asset_relationship",
 		"audit_chain_head", "audit_event", "audit_event_default", "collector_check", "configuration_metadata",
-		"configuration_object", "dependency_edge", "idempotency_key", "invitation",
+		"configuration_object", "dependency_edge", "idempotency_key", "incident", "incident_event", "invitation",
 		"membership", "notification", "organization", "policy", "policy_cursor", "policy_execution",
 		"setting", "team", "team_membership", "telemetry_rollup_5m", "telemetry_sample", "tenant", "webhook", "webhook_cursor",
 		"webhook_delivery", "webhook_replay_job",
@@ -99,8 +99,8 @@ func TestCommentsDoNotDeclareObjects(t *testing.T) {
 func TestIndexOnClauseMaySpanLines(t *testing.T) {
 	nodes, edges := extract(t)
 	idx := byKind(nodes)[kindIndex]
-	if len(idx) != 72 {
-		t.Errorf("extracted %d indexes, want 72", len(idx))
+	if len(idx) != 77 {
+		t.Errorf("extracted %d indexes, want 77", len(idx))
 	}
 	// ix_webhook_delivery_due declares ON on a following line.
 	const want = "index:ix_webhook_delivery_due"
@@ -173,8 +173,8 @@ func TestCommentOnDoesNotDeclareAColumn(t *testing.T) {
 func TestTriggersAreOwnedByTheirTable(t *testing.T) {
 	nodes, edges := extract(t)
 	trig := byKind(nodes)[kindTrigger]
-	if len(trig) != 6 {
-		t.Errorf("extracted %d triggers, want 6: %v", len(trig), trig)
+	if len(trig) != 8 {
+		t.Errorf("extracted %d triggers, want 8: %v", len(trig), trig)
 	}
 	for _, tr := range trig {
 		found := false
@@ -283,7 +283,7 @@ func TestCorpusCensus(t *testing.T) {
 		got[n.Kind]++
 	}
 	want := map[string]int{
-		kindTable: 34, kindColumn: 305, kindIndex: 72, kindConstraint: 94, kindTrigger: 6,
+		kindTable: 36, kindColumn: 329, kindIndex: 77, kindConstraint: 102, kindTrigger: 8,
 	}
 	for kind, w := range want {
 		if got[kind] != w {
@@ -400,18 +400,18 @@ func TestMultiLineAlterTableIsExtracted(t *testing.T) {
 		}
 	}
 
-	// Twenty-eight tables carry the discriminator (E2.1 added
-	// telemetry_sample; E2.1b adds telemetry_rollup_5m; E2.2a adds
-	// collector_check; E3.1 adds alert_rule). Anything less is a wrong
-	// answer to the question the graph exists to answer.
+	// Thirty tables carry the discriminator (E2.1 added telemetry_sample;
+	// E2.1b adds telemetry_rollup_5m; E2.2a adds collector_check; E3.1 adds
+	// alert_rule; E5.1 adds incident and incident_event). Anything less is a
+	// wrong answer to the question the graph exists to answer.
 	scoped := 0
 	for _, n := range nodes {
 		if strings.HasSuffix(n.ID, ".tenant_id") && n.Kind == kindColumn {
 			scoped++
 		}
 	}
-	if scoped != 28 {
-		t.Errorf("%d tables carry tenant_id, want 28", scoped)
+	if scoped != 30 {
+		t.Errorf("%d tables carry tenant_id, want 30", scoped)
 	}
 
 	// A multi-line declaration must still be owned by its table.
