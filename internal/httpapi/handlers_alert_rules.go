@@ -28,6 +28,7 @@ type alertRuleDTO struct {
 	Enabled          bool       `json:"enabled"`
 	LastState        string     `json:"last_state"`
 	LastTransitionAt *time.Time `json:"last_transition_at,omitempty"`
+	FlapDwellSecs    int        `json:"flap_dwell_seconds"`
 	RowVersion       int64      `json:"row_version"`
 	CreatedAt        time.Time  `json:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at"`
@@ -35,12 +36,17 @@ type alertRuleDTO struct {
 
 // toAlertRuleDTO deliberately omits tenant_id, the same choice
 // toCollectorCheckDTO makes: the caller is already inside exactly one tenant.
+// It also omits pending_state/pending_since (E3.2) — the de-flap dwell's
+// in-flight candidate is internal evaluator bookkeeping, not something an
+// operator administers or needs to see; flap_dwell_seconds (the config knob)
+// is the only part of E3.2 that is part of this contract.
 func toAlertRuleDTO(r *domain.AlertRule) alertRuleDTO {
 	dto := alertRuleDTO{
 		RuleID: r.RuleID, AssetID: r.AssetID, Metric: r.Metric,
 		Comparator: string(r.Comparator), Threshold: r.Threshold, ForDurationSecs: r.ForDuration,
 		Severity: string(r.Severity), Enabled: r.Enabled, LastState: string(r.LastState),
-		RowVersion: r.RowVersion, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+		FlapDwellSecs: r.FlapDwellSeconds,
+		RowVersion:    r.RowVersion, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
 	if !r.LastTransitionAt.IsZero() {
 		t := r.LastTransitionAt
@@ -52,7 +58,8 @@ func toAlertRuleDTO(r *domain.AlertRule) alertRuleDTO {
 // createAlertRuleRequest carries no rule_id (minted server-side, the same
 // rule createCollectorCheckRequest follows) and no last_state/
 // last_transition_at (evaluator-owned — see domain.AlertRule's doc comment).
-// severity defaults to "warning" when omitted.
+// severity defaults to "warning" when omitted; flap_dwell_seconds defaults to
+// domain.DefaultAlertRuleFlapDwellSeconds when omitted (E3.2).
 type createAlertRuleRequest struct {
 	AssetID         string  `json:"asset_id"`
 	Metric          string  `json:"metric"`
@@ -61,11 +68,15 @@ type createAlertRuleRequest struct {
 	ForDurationSecs int     `json:"for_duration_seconds"`
 	Severity        string  `json:"severity"`
 	Enabled         *bool   `json:"enabled"`
+	FlapDwellSecs   *int    `json:"flap_dwell_seconds"`
 }
 
 // patchAlertRuleRequest changes one or more fields under optimistic locking.
 // asset_id/metric are absent — see domain.AlertRulePatch's doc comment — and
-// so are last_state/last_transition_at, which only the evaluator sets.
+// so are last_state/last_transition_at/pending_state/pending_since, which
+// only the evaluator sets (patching ANY field, including flap_dwell_seconds
+// itself, clears a rule's in-flight pending candidate — see
+// domain.AlertRulePatch's doc comment).
 type patchAlertRuleRequest struct {
 	RowVersion      int64    `json:"row_version"`
 	Comparator      *string  `json:"comparator"`
@@ -73,11 +84,12 @@ type patchAlertRuleRequest struct {
 	ForDurationSecs *int     `json:"for_duration_seconds"`
 	Severity        *string  `json:"severity"`
 	Enabled         *bool    `json:"enabled"`
+	FlapDwellSecs   *int     `json:"flap_dwell_seconds"`
 }
 
 func (req patchAlertRuleRequest) anyFieldSet() bool {
 	return req.Comparator != nil || req.Threshold != nil || req.ForDurationSecs != nil ||
-		req.Severity != nil || req.Enabled != nil
+		req.Severity != nil || req.Enabled != nil || req.FlapDwellSecs != nil
 }
 
 // listAlertRules returns a page of the caller's alert rules.
@@ -142,6 +154,9 @@ func (s *Server) createAlertRule(w http.ResponseWriter, r *http.Request) {
 	if req.Enabled != nil {
 		rule.Enabled = *req.Enabled
 	}
+	if req.FlapDwellSecs != nil {
+		rule.FlapDwellSeconds = *req.FlapDwellSecs
+	}
 
 	created, err := s.alertRules.Create(r.Context(), rule)
 	if errors.Is(err, domain.ErrNotFound) {
@@ -193,11 +208,14 @@ func (s *Server) patchAlertRule(w http.ResponseWriter, r *http.Request) {
 	}
 	if !req.anyFieldSet() {
 		s.mapError(w, r, domain.NewValidationError("body",
-			"supply at least one of comparator, threshold, for_duration_seconds, severity or enabled"))
+			"supply at least one of comparator, threshold, for_duration_seconds, severity, enabled or flap_dwell_seconds"))
 		return
 	}
 
-	patch := domain.AlertRulePatch{Threshold: req.Threshold, ForDuration: req.ForDurationSecs, Enabled: req.Enabled}
+	patch := domain.AlertRulePatch{
+		Threshold: req.Threshold, ForDuration: req.ForDurationSecs, Enabled: req.Enabled,
+		FlapDwellSeconds: req.FlapDwellSecs,
+	}
 	if req.Comparator != nil {
 		c := domain.AlertComparator(*req.Comparator)
 		patch.Comparator = &c

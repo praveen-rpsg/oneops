@@ -9,6 +9,13 @@
 // package (docs/PLATFORM-BUILD-PLAN.md §4, Vol II §5.3): a firing is a
 // decision this package makes each tick, not a row it stores. What IS stored
 // is the rule (config) and the Notification a transition produces.
+//
+// A candidate transition must additionally hold continuously for the rule's
+// own FlapDwellSeconds before it is committed (E3.2's de-flap hysteresis,
+// ADR-ALERTING-001) — see Evaluator.dwellSatisfied's doc comment. This too is
+// a property of how a firing is derived, not a new stored/reified kind of
+// thing: the in-flight candidate it tracks (domain.AlertRule.PendingState/
+// PendingSince) is bookkeeping on the same config row, not a second entity.
 package alerting
 
 import (
@@ -38,10 +45,22 @@ type Store interface {
 	// firing state clobbered. currentIncidentID is written verbatim (nil
 	// clears the link, a non-nil value sets it) in the SAME statement as the
 	// state transition, not a second write — see Evaluator.correlate's doc
-	// comment for why the two travel together. Returns
+	// comment for why the two travel together. pending_state/pending_since
+	// (E3.2) are cleared in the same statement too: a committed transition
+	// supersedes whatever candidate the dwell was timing. Returns
 	// domain.ErrVersionMismatch on a stale rowVersion, domain.ErrNotFound if
 	// the rule no longer exists (deleted mid-tick).
 	RecordTransition(ctx context.Context, ruleID string, rowVersion int64, state domain.AlertRuleState, at time.Time, currentIncidentID *string) (*domain.AlertRule, error)
+	// RecordPending CAS-updates pending_state/pending_since only, fenced on
+	// rowVersion exactly like RecordTransition — E3.2's de-flap dwell
+	// bookkeeping (Evaluator.dwellSatisfied's doc comment). pendingState ==
+	// nil (with pendingSince also nil) clears both: the metric reverted to
+	// LastState before its own dwell completed. Persisting this rather than
+	// holding it only in the evaluator's memory is what lets the dwell clock
+	// survive a process restart or leader failover — the next tick, by this
+	// leader or a new one, re-reads it off the row. Returns the same errors
+	// as RecordTransition for the same reasons.
+	RecordPending(ctx context.Context, ruleID string, rowVersion int64, pendingState *domain.AlertRuleState, pendingSince *time.Time) (*domain.AlertRule, error)
 }
 
 // IncidentCorrelator is E4.1's create-or-link port: wires an alert rule's

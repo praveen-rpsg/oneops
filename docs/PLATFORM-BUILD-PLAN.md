@@ -165,7 +165,7 @@ Signals about assets: metrics, logs, traces, synthetics. The scale extreme.
 
 ### E3 — Alerting (derived) + suppression  `[~]`
 - [x] E3.1 Alert **rules** (threshold first; rate-of-change/absence/anomaly later) over telemetry + leader-gated evaluator that fires on transition → Notification. `AlertRule` is config; a firing is DERIVED (no reified `Alert` type — §4). Cross-tenant telemetry isolation enforced by an explicit tenant_id predicate (`TelemetryRepository.QueryRangeForTenant`), mutation-verified.
-- [ ] E3.2 Dedup / flap suppression / severity routing (beyond E3.1's transition-only). Read-side privileged-SELECT arch guard follow-up now tracked under E4.1-GUARD below (ADR-TENANCY-012).
+- [x] E3.2 Flap suppression: a candidate transition must hold continuously for the rule's own `flap_dwell_seconds` (default 60s, rule-level config, patchable) before it is committed/notified — hysteresis DWELL, not a blind cooldown (ADR-ALERTING-001). Oscillation collapses to at most one eventual transition; a genuinely sustained change still transitions promptly. Severity is unaffected — still `AlertRule.Severity`, attached at commit exactly as E3.1/E4.1 already do. `pending_state`/`pending_since` (evaluator-only bookkeeping, not a new entity, not in the HTTP contract) persist the in-flight candidate on the SAME `alert_rule` row so the dwell clock survives a restart/leader failover; any admin edit clears it. Mutation-verified (short-circuiting the dwell check fails 3/4 new tests).
 - [ ] E3.3 Maintenance windows / blackout; dependency-aware suppression (suppress downstream when a root CI is down — uses the CMDB graph)
 - **Edge cases:** alert storms, self-referential suppression, rule changes mid-fire, per-tenant rule isolation.
 
