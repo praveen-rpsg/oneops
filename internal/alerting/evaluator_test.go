@@ -13,8 +13,15 @@ import (
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// newTestEvaluator builds an Evaluator with no IncidentCorrelator wired
+// (E4.1 correlation is skipped entirely) — the right default for every test
+// in this file that predates E4.1 and is not itself testing correlation.
 func newTestEvaluator(store Store, tel TelemetryReader, notifier Notifier, now time.Time) *Evaluator {
-	e := NewEvaluator(store, tel, notifier, NopMetrics{}, quiet(), Config{Concurrency: 4})
+	return newTestEvaluatorWithCorrelator(store, tel, notifier, nil, now)
+}
+
+func newTestEvaluatorWithCorrelator(store Store, tel TelemetryReader, notifier Notifier, correlator IncidentCorrelator, now time.Time) *Evaluator {
+	e := NewEvaluator(store, tel, notifier, correlator, NopMetrics{}, quiet(), Config{Concurrency: 4})
 	e.now = func() time.Time { return now }
 	return e
 }
@@ -287,7 +294,7 @@ func TestEvaluator_CrossTenantTelemetryIsolation(t *testing.T) {
 
 	store := newFakeStore(rules...)
 	notifier := &fakeNotifier{}
-	e := NewEvaluator(store, tel, notifier, NopMetrics{}, quiet(), Config{Concurrency: 8})
+	e := NewEvaluator(store, tel, notifier, nil, NopMetrics{}, quiet(), Config{Concurrency: 8})
 	e.now = func() time.Time { return now }
 
 	e.RunOnce(context.Background())

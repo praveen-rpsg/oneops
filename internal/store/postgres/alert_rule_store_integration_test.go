@@ -235,17 +235,20 @@ func TestAlertRuleStore_EnabledRulesAndRecordTransition(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	updated, err := privRules.RecordTransition(context.Background(), enabled.RuleID, enabled.RowVersion, domain.AlertRuleStateFiring, now)
+	updated, err := privRules.RecordTransition(context.Background(), enabled.RuleID, enabled.RowVersion, domain.AlertRuleStateFiring, now, nil)
 	if err != nil {
 		t.Fatalf("record transition: %v", err)
 	}
 	if updated.LastState != domain.AlertRuleStateFiring || !updated.LastTransitionAt.Equal(now) {
 		t.Errorf("record transition = %+v, want firing at %v", updated, now)
 	}
+	if updated.CurrentIncidentID != nil {
+		t.Errorf("current_incident_id = %v, want nil (RecordTransition was given nil)", updated.CurrentIncidentID)
+	}
 
 	// A stale row_version (the pre-transition one) is refused, not silently
 	// re-applied — the evaluator's concurrent-edit defense.
-	if _, err := privRules.RecordTransition(context.Background(), enabled.RuleID, enabled.RowVersion, domain.AlertRuleStateOK, now); err != domain.ErrVersionMismatch {
+	if _, err := privRules.RecordTransition(context.Background(), enabled.RuleID, enabled.RowVersion, domain.AlertRuleStateOK, now, nil); err != domain.ErrVersionMismatch {
 		t.Errorf("stale transition err = %v, want ErrVersionMismatch", err)
 	}
 }

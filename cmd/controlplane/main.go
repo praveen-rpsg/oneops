@@ -556,7 +556,13 @@ func run(logger *slog.Logger) error {
 		collectorCheckStore, postgres.NewTelemetryStore(pool), collectorHTTPClient, collectorMetrics, logger, collector.Config{})
 	workers = append(workers, collectorScheduler.Run)
 
-	// Alert rule administration + the leader-gated evaluator (E3.1):
+	// Incident administration (E5.1, the ITSM core): incident/incident_event
+	// are tenant-owned and under row-level security, exactly like asset
+	// above, so the admin CRUD + lifecycle + timeline API is built from the
+	// tenant-scoped pool.
+	srv.SetIncidents(postgres.NewIncidentStore(appPool))
+
+	// Alert rule administration + the leader-gated evaluator (E3.1, E4.1):
 	// alert_rule is tenant-owned and under row-level security, exactly like
 	// collector_check above, so the admin CRUD API is built from the
 	// tenant-scoped pool. The evaluator, like the telemetry and collector
@@ -569,20 +575,22 @@ func run(logger *slog.Logger) error {
 	// no single tenant bound to it (domain.TelemetryRepository's doc
 	// comment). A firing is DERIVED and delivered through notificationSvc
 	// (built above) — there is no separate alert-delivery path.
+	//
+	// E4.1 wires the same firing into Incident creation/linking: the
+	// correlator is *postgres.IncidentStore built over the PRIVILEGED pool
+	// too — the identical dual-role split AlertRuleStore already has above
+	// (the tenant-scoped instance backs SetIncidents just above; this one
+	// backs alerting.IncidentCorrelator instead) — every correlation
+	// read/write it performs carries an explicit tenant_id predicate
+	// (ADR-TENANCY-012), never assumed from this connection's (absent) RLS.
 	srv.SetAlertRules(postgres.NewAlertRuleStore(appPool))
 	alertRuleStore := postgres.NewAlertRuleStore(pool)
+	incidentCorrelator := postgres.NewIncidentStore(pool)
 	alertingMetrics := alerting.NewPromMetrics(metrics.Registry())
 	alertEvaluator := alerting.NewEvaluator(
-		alertRuleStore, postgres.NewTelemetryStore(pool), notificationSvc, alertingMetrics, logger, alerting.Config{})
+		alertRuleStore, postgres.NewTelemetryStore(pool), notificationSvc, incidentCorrelator,
+		alertingMetrics, logger, alerting.Config{})
 	workers = append(workers, alertEvaluator.Run)
-
-	// Incident administration (E5.1, the ITSM core): incident/incident_event
-	// are tenant-owned and under row-level security, exactly like asset
-	// above, so the admin CRUD + lifecycle + timeline API is built from the
-	// tenant-scoped pool. Unlike collector_check/alert_rule there is no
-	// background worker here — incidents are created manually via this API
-	// until alert-firing -> incident wiring lands (E4).
-	srv.SetIncidents(postgres.NewIncidentStore(appPool))
 
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.

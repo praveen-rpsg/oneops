@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,12 @@ import (
 // MaxAlertRuleForDurationSeconds (24h): widening it would let a breach that
 // only covers a fraction of ForDuration pass as "sustained".
 const evaluationCoverageSlack = 30 * time.Second
+
+// alertingSystemActor identifies this package as the actor on every
+// Incident timeline row it writes (E4.1's correlation create/link/recovery
+// notes) — so an operator reading an incident's timeline can tell a
+// system-derived entry from their own action.
+const alertingSystemActor = "system:alerting"
 
 // Config parameterises the Evaluator.
 type Config struct {
@@ -58,18 +65,29 @@ func (c *Config) withDefaults() {
 // Evaluator is the leader-gated alert-rule evaluator — see the package doc
 // comment.
 type Evaluator struct {
-	store     Store
-	telemetry TelemetryReader
-	notifier  Notifier
-	metrics   Metrics
-	log       *slog.Logger
-	now       func() time.Time
-	cfg       Config
+	store      Store
+	telemetry  TelemetryReader
+	notifier   Notifier
+	correlator IncidentCorrelator
+	metrics    Metrics
+	log        *slog.Logger
+	now        func() time.Time
+	cfg        Config
 }
 
 // NewEvaluator builds the evaluator over the privileged pool's Store and
-// TelemetryReader.
-func NewEvaluator(store Store, telemetry TelemetryReader, notifier Notifier, metrics Metrics, log *slog.Logger, cfg Config) *Evaluator {
+// TelemetryReader. correlator may be nil: E4.1's alert->incident wiring is
+// then skipped entirely (a firing still notifies; it never creates or links
+// an Incident) — the same "optional dependency, narrower behaviour" shape a
+// nil Metrics does not get (Metrics always defaults to NopMetrics) but a
+// deployment that has not yet wired incident management needs, since unlike
+// metrics there is no safe no-op IncidentCorrelator to default to (any
+// stand-in either lies about creating an incident or silently drops the
+// correlation, and this package does not decide which is less wrong).
+func NewEvaluator(
+	store Store, telemetry TelemetryReader, notifier Notifier, correlator IncidentCorrelator,
+	metrics Metrics, log *slog.Logger, cfg Config,
+) *Evaluator {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -78,7 +96,7 @@ func NewEvaluator(store Store, telemetry TelemetryReader, notifier Notifier, met
 	}
 	cfg.withDefaults()
 	return &Evaluator{
-		store: store, telemetry: telemetry, notifier: notifier, metrics: metrics, log: log,
+		store: store, telemetry: telemetry, notifier: notifier, correlator: correlator, metrics: metrics, log: log,
 		now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
 	}
 }
@@ -162,6 +180,15 @@ func (e *Evaluator) RunOnce(ctx context.Context) {
 // duplicate (the same priority ADR-CONCURRENCY-*'s at-least-once delivery
 // choices make elsewhere in this platform; recorded as its own decision in
 // ADR-TENANCY-012 §2).
+//
+// correlate (E4.1) runs after notify and, like it, BEFORE the transition is
+// persisted, for the identical reason: if the process crashes between
+// correlate and RecordTransition, the next tick re-detects the same
+// transition and correlate runs again. That second run is harmless beyond
+// one duplicate timeline note — FindOrCreateOpenAlertIncident's uniqueness
+// constraint (postgres.IncidentStore's doc comment) means it links rather
+// than duplicates an incident it already created — the same "duplicate over
+// silent loss" trade as notify.
 func (e *Evaluator) evaluateRule(ctx context.Context, rule *domain.AlertRule, now time.Time) {
 	e.metrics.IncEvaluated()
 
@@ -187,7 +214,18 @@ func (e *Evaluator) evaluateRule(ctx context.Context, rule *domain.AlertRule, no
 		return // do not persist the transition; retry both next tick
 	}
 
-	if _, err := e.store.RecordTransition(ctx, rule.RuleID, rule.RowVersion, next, now); err != nil {
+	nextIncidentID := rule.CurrentIncidentID
+	if e.correlator != nil {
+		id, err := e.correlate(ctx, rule, next)
+		if err != nil {
+			e.log.Error("alert rule evaluator: correlate incident", "rule_id", rule.RuleID, "err", err)
+			e.metrics.IncErrors()
+			return // do not persist the transition; retry both next tick (see doc comment above)
+		}
+		nextIncidentID = id
+	}
+
+	if _, err := e.store.RecordTransition(ctx, rule.RuleID, rule.RowVersion, next, now, nextIncidentID); err != nil {
 		if errors.Is(err, domain.ErrVersionMismatch) || errors.Is(err, domain.ErrNotFound) {
 			// The rule was edited, disabled or deleted between this tick's read
 			// and this write. Its own next read will reflect that; nothing to
@@ -269,4 +307,81 @@ func (e *Evaluator) notify(ctx context.Context, rule *domain.AlertRule, next dom
 	}
 	_, err = e.notifier.Enqueue(ctx, n)
 	return err
+}
+
+// correlate performs E4.1's alert->incident wiring for one transition and
+// returns the CurrentIncidentID value the caller's RecordTransition should
+// persist. Only called when e.correlator is non-nil — see NewEvaluator's doc
+// comment for what happens when it is not.
+//
+//   - ok->firing: finds the tenant's OPEN, alert-sourced incident already
+//     linked to rule.AssetID and appends a "fired" note to it, or creates one
+//     (Source=alert, Severity mapped from the rule's own, Title naming the
+//     rule/metric/asset) when none exists — see
+//     IncidentCorrelator.FindOrCreateOpenAlertIncident's doc comment for how
+//     "create xor link, never both" is enforced. Returns the linked/created
+//     incident's id.
+//   - firing->ok: appends a "recovered" note to rule.CurrentIncidentID's
+//     incident and returns nil, clearing the link. The incident itself is
+//     left exactly as it is — E4.1 correlates, it does not remediate; an
+//     operator, not this package, decides when the underlying incident is
+//     actually resolved (docs/PLATFORM-BUILD-PLAN.md E4's scope note).
+//     rule.CurrentIncidentID nil (nothing was ever linked, e.g. this rule's
+//     prior firing predates E4.1's own rollout) is a no-op.
+//
+// rule.AssetID == "" — domain.AlertRule.Validate requires a non-empty
+// AssetID today, so this is unreachable — falls back to notify-only
+// (returns rule.CurrentIncidentID unchanged) rather than guessing an asset
+// or failing the whole transition over a defensive branch that cannot
+// currently trigger.
+func (e *Evaluator) correlate(ctx context.Context, rule *domain.AlertRule, next domain.AlertRuleState) (*string, error) {
+	if strings.TrimSpace(rule.AssetID) == "" {
+		return rule.CurrentIncidentID, nil
+	}
+
+	if next == domain.AlertRuleStateOK {
+		if rule.CurrentIncidentID == nil {
+			return nil, nil
+		}
+		note := fmt.Sprintf("alert %s recovered (rule_id=%s, comparator=%s, threshold=%v)",
+			rule.Metric, rule.RuleID, rule.Comparator, rule.Threshold)
+		if err := e.correlator.AppendAlertNote(ctx, rule.TenantID, *rule.CurrentIncidentID, note, alertingSystemActor); err != nil {
+			return nil, fmt.Errorf("append recovery note: %w", err)
+		}
+		return nil, nil
+	}
+
+	title := fmt.Sprintf("[%s] %s %s %v on asset %s", rule.Severity, rule.Metric, rule.Comparator, rule.Threshold, rule.AssetID)
+	body := fmt.Sprintf("rule_id=%s metric=%s comparator=%s threshold=%v severity=%s",
+		rule.RuleID, rule.Metric, rule.Comparator, rule.Threshold, rule.Severity)
+	want, err := domain.NewAlertIncident(rule.TenantID, title, body, alertSeverityToIncidentSeverity(rule.Severity), rule.AssetID)
+	if err != nil {
+		return nil, fmt.Errorf("build alert incident: %w", err)
+	}
+	note := fmt.Sprintf("alert %s fired (rule_id=%s, comparator=%s, threshold=%v)",
+		rule.Metric, rule.RuleID, rule.Comparator, rule.Threshold)
+	id, err := e.correlator.FindOrCreateOpenAlertIncident(ctx, want, alertingSystemActor, note)
+	if err != nil {
+		return nil, fmt.Errorf("find-or-create alert incident: %w", err)
+	}
+	return &id, nil
+}
+
+// alertSeverityToIncidentSeverity maps AlertSeverity's three tiers onto
+// IncidentSeverity's four for a newly CREATED alert-sourced incident (E4.1;
+// an incident this correlation only LINKS to keeps whatever severity it was
+// filed or last set to). critical maps directly; warning — worth acting on
+// but not the top tier — maps to high rather than medium, so it is not
+// mistaken for a low-urgency, manually triaged incident; info maps to low.
+// medium is reachable only by an operator's own choice, never by this
+// mapping.
+func alertSeverityToIncidentSeverity(s domain.AlertSeverity) domain.IncidentSeverity {
+	switch s {
+	case domain.AlertSeverityCritical:
+		return domain.IncidentSeverityCritical
+	case domain.AlertSeverityWarning:
+		return domain.IncidentSeverityHigh
+	default:
+		return domain.IncidentSeverityLow
+	}
 }

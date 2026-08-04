@@ -50,7 +50,7 @@ func (f *fakeStore) EnabledRules(_ context.Context, limit int, after string) ([]
 }
 
 func (f *fakeStore) RecordTransition(
-	_ context.Context, ruleID string, rowVersion int64, state domain.AlertRuleState, at time.Time,
+	_ context.Context, ruleID string, rowVersion int64, state domain.AlertRuleState, at time.Time, currentIncidentID *string,
 ) (*domain.AlertRule, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -63,6 +63,7 @@ func (f *fakeStore) RecordTransition(
 	}
 	r.LastState = state
 	r.LastTransitionAt = at
+	r.CurrentIncidentID = currentIncidentID
 	r.RowVersion++
 	cp := *r
 	return &cp, nil
@@ -154,6 +155,109 @@ func (f *fakeNotifier) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.sent)
+}
+
+// correlationCall records one IncidentCorrelator invocation, so a test can
+// assert what tenant/incident/note an evaluation drove — the correlation
+// equivalent of telemetryCall.
+type correlationCall struct {
+	kind                 string // "create", "link", "note"
+	tenantID, incidentID string
+	note, actor          string
+}
+
+// fakeCorrelator is an in-memory alerting.IncidentCorrelator. It replicates
+// the two invariants the real *postgres.IncidentStore enforces at the
+// database, so unit tests can prove the evaluator's own orchestration relies
+// on them correctly rather than merely trusting a permissive fake:
+//
+//   - FindOrCreateOpenAlertIncident only ever matches an existing incident
+//     that is (a) the same tenant, (b) the same asset, (c) Source ==
+//     IncidentSourceAlert, and (d) not resolved/closed — exactly
+//     ux_incident_open_alert_per_asset's predicate — so a manually-filed
+//     incident on the same asset is never linked.
+//   - AppendAlertNote refuses (domain.ErrNotFound) unless the incident it is
+//     asked to touch actually belongs to the tenantID it was given — the
+//     fake's own tenant-isolation check, mirroring the real store's explicit
+//     `tenant_id = $2` predicate.
+type fakeCorrelator struct {
+	mu        sync.Mutex
+	incidents map[string]*domain.Incident
+	calls     []correlationCall
+	failNext  error
+}
+
+func newFakeCorrelator(seed ...*domain.Incident) *fakeCorrelator {
+	f := &fakeCorrelator{incidents: map[string]*domain.Incident{}}
+	for _, inc := range seed {
+		cp := *inc
+		f.incidents[inc.IncidentID] = &cp
+	}
+	return f
+}
+
+func (f *fakeCorrelator) FindOrCreateOpenAlertIncident(
+	_ context.Context, want *domain.Incident, actor, noteOnLink string,
+) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failNext != nil {
+		err := f.failNext
+		f.failNext = nil
+		return "", err
+	}
+	for _, inc := range f.incidents {
+		if inc.TenantID != want.TenantID || inc.Source != domain.IncidentSourceAlert {
+			continue
+		}
+		if inc.AssetID == nil || want.AssetID == nil || *inc.AssetID != *want.AssetID {
+			continue
+		}
+		if inc.Status == domain.IncidentResolved || inc.Status == domain.IncidentClosed {
+			continue
+		}
+		f.calls = append(f.calls, correlationCall{kind: "link", tenantID: want.TenantID, incidentID: inc.IncidentID, note: noteOnLink, actor: actor})
+		return inc.IncidentID, nil
+	}
+	cp := *want
+	f.incidents[cp.IncidentID] = &cp
+	f.calls = append(f.calls, correlationCall{kind: "create", tenantID: cp.TenantID, incidentID: cp.IncidentID, actor: actor})
+	return cp.IncidentID, nil
+}
+
+func (f *fakeCorrelator) AppendAlertNote(_ context.Context, tenantID, incidentID, note, actor string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failNext != nil {
+		err := f.failNext
+		f.failNext = nil
+		return err
+	}
+	inc, ok := f.incidents[incidentID]
+	if !ok || inc.TenantID != tenantID {
+		return domain.ErrNotFound
+	}
+	f.calls = append(f.calls, correlationCall{kind: "note", tenantID: tenantID, incidentID: incidentID, note: note, actor: actor})
+	return nil
+}
+
+func (f *fakeCorrelator) get(incidentID string) *domain.Incident {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := *f.incidents[incidentID]
+	return &cp
+}
+
+func (f *fakeCorrelator) callsOfKind(kind string) []correlationCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []correlationCall
+	for _, c := range f.calls {
+		if c.kind == kind {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func mkRule(t *testing.T, tenantID, assetID, metric string, cmp domain.AlertComparator, threshold float64, forDurationSeconds int) *domain.AlertRule {

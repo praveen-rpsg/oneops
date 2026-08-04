@@ -125,9 +125,18 @@ type AlertRule struct {
 	// with a zero LastTransitionAt ("never evaluated").
 	LastState        AlertRuleState
 	LastTransitionAt time.Time
-	RowVersion       int64
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// CurrentIncidentID is the open, alert-sourced Incident this rule's
+	// firing is currently linked to, or nil when the rule is ok (E4.1). Like
+	// LastState/LastTransitionAt, it is set only by the evaluator's
+	// background write path (alerting.Store.RecordTransition), never through
+	// the row_version-guarded Update path — see AlertRulePatch's doc
+	// comment. Cleared (set back to nil) on the matching firing->ok
+	// transition; the linked Incident itself is never auto-resolved or
+	// auto-closed by that clearing (E4.1's scope: correlate, don't remediate).
+	CurrentIncidentID *string
+	RowVersion        int64
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // Validate enforces the invariants the database also enforces, so a bad rule
@@ -200,8 +209,9 @@ func NewAlertRule(
 // nil pointer leaves that field unchanged. AssetID and Metric are
 // deliberately absent — like CollectorCheckPatch's AssetID — what a rule
 // watches is fixed at creation, not a field to repoint later: delete and
-// recreate instead. LastState/LastTransitionAt are likewise absent: only the
-// evaluator's background counterpart sets them — see AlertRule's doc comment.
+// recreate instead. LastState/LastTransitionAt/CurrentIncidentID are likewise
+// absent: only the evaluator's background counterpart sets them — see
+// AlertRule's doc comment.
 type AlertRulePatch struct {
 	Comparator  *AlertComparator
 	Threshold   *float64
