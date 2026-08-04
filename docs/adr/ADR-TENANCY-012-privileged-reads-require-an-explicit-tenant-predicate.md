@@ -107,7 +107,18 @@ ADR does not prove every future caller will *supply the right value* for it —
 that is exactly the same residual ADR-TENANCY-009 names for a mutation's
 owning predicate, restated for a read.
 
-**Follow-up — not built here, tracked.** ADR-TENANCY-009's mutation guard
+**Follow-up — NOW BUILT (E4.1-GUARD, `arch.TestPrivilegedReads_AreScopedToATenant`).**
+The read-side guard described below has been implemented: it derives the
+privileged store types from the composition root (`cmd/controlplane/main.go`,
+like `TestServerWiringUsesTenantScopedPool`) and fails the build on a privileged
+`SELECT` from a `TenantOwnedTables` entry filtered by `asset_id` (the shared,
+non-globally-unique read key) without an explicit `tenant_id` predicate. It is
+mutation-proven to bite (incl. the concatenated-column house style) and carries
+canary asserts against vacuity + a justified-exemption list. Honest bounds:
+type-granular (not per-call-site) and scoped to the `asset_id` read class — see
+the guard's own doc comment. The paragraph below records the original obligation.
+
+**Original obligation (now discharged by the above).** ADR-TENANCY-009's mutation guard
 (`arch.TestPrivilegedMutations_AreScopedToAnOwner`) derives its subject set
 from `postgres.TenantOwnedTables` and sweeps every privileged `UPDATE`/
 `DELETE`. No equivalent sweep exists for privileged **reads** — a future
