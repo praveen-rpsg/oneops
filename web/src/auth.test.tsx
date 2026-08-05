@@ -1,6 +1,6 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
+import { renderApp } from './test-render';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import App from './App';
 import { getSubject, getToken, setToken } from './auth';
 import { listArtifacts } from './api';
 
@@ -30,7 +30,7 @@ afterEach(() => vi.unstubAllGlobals());
 describe('authentication', () => {
   it('goes straight to the estate when the deployment has auth disabled', async () => {
     vi.stubGlobal('fetch', mockFetch({ auth_enabled: false }));
-    render(<App />);
+    renderApp();
     expect(await screen.findByText('No artifacts yet')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument();
   });
@@ -40,14 +40,14 @@ describe('authentication', () => {
       'fetch',
       mockFetch({ auth_enabled: true, issuer: 'https://idp.example', client_id: 'oneops' }),
     );
-    render(<App />);
+    renderApp();
     expect(await screen.findByRole('button', { name: 'Sign in' })).toBeInTheDocument();
   });
 
   it('does not request data before a session exists', async () => {
     const f = mockFetch({ auth_enabled: true, issuer: 'https://idp.example', client_id: 'x' });
     vi.stubGlobal('fetch', f);
-    render(<App />);
+    renderApp();
 
     await screen.findByRole('button', { name: 'Sign in' });
     const dataCalls = f.mock.calls.map(String).filter((u) => u.includes('/v1/'));
@@ -56,7 +56,7 @@ describe('authentication', () => {
 
   it('reports a deployment with no identity provider configured', async () => {
     vi.stubGlobal('fetch', mockFetch({ auth_enabled: true })); // issuer/client_id absent
-    render(<App />);
+    renderApp();
 
     const button = await screen.findByRole('button', { name: 'Sign in' });
     button.click();
@@ -90,8 +90,10 @@ describe('authentication', () => {
     setToken(jwt({ sub: 'abc-123', preferred_username: 'priya' }));
     expect(getSubject()).toBe('priya');
 
-    render(<App />);
-    await waitFor(() => expect(screen.getByText('priya')).toBeInTheDocument());
+    renderApp();
+    // TopNavigation renders each utility more than once (responsive breakpoint
+    // variants); assert presence, not a DOM-node count that's an implementation detail.
+    await waitFor(() => expect(screen.getAllByText('priya').length).toBeGreaterThan(0));
     expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument();
   });
 
@@ -104,7 +106,7 @@ describe('authentication', () => {
       mockFetch({ auth_enabled: true, issuer: 'https://idp.example', client_id: 'x' }),
     );
 
-    render(<App />);
+    renderApp();
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/could not be verified/i);
   });

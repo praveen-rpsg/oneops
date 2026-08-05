@@ -1,4 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
+import Box from '@cloudscape-design/components/box';
+import Button from '@cloudscape-design/components/button';
+import Header from '@cloudscape-design/components/header';
+import SpaceBetween from '@cloudscape-design/components/space-between';
+import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import { ApiError } from '../api';
 import type { ProblemDetail } from '../api';
 import { getChainSummary, getTimeline } from '../audit';
@@ -42,80 +47,97 @@ function Entry({ entry }: { entry: AuditEntry }) {
   const moved = changes(entry.previousState, entry.state);
 
   return (
-    <li className="event">
-      <div className="event-head">
-        <span className="op-badge">{humanise(entry.operation)}</span>
-        <span className="event-actor">{entry.actor}</span>
-        <time dateTime={entry.occurredAt} title={t.absolute} className="event-when">
-          {t.relative}
-        </time>
-        <span className="event-seq" title="Position in the immutable audit chain">
-          #{entry.seq}
-        </span>
-      </div>
-
-      {entry.removed ? (
-        <p className="event-change">Object removed.</p>
-      ) : moved.length > 0 ? (
-        <div className="event-change">
-          {moved.map((c) => (
-            <div key={c.dim}>
-              <span className="dim-name">{c.dim}</span>{' '}
-              {c.from ? (
-                <>
-                  <span className="from">{c.from}</span> <span aria-hidden="true">→</span>{' '}
-                  <span className="sr-only">changed to</span>
-                  <span className="to">{c.to}</span>
-                </>
-              ) : (
-                <span className="to">{c.to}</span>
-              )}
-            </div>
-          ))}
+    <li style={{ padding: '12px 0', borderBottom: '1px solid var(--awsui-color-border-divider-default, #e2e5ea)' }}>
+      <SpaceBetween size="xs">
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
+          <Box variant="strong">{humanise(entry.operation)}</Box>
+          <Box>{entry.actor}</Box>
+          <time dateTime={entry.occurredAt} title={t.absolute}>
+            <Box color="text-body-secondary" fontSize="body-s" display="inline">
+              {t.relative}
+            </Box>
+          </time>
+          <Box
+            color="text-body-secondary"
+            fontSize="body-s"
+            float="right"
+            nativeAttributes={{ title: 'Position in the immutable audit chain' }}
+          >
+            #{entry.seq}
+          </Box>
         </div>
-      ) : (
-        <p className="event-change muted">No dimension changed.</p>
-      )}
 
-      <button
-        type="button"
-        className="link event-more"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        {open ? 'Hide' : 'Show'} chain record
-      </button>
+        {entry.removed ? (
+          <Box>Object removed.</Box>
+        ) : moved.length > 0 ? (
+          <SpaceBetween size="xxs">
+            {moved.map((c) => (
+              <div key={c.dim}>
+                <Box color="text-body-secondary" display="inline">
+                  {c.dim}
+                </Box>{' '}
+                {c.from ? (
+                  <>
+                    <Box display="inline" color="text-body-secondary">
+                      <s>{c.from}</s>
+                    </Box>{' '}
+                    <span aria-hidden="true">→</span>{' '}
+                    <span className="visually-hidden">changed to</span>
+                    <Box display="inline" fontWeight="bold">
+                      {c.to}
+                    </Box>
+                  </>
+                ) : (
+                  <Box display="inline" fontWeight="bold">
+                    {c.to}
+                  </Box>
+                )}
+              </div>
+            ))}
+          </SpaceBetween>
+        ) : (
+          <Box color="text-body-secondary">No dimension changed.</Box>
+        )}
 
-      {open && (
-        <dl className="event-detail">
-          <div>
-            <dt>Occurred</dt>
-            <dd>{t.absolute}</dd>
-          </div>
-          <div>
-            <dt>Operation id</dt>
-            <dd className="hash">{entry.operationId}</dd>
-          </div>
-          {entry.eventId && (
+        <Button
+          variant="inline-link"
+          ariaExpanded={open}
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open ? 'Hide' : 'Show'} chain record
+        </Button>
+
+        {open && (
+          <dl style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '8px 16px', margin: 0 }}>
             <div>
-              <dt>Event id</dt>
-              <dd className="hash">{entry.eventId}</dd>
+              <dt><Box color="text-body-secondary" fontSize="body-s">Occurred</Box></dt>
+              <dd style={{ margin: 0 }}>{t.absolute}</dd>
             </div>
-          )}
-          {entry.thisHash && (
             <div>
-              <dt>This hash</dt>
-              <dd className="hash">{entry.thisHash}</dd>
+              <dt><Box color="text-body-secondary" fontSize="body-s">Operation id</Box></dt>
+              <dd style={{ margin: 0, fontFamily: 'monospace', wordBreak: 'break-all' }}>{entry.operationId}</dd>
             </div>
-          )}
-          {entry.prevHash && (
-            <div>
-              <dt>Previous hash</dt>
-              <dd className="hash">{entry.prevHash}</dd>
-            </div>
-          )}
-        </dl>
-      )}
+            {entry.eventId && (
+              <div>
+                <dt><Box color="text-body-secondary" fontSize="body-s">Event id</Box></dt>
+                <dd style={{ margin: 0, fontFamily: 'monospace', wordBreak: 'break-all' }}>{entry.eventId}</dd>
+              </div>
+            )}
+            {entry.thisHash && (
+              <div>
+                <dt><Box color="text-body-secondary" fontSize="body-s">This hash</Box></dt>
+                <dd style={{ margin: 0, fontFamily: 'monospace', wordBreak: 'break-all' }}>{entry.thisHash}</dd>
+              </div>
+            )}
+            {entry.prevHash && (
+              <div>
+                <dt><Box color="text-body-secondary" fontSize="body-s">Previous hash</Box></dt>
+                <dd style={{ margin: 0, fontFamily: 'monospace', wordBreak: 'break-all' }}>{entry.prevHash}</dd>
+              </div>
+            )}
+          </dl>
+        )}
+      </SpaceBetween>
     </li>
   );
 }
@@ -172,56 +194,56 @@ export function AuditTimeline({ cfgId, refreshToken }: { cfgId: string; refreshT
   }, [cfgId, cursor]);
 
   return (
-    <section className="panel">
-      <h3>
+    <SpaceBetween size="s">
+      <Header
+        variant="h3"
+        description="Every governance operation, append-only and hash-chained. Newest first."
+        info={
+          chain ? (
+            <StatusIndicator
+              type={chain.verified ? 'success' : 'warning'}
+              nativeAttributes={{
+                title: chain.verified
+                  ? `Hash chain verified across ${chain.checked} event(s).`
+                  : chain.break_reason ?? 'Chain integrity could not be confirmed.',
+              }}
+            >
+              {chain.verified ? '✓ Chain verified' : '⚠ Chain unverified'}
+            </StatusIndicator>
+          ) : undefined
+        }
+      >
         Audit record
-        {chain && (
-          <span
-            className={chain.verified ? 'chain-ok' : 'chain-broken'}
-            title={
-              chain.verified
-                ? `Hash chain verified across ${chain.checked} event(s).`
-                : chain.break_reason ?? 'Chain integrity could not be confirmed.'
-            }
-          >
-            {chain.verified ? '✓ Chain verified' : '⚠ Chain unverified'}
-          </span>
-        )}
-      </h3>
-      <p className="panel-hint">
-        Every governance operation, append-only and hash-chained. Newest first.
-      </p>
+      </Header>
 
       {problem && <ErrorState problem={problem} onRetry={() => setRetries((n) => n + 1)} />}
 
       {!problem && loading && entries.length === 0 && (
-        <p className="muted" role="status" aria-busy="true">
-          Loading the audit record…
-        </p>
+        <Box color="text-body-secondary">Loading the audit record…</Box>
       )}
 
       {!problem && !loading && entries.length === 0 && (
-        <p className="muted">
+        <Box color="text-body-secondary">
           No governance operation has been performed on this artifact yet.
-        </p>
+        </Box>
       )}
 
       {entries.length > 0 && (
         <>
-          <ol className="events">
+          <ol style={{ listStyle: 'none', margin: 0, padding: 0 }}>
             {entries.map((e) => (
               <Entry key={`${e.seq}-${e.operationId}`} entry={e} />
             ))}
           </ol>
           {cursor && (
-            <div className="more">
-              <button type="button" className="btn" onClick={loadMore} disabled={loading}>
-                {loading ? 'Loading…' : 'Load older'}
-              </button>
-            </div>
+            <Box textAlign="center">
+              <Button onClick={loadMore} loading={loading}>
+                Load older
+              </Button>
+            </Box>
           )}
         </>
       )}
-    </section>
+    </SpaceBetween>
   );
 }

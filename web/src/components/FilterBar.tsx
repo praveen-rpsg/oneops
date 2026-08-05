@@ -1,7 +1,24 @@
+import Button from '@cloudscape-design/components/button';
+import FormField from '@cloudscape-design/components/form-field';
+import Input from '@cloudscape-design/components/input';
+import Select from '@cloudscape-design/components/select';
+import type { SelectProps } from '@cloudscape-design/components/select';
+import SpaceBetween from '@cloudscape-design/components/space-between';
+import Box from '@cloudscape-design/components/box';
 import { AUTHORITIES, LIFECYCLES, ROLES } from '../api';
 import type { EstateFilter } from '../api';
 
 const humanise = (v: string) => v.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+
+const ANY: SelectProps.Option = { label: 'Any', value: '' };
+const toOptions = (values: readonly string[]): SelectProps.Option[] => [
+  ANY,
+  ...values.map((v) => ({ label: humanise(v), value: v })),
+];
+
+const ROLE_OPTIONS = toOptions(ROLES);
+const LIFECYCLE_OPTIONS = toOptions(LIFECYCLES);
+const AUTHORITY_OPTIONS = toOptions(AUTHORITIES);
 
 interface Props {
   filter: EstateFilter;
@@ -13,83 +30,83 @@ interface Props {
 
 export function FilterBar({ filter, onChange, onClear, resultCount, loading }: Props) {
   const active = Boolean(filter.role || filter.lifecycle || filter.authority || filter.q);
+  const selected = (options: SelectProps.Option[], value?: string) =>
+    options.find((o) => o.value === (value ?? '')) ?? ANY;
 
   return (
-    <form className="filterbar" role="search" onSubmit={(e) => e.preventDefault()}>
-      <div className="field field-grow">
-        <label htmlFor="f-q">Search</label>
-        <input
-          id="f-q"
-          type="search"
-          placeholder="Artifact name or metadata"
-          value={filter.q ?? ''}
-          onChange={(e) => onChange({ ...filter, q: e.target.value, cursor: undefined })}
-        />
-      </div>
+    <form role="search" onSubmit={(e) => e.preventDefault()}>
+      <SpaceBetween size="m">
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <div style={{ flex: '1 1 260px' }}>
+            <FormField label="Search">
+              <Input
+                type="search"
+                placeholder="Artifact name or metadata"
+                value={filter.q ?? ''}
+                onChange={({ detail }) => onChange({ ...filter, q: detail.value, cursor: undefined })}
+              />
+            </FormField>
+          </div>
 
-      <div className="field">
-        <label htmlFor="f-authority">Authority</label>
-        <select
-          id="f-authority"
-          value={filter.authority ?? ''}
-          onChange={(e) =>
-            onChange({ ...filter, authority: e.target.value as never, cursor: undefined })
-          }
-        >
-          <option value="">Any</option>
-          {AUTHORITIES.map((a) => (
-            <option key={a} value={a}>
-              {humanise(a)}
-            </option>
-          ))}
-        </select>
-      </div>
+          <div style={{ minWidth: 180 }}>
+            <FormField label="Authority">
+              <Select
+                selectedOption={selected(AUTHORITY_OPTIONS, filter.authority)}
+                options={AUTHORITY_OPTIONS}
+                onChange={({ detail }) =>
+                  onChange({
+                    ...filter,
+                    authority: (detail.selectedOption.value || '') as EstateFilter['authority'],
+                    cursor: undefined,
+                  })
+                }
+              />
+            </FormField>
+          </div>
 
-      <div className="field">
-        <label htmlFor="f-role">Role</label>
-        <select
-          id="f-role"
-          value={filter.role ?? ''}
-          onChange={(e) =>
-            onChange({ ...filter, role: e.target.value as never, cursor: undefined })
-          }
-        >
-          <option value="">Any</option>
-          {ROLES.map((r) => (
-            <option key={r} value={r}>
-              {humanise(r)}
-            </option>
-          ))}
-        </select>
-      </div>
+          <div style={{ minWidth: 180 }}>
+            <FormField label="Role">
+              <Select
+                selectedOption={selected(ROLE_OPTIONS, filter.role)}
+                options={ROLE_OPTIONS}
+                onChange={({ detail }) =>
+                  onChange({
+                    ...filter,
+                    role: (detail.selectedOption.value || '') as EstateFilter['role'],
+                    cursor: undefined,
+                  })
+                }
+              />
+            </FormField>
+          </div>
 
-      <div className="field">
-        <label htmlFor="f-lifecycle">Lifecycle</label>
-        <select
-          id="f-lifecycle"
-          value={filter.lifecycle ?? ''}
-          onChange={(e) =>
-            onChange({ ...filter, lifecycle: e.target.value as never, cursor: undefined })
-          }
-        >
-          <option value="">Any</option>
-          {LIFECYCLES.map((l) => (
-            <option key={l} value={l}>
-              {humanise(l)}
-            </option>
-          ))}
-        </select>
-      </div>
+          <div style={{ minWidth: 180 }}>
+            <FormField label="Lifecycle">
+              <Select
+                selectedOption={selected(LIFECYCLE_OPTIONS, filter.lifecycle)}
+                options={LIFECYCLE_OPTIONS}
+                onChange={({ detail }) =>
+                  onChange({
+                    ...filter,
+                    lifecycle: (detail.selectedOption.value || '') as EstateFilter['lifecycle'],
+                    cursor: undefined,
+                  })
+                }
+              />
+            </FormField>
+          </div>
 
-      {active && (
-        <button type="button" className="btn btn-quiet" onClick={onClear}>
-          Clear
-        </button>
-      )}
+          {active && (
+            <Button variant="link" onClick={onClear}>
+              Clear
+            </Button>
+          )}
+        </div>
 
-      <p className="result-count" aria-live="polite">
-        {loading ? 'Loading…' : `${resultCount} shown`}
-      </p>
+        <Box float="right" color="text-body-secondary" fontSize="body-s">
+          <span aria-live="polite">{loading ? 'Loading…' : `${resultCount} shown`}</span>
+        </Box>
+      </SpaceBetween>
     </form>
   );
 }

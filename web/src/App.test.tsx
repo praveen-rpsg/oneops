@@ -1,6 +1,6 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
+import { renderApp } from './test-render';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import App from './App';
 import type { ConfigObject } from './api';
 
 const artifact = (over: Partial<ConfigObject> = {}): ConfigObject => ({
@@ -42,7 +42,7 @@ afterEach(() => vi.unstubAllGlobals());
 describe('estate list', () => {
   it('renders artifacts with their authority', async () => {
     vi.stubGlobal('fetch', mockJSON({ items: [artifact()] }));
-    render(<App />);
+    renderApp();
 
     expect(await screen.findByText('OneOps-Constitution-Volume-I.md')).toBeInTheDocument();
 
@@ -54,12 +54,12 @@ describe('estate list', () => {
 
   it('distinguishes an empty estate from filters matching nothing', async () => {
     vi.stubGlobal('fetch', mockJSON({ items: [] }));
-    const { unmount } = render(<App />);
+    const { unmount } = renderApp();
     expect(await screen.findByText('No artifacts yet')).toBeInTheDocument();
     unmount();
 
     window.history.replaceState(null, '', '/?role=audit');
-    render(<App />);
+    renderApp();
     expect(await screen.findByText('No artifacts match these filters')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Clear filters' })).toBeInTheDocument();
   });
@@ -78,7 +78,7 @@ describe('estate list', () => {
         422,
       ),
     );
-    render(<App />);
+    renderApp();
 
     expect(await screen.findByRole('alert')).toBeInTheDocument();
     expect(screen.getByText(/at inception must be draft or in_progress/)).toBeInTheDocument();
@@ -89,7 +89,7 @@ describe('estate list', () => {
     const fetchMock = mockJSON({ items: [artifact()] });
     vi.stubGlobal('fetch', fetchMock);
     window.history.replaceState(null, '', '/?authority=active&role=constitution');
-    render(<App />);
+    renderApp();
 
     await waitFor(() => expect(artifactsCall(fetchMock)).toContain('/v1/artifacts'));
     const url = artifactsCall(fetchMock);
@@ -100,7 +100,7 @@ describe('estate list', () => {
 
   it('offers Load more only when the API returns a cursor', async () => {
     vi.stubGlobal('fetch', mockJSON({ items: [artifact()], next_cursor: 'c2' }));
-    render(<App />);
+    renderApp();
     expect(await screen.findByRole('button', { name: 'Load more' })).toBeInTheDocument();
   });
 });
