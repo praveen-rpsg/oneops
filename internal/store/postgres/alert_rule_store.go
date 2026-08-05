@@ -19,7 +19,8 @@ const (
 )
 
 const alertRuleCols = `rule_id, tenant_id, asset_id, metric, comparator, threshold, for_duration_seconds,
-	severity, enabled, last_state, last_transition_at, current_incident_id, row_version, created_at, updated_at`
+	severity, enabled, last_state, last_transition_at, flap_dwell_seconds, pending_state, pending_since,
+	current_incident_id, row_version, created_at, updated_at`
 
 // AlertRuleStore administers alert_rule: the admin CRUD API's tenant-scoped
 // reads/writes (domain.AlertRuleRepository) AND, when built over the
@@ -63,10 +64,13 @@ func scanAlertRule(sc scanner) (*domain.AlertRule, error) {
 		severity         string
 		lastState        string
 		lastTransitionAt *time.Time
+		pendingState     *string
+		pendingSince     *time.Time
 	)
 	if err := sc.Scan(
 		&r.RuleID, &r.TenantID, &r.AssetID, &r.Metric, &comparator, &r.Threshold, &r.ForDuration,
-		&severity, &r.Enabled, &lastState, &lastTransitionAt, &r.CurrentIncidentID, &r.RowVersion, &r.CreatedAt, &r.UpdatedAt,
+		&severity, &r.Enabled, &lastState, &lastTransitionAt, &r.FlapDwellSeconds, &pendingState, &pendingSince,
+		&r.CurrentIncidentID, &r.RowVersion, &r.CreatedAt, &r.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -75,6 +79,12 @@ func scanAlertRule(sc scanner) (*domain.AlertRule, error) {
 	r.LastState = domain.AlertRuleState(lastState)
 	if lastTransitionAt != nil {
 		r.LastTransitionAt = *lastTransitionAt
+	}
+	if pendingState != nil {
+		r.PendingState = domain.AlertRuleState(*pendingState)
+	}
+	if pendingSince != nil {
+		r.PendingSince = *pendingSince
 	}
 	return &r, nil
 }
@@ -102,11 +112,12 @@ func (s *AlertRuleStore) Create(ctx context.Context, r *domain.AlertRule) (*doma
 	row := s.pool.QueryRow(ctx, `
 		INSERT INTO alert_rule
 			(rule_id, tenant_id, asset_id, metric, comparator, threshold, for_duration_seconds,
-			 severity, enabled, last_state, last_transition_at, row_version, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,1,now(),now())
+			 severity, enabled, last_state, last_transition_at, flap_dwell_seconds, pending_state, pending_since,
+			 row_version, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,$11,NULL,NULL,1,now(),now())
 		RETURNING `+alertRuleCols,
 		r.RuleID, r.TenantID, r.AssetID, r.Metric, string(r.Comparator), r.Threshold, r.ForDuration,
-		string(r.Severity), r.Enabled, string(r.LastState))
+		string(r.Severity), r.Enabled, string(r.LastState), r.FlapDwellSeconds)
 
 	created, err := scanAlertRule(row)
 	if err != nil {
@@ -162,7 +173,11 @@ func (s *AlertRuleStore) List(ctx context.Context, limit int, after string) ([]*
 // Update changes one or more fields under optimistic locking. AssetID and
 // Metric cannot be changed here — see domain.AlertRulePatch's doc comment —
 // nor can LastState/LastTransitionAt, which RecordTransition owns
-// exclusively.
+// exclusively. pending_state/pending_since are unconditionally cleared by
+// this statement (E3.2 — AlertRulePatch's doc comment): any edit, even one
+// that changes only flap_dwell_seconds, discards a dwell measured against
+// the rule's OLD configuration rather than silently honouring it under a new
+// one.
 func (s *AlertRuleStore) Update(
 	ctx context.Context, ruleID string, rowVersion int64, patch domain.AlertRulePatch,
 ) (*domain.AlertRule, error) {
@@ -185,6 +200,9 @@ func (s *AlertRuleStore) Update(
 	if patch.Enabled != nil {
 		current.Enabled = *patch.Enabled
 	}
+	if patch.FlapDwellSeconds != nil {
+		current.FlapDwellSeconds = *patch.FlapDwellSeconds
+	}
 	if err := current.Validate(); err != nil {
 		return nil, err
 	}
@@ -192,11 +210,12 @@ func (s *AlertRuleStore) Update(
 	row := s.pool.QueryRow(ctx, `
 		UPDATE alert_rule
 		   SET comparator = $3, threshold = $4, for_duration_seconds = $5, severity = $6, enabled = $7,
+		       flap_dwell_seconds = $8, pending_state = NULL, pending_since = NULL,
 		       row_version = row_version + 1, updated_at = now()
 		 WHERE rule_id = $1 AND row_version = $2
 		RETURNING `+alertRuleCols,
 		ruleID, rowVersion, string(current.Comparator), current.Threshold, current.ForDuration,
-		string(current.Severity), current.Enabled)
+		string(current.Severity), current.Enabled, current.FlapDwellSeconds)
 
 	updated, err := scanAlertRule(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -270,12 +289,15 @@ func (s *AlertRuleStore) EnabledRules(ctx context.Context, limit int, after stri
 // returned. currentIncidentID (E4.1) travels in the SAME statement as the
 // state transition rather than a second write — see alerting.Store.
 // RecordTransition's and Evaluator.correlate's doc comments for why.
+// pending_state/pending_since (E3.2) are cleared in the same statement: a
+// committed transition supersedes whatever candidate the dwell was timing.
 func (s *AlertRuleStore) RecordTransition(
 	ctx context.Context, ruleID string, rowVersion int64, state domain.AlertRuleState, at time.Time, currentIncidentID *string,
 ) (*domain.AlertRule, error) {
 	row := s.pool.QueryRow(ctx, `
 		UPDATE alert_rule
 		   SET last_state = $3, last_transition_at = $4, current_incident_id = $5,
+		       pending_state = NULL, pending_since = NULL,
 		       row_version = row_version + 1, updated_at = now()
 		 WHERE rule_id = $1 AND row_version = $2
 		RETURNING `+alertRuleCols,
@@ -287,6 +309,42 @@ func (s *AlertRuleStore) RecordTransition(
 	}
 	if err != nil {
 		return nil, fmt.Errorf("record alert rule transition: %w", err)
+	}
+	return updated, nil
+}
+
+// RecordPending implements alerting.Store: a fenced, single-row CAS update of
+// pending_state/pending_since only, the same shape RecordTransition uses.
+// pendingState == nil (with pendingSince also nil) clears both columns — the
+// metric reverted to LastState before its own dwell completed. Persisting
+// this (rather than keeping it only in the evaluator's memory) is exactly
+// what makes the dwell clock survive a process restart or leader failover:
+// the next evaluation tick, by this leader or a new one, re-reads
+// pending_state/pending_since off this row via EnabledRules and continues
+// timing from PendingSince, not from a memory the crashed process took with
+// it (ADR-ALERTING-001).
+func (s *AlertRuleStore) RecordPending(
+	ctx context.Context, ruleID string, rowVersion int64, pendingState *domain.AlertRuleState, pendingSince *time.Time,
+) (*domain.AlertRule, error) {
+	var stateArg *string
+	if pendingState != nil {
+		v := string(*pendingState)
+		stateArg = &v
+	}
+	row := s.pool.QueryRow(ctx, `
+		UPDATE alert_rule
+		   SET pending_state = $3, pending_since = $4,
+		       row_version = row_version + 1, updated_at = now()
+		 WHERE rule_id = $1 AND row_version = $2
+		RETURNING `+alertRuleCols,
+		ruleID, rowVersion, stateArg, pendingSince)
+
+	updated, err := scanAlertRule(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, s.explainMissedUpdate(ctx, ruleID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("record alert rule pending candidate: %w", err)
 	}
 	return updated, nil
 }

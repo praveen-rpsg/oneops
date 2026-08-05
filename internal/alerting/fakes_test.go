@@ -64,6 +64,40 @@ func (f *fakeStore) RecordTransition(
 	r.LastState = state
 	r.LastTransitionAt = at
 	r.CurrentIncidentID = currentIncidentID
+	// A committed transition supersedes whatever candidate the dwell was
+	// timing — mirrors AlertRuleStore.RecordTransition's real SQL exactly.
+	r.PendingState = ""
+	r.PendingSince = time.Time{}
+	r.RowVersion++
+	cp := *r
+	return &cp, nil
+}
+
+// RecordPending mirrors AlertRuleStore.RecordPending's fenced, single-row CAS
+// shape: pendingState == nil (with pendingSince also nil) clears both
+// columns.
+func (f *fakeStore) RecordPending(
+	_ context.Context, ruleID string, rowVersion int64, pendingState *domain.AlertRuleState, pendingSince *time.Time,
+) (*domain.AlertRule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.rules[ruleID]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	if r.RowVersion != rowVersion {
+		return nil, domain.ErrVersionMismatch
+	}
+	if pendingState != nil {
+		r.PendingState = *pendingState
+	} else {
+		r.PendingState = ""
+	}
+	if pendingSince != nil {
+		r.PendingSince = *pendingSince
+	} else {
+		r.PendingSince = time.Time{}
+	}
 	r.RowVersion++
 	cp := *r
 	return &cp, nil
@@ -260,12 +294,18 @@ func (f *fakeCorrelator) callsOfKind(kind string) []correlationCall {
 	return out
 }
 
+// mkRule builds a rule with FlapDwellSeconds forced to 0 (E3.2's opt-out):
+// every test in this package that predates flap suppression exercises
+// transition-only, immediate-commit behaviour, and this default preserves
+// that exactly. Tests that exercise E3.2 itself set FlapDwellSeconds
+// explicitly on the returned rule rather than relying on this default.
 func mkRule(t *testing.T, tenantID, assetID, metric string, cmp domain.AlertComparator, threshold float64, forDurationSeconds int) *domain.AlertRule {
 	t.Helper()
 	r, err := domain.NewAlertRule(tenantID, assetID, metric, cmp, threshold, forDurationSeconds, domain.AlertSeverityWarning)
 	if err != nil {
 		t.Fatalf("new alert rule: %v", err)
 	}
+	r.FlapDwellSeconds = 0
 	return r
 }
 

@@ -95,6 +95,26 @@ const (
 	MaxAlertRuleForDurationSeconds = 24 * 3600
 )
 
+// MinAlertRuleFlapDwellSeconds, MaxAlertRuleFlapDwellSeconds and
+// DefaultAlertRuleFlapDwellSeconds bound and default FlapDwellSeconds (E3.2):
+// how long a candidate transition must be observed continuously before the
+// evaluator commits it — see FlapDwellSeconds's own doc comment. The floor is
+// 0, not 1 like ForDuration's: 0 is a deliberate, per-rule opt-out that
+// reproduces E3.1's original immediate-transition behaviour (a rule that
+// genuinely needs zero-latency transitions, e.g. a hand-tuned rule an
+// operator has already verified does not flap), not an accidental bypass —
+// it still requires an explicit per-rule choice, never a global switch. The
+// ceiling matches ForDuration's for the same reason: a dwell an operator
+// cannot reason about is not a safety margin, it is a missed alert. The
+// default (60s) is short enough not to meaningfully delay a genuinely
+// sustained transition yet long enough to absorb the common flapping period
+// (a metric oscillating faster than it takes an operator to react).
+const (
+	MinAlertRuleFlapDwellSeconds     = 0
+	MaxAlertRuleFlapDwellSeconds     = 24 * 3600
+	DefaultAlertRuleFlapDwellSeconds = 60
+)
+
 // AlertRule is a threshold config over one asset's one metric — a firing is
 // DERIVED by evaluating it against telemetry (E3.1), never a reified
 // Alert/Event/Signal entity (docs/PLATFORM-BUILD-PLAN.md §4, Vol II §5.3):
@@ -125,6 +145,36 @@ type AlertRule struct {
 	// with a zero LastTransitionAt ("never evaluated").
 	LastState        AlertRuleState
 	LastTransitionAt time.Time
+	// FlapDwellSeconds is E3.2's de-flap/hysteresis window: a candidate state
+	// that differs from LastState must be observed continuously, tick over
+	// tick, for this many seconds before the evaluator commits it as a real
+	// transition (notify + E4.1 correlate + RecordTransition). A candidate
+	// that reverts before the dwell elapses resets the clock instead of
+	// committing, so a metric oscillating around its threshold produces at
+	// most one eventual transition per stable dwell rather than one per
+	// crossing (ADR-ALERTING-001). It is distinct from ForDuration: ForDuration
+	// decides whether a breach counts as the candidate AT ALL (ok vs firing,
+	// evaluated fresh every tick from raw telemetry); FlapDwellSeconds decides
+	// whether a candidate that already differs from the committed state has
+	// been stable long enough to ACT on. Defaults to
+	// DefaultAlertRuleFlapDwellSeconds; 0 disables the dwell for this rule
+	// (see that constant's doc comment).
+	FlapDwellSeconds int
+	// PendingState/PendingSince are the dwell's own in-flight bookkeeping: the
+	// not-yet-committed candidate (if any) that currently differs from
+	// LastState, and when the evaluator first observed it continuously.
+	// PendingState=="" (and PendingSince zero) means nothing is pending — the
+	// last-observed candidate agreed with LastState, the common case for a
+	// rule that is not flapping. Set only by the evaluator's background write
+	// path (alerting.Store.RecordPending), never through the row_version-
+	// guarded Update path — the same split AlertRulePatch's doc comment
+	// describes for LastState/LastTransitionAt/CurrentIncidentID — and reset
+	// to ""/zero by RecordTransition (a committed transition supersedes
+	// whatever was pending) and by every admin Update (a dwell counted
+	// against the rule's OLD config must not be silently honoured under a
+	// new one — see AlertRuleRepository.Update's doc comment).
+	PendingState AlertRuleState
+	PendingSince time.Time
 	// CurrentIncidentID is the open, alert-sourced Incident this rule's
 	// firing is currently linked to, or nil when the rule is ok (E4.1). Like
 	// LastState/LastTransitionAt, it is set only by the evaluator's
@@ -176,6 +226,12 @@ func (r *AlertRule) Validate() error {
 	if !r.LastState.Valid() {
 		return newValidation("last_state", "must be one of: ok, firing")
 	}
+	if r.FlapDwellSeconds < MinAlertRuleFlapDwellSeconds || r.FlapDwellSeconds > MaxAlertRuleFlapDwellSeconds {
+		return newValidation("flap_dwell_seconds", "must be between 0 and 86400 (24 hours)")
+	}
+	if r.PendingState != "" && !r.PendingState.Valid() {
+		return newValidation("pending_state", "must be empty, ok, or firing")
+	}
 	return nil
 }
 
@@ -188,16 +244,17 @@ func NewAlertRule(
 	forDurationSeconds int, severity AlertSeverity,
 ) (*AlertRule, error) {
 	r := &AlertRule{
-		RuleID:      NewID(),
-		TenantID:    strings.TrimSpace(tenantID),
-		AssetID:     strings.TrimSpace(assetID),
-		Metric:      strings.TrimSpace(metric),
-		Comparator:  comparator,
-		Threshold:   threshold,
-		ForDuration: forDurationSeconds,
-		Severity:    severity,
-		Enabled:     true,
-		LastState:   AlertRuleStateOK,
+		RuleID:           NewID(),
+		TenantID:         strings.TrimSpace(tenantID),
+		AssetID:          strings.TrimSpace(assetID),
+		Metric:           strings.TrimSpace(metric),
+		Comparator:       comparator,
+		Threshold:        threshold,
+		ForDuration:      forDurationSeconds,
+		Severity:         severity,
+		Enabled:          true,
+		LastState:        AlertRuleStateOK,
+		FlapDwellSeconds: DefaultAlertRuleFlapDwellSeconds,
 	}
 	if err := r.Validate(); err != nil {
 		return nil, err
@@ -209,15 +266,23 @@ func NewAlertRule(
 // nil pointer leaves that field unchanged. AssetID and Metric are
 // deliberately absent — like CollectorCheckPatch's AssetID — what a rule
 // watches is fixed at creation, not a field to repoint later: delete and
-// recreate instead. LastState/LastTransitionAt/CurrentIncidentID are likewise
-// absent: only the evaluator's background counterpart sets them — see
-// AlertRule's doc comment.
+// recreate instead. LastState/LastTransitionAt/CurrentIncidentID/
+// PendingState/PendingSince are likewise absent: only the evaluator's
+// background counterpart sets them — see AlertRule's doc comment.
+//
+// Applying ANY patch — including one that only touches FlapDwellSeconds
+// itself — clears a rule's in-flight PendingState/PendingSince (E3.2): a
+// dwell measured against the rule's OLD comparator/threshold/dwell
+// configuration must not be silently honoured under a new one. The next
+// evaluation tick starts a fresh dwell measurement under whatever config now
+// applies.
 type AlertRulePatch struct {
-	Comparator  *AlertComparator
-	Threshold   *float64
-	ForDuration *int
-	Severity    *AlertSeverity
-	Enabled     *bool
+	Comparator       *AlertComparator
+	Threshold        *float64
+	ForDuration      *int
+	Severity         *AlertSeverity
+	Enabled          *bool
+	FlapDwellSeconds *int
 }
 
 // AlertRuleRepository administers alert_rule: E3.1's threshold config over
@@ -237,9 +302,11 @@ type AlertRuleRepository interface {
 	// List returns a page of the caller's rules, keyset-paginated over
 	// rule_id.
 	List(ctx context.Context, limit int, after string) ([]*AlertRule, error)
-	// Update changes one or more fields under optimistic locking. Returns
-	// ErrVersionMismatch on a stale rowVersion, ErrNotFound if ruleID does
-	// not name a rule visible to this tenant.
+	// Update changes one or more fields under optimistic locking, and clears
+	// any in-flight PendingState/PendingSince (E3.2 — see AlertRulePatch's doc
+	// comment) as part of the same write. Returns ErrVersionMismatch on a
+	// stale rowVersion, ErrNotFound if ruleID does not name a rule visible to
+	// this tenant.
 	Update(ctx context.Context, ruleID string, rowVersion int64, patch AlertRulePatch) (*AlertRule, error)
 	// Delete removes a rule, or returns ErrNotFound.
 	Delete(ctx context.Context, ruleID string) error

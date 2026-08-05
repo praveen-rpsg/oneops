@@ -3236,7 +3236,11 @@ components:
         DERIVED by the leader-gated evaluator against telemetry_sample and
         delivered as a Notification — never a reified Alert/Event/Signal row.
         last_state/last_transition_at are the evaluator's last verdict, set
-        only by it, never through PATCH.
+        only by it, never through PATCH. flap_dwell_seconds (E3.2) is how long
+        a candidate transition must be observed continuously before the
+        evaluator commits it (de-flap/hysteresis dwell), suppressing a
+        metric oscillating around the threshold; it does not change what
+        severity is attached, only when a transition is committed.
       properties:
         rule_id: { type: string }
         asset_id: { type: string }
@@ -3259,6 +3263,15 @@ components:
           format: date-time
           nullable: true
           description: Set only by the evaluator. Absent means never evaluated to a transition.
+        flap_dwell_seconds:
+          type: integer
+          minimum: 0
+          maximum: 86400
+          default: 60
+          description: >-
+            How long a candidate transition must be observed continuously
+            before it is committed and notified (E3.2). 0 disables the dwell
+            for this rule, reproducing immediate-transition behaviour.
         row_version: { type: integer, format: int64 }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -3271,7 +3284,9 @@ components:
     CreateAlertRuleRequest:
       type: object
       required: [asset_id, metric, comparator, threshold, for_duration_seconds]
-      description: severity defaults to "warning" when omitted. enabled defaults to true.
+      description: >-
+        severity defaults to "warning" when omitted. enabled defaults to
+        true. flap_dwell_seconds defaults to 60 when omitted (E3.2).
       properties:
         asset_id: { type: string }
         metric: { type: string }
@@ -3280,13 +3295,15 @@ components:
         for_duration_seconds: { type: integer, minimum: 1, maximum: 86400 }
         severity: { type: string, enum: [critical, warning, info] }
         enabled: { type: boolean }
+        flap_dwell_seconds: { type: integer, minimum: 0, maximum: 86400, default: 60 }
     PatchAlertRuleRequest:
       type: object
       required: [row_version]
       description: >-
         Supply one or more of comparator, threshold, for_duration_seconds,
-        severity or enabled. asset_id and metric cannot be changed — delete
-        and recreate the rule instead.
+        severity, enabled or flap_dwell_seconds. asset_id and metric cannot be
+        changed — delete and recreate the rule instead. Any patch clears the
+        rule's in-flight de-flap dwell candidate (E3.2).
       properties:
         row_version: { type: integer, format: int64 }
         comparator: { type: string, enum: [gt, lt, gte, lte] }
@@ -3294,6 +3311,7 @@ components:
         for_duration_seconds: { type: integer, minimum: 1, maximum: 86400 }
         severity: { type: string, enum: [critical, warning, info] }
         enabled: { type: boolean }
+        flap_dwell_seconds: { type: integer, minimum: 0, maximum: 86400 }
     Incident:
       type: object
       description: >-

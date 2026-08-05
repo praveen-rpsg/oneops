@@ -171,6 +171,14 @@ func (e *Evaluator) RunOnce(ctx context.Context) {
 // breach has been sustained across ForDuration, and on a state TRANSITION
 // only, enqueues one Notification and persists the new state.
 //
+// A candidate that differs from LastState must additionally clear
+// dwellSatisfied (E3.2's de-flap hysteresis, ADR-ALERTING-001) before any of
+// that runs: notify/correlate/RecordTransition below are the COMMIT path,
+// reached only once a candidate has been observed continuously for
+// FlapDwellSeconds. A candidate still within its dwell, or one that reverted
+// to LastState before completing it, returns here having (at most) persisted
+// pending bookkeeping — no notification, no correlation, no LastState write.
+//
 // Order matters: the notification is enqueued BEFORE the transition is
 // persisted. If the process crashes between the two, the next tick still
 // sees the old LastState, re-detects the same real-world transition, and
@@ -205,7 +213,12 @@ func (e *Evaluator) evaluateRule(ctx context.Context, rule *domain.AlertRule, no
 		next = domain.AlertRuleStateFiring
 	}
 	if next == rule.LastState {
-		return // no transition: no write, no notification (transition-only)
+		e.clearStalePending(ctx, rule)
+		return // no transition: no notification (transition-only)
+	}
+
+	if !e.dwellSatisfied(ctx, rule, next, now) {
+		return // candidate persisted/extended; not yet stable long enough to commit (E3.2)
 	}
 
 	if err := e.notify(ctx, rule, next); err != nil {
@@ -244,6 +257,73 @@ func (e *Evaluator) evaluateRule(ctx context.Context, rule *domain.AlertRule, no
 	} else {
 		e.metrics.IncRecovered()
 	}
+}
+
+// clearStalePending resets a rule's in-flight flap-suppression candidate
+// (E3.2, ADR-ALERTING-001) when the metric has reverted to the
+// already-committed LastState before FlapDwellSeconds elapsed — the
+// oscillation this package suppresses. A rule with nothing pending (the
+// common case: PendingState == "", true of every rule that is not currently
+// flapping) is left untouched, so a stable rule never takes this write.
+func (e *Evaluator) clearStalePending(ctx context.Context, rule *domain.AlertRule) {
+	if rule.PendingState == "" {
+		return
+	}
+	if _, err := e.store.RecordPending(ctx, rule.RuleID, rule.RowVersion, nil, nil); err != nil {
+		if errors.Is(err, domain.ErrVersionMismatch) || errors.Is(err, domain.ErrNotFound) {
+			// The rule was edited, disabled or deleted between this tick's read
+			// and this write (an Update also clears pending itself — see
+			// domain.AlertRulePatch's doc comment — so this is at worst a no-op
+			// racing an equivalent one). Nothing to retry with the version this
+			// tick held.
+			return
+		}
+		e.log.Error("alert rule evaluator: clear pending candidate", "rule_id", rule.RuleID, "err", err)
+		e.metrics.IncErrors()
+	}
+}
+
+// dwellSatisfied implements E3.2's de-flap hysteresis (ADR-ALERTING-001):
+// next differs from rule.LastState (the caller has already checked this) but
+// must be observed continuously for FlapDwellSeconds before evaluateRule may
+// act on it. It reports whether that dwell has ALREADY elapsed — a real
+// transition should be committed this tick — and, when it has not, persists
+// the pending candidate itself so the dwell clock survives a restart or
+// leader failover: the next tick, by this process or a new one, re-derives
+// "how long has this been pending" from the row EnabledRules hands back, not
+// from anything held only in this Evaluator's memory.
+//
+//   - FlapDwellSeconds <= 0: the rule has opted out of the dwell (see that
+//     field's doc comment) — commits immediately, reproducing E3.1's original
+//     transition-only behaviour with no extra write.
+//   - The pending candidate already equals next: no write is needed (the
+//     persisted PendingSince already reflects when this candidate first
+//     appeared); reports whether now.Sub(rule.PendingSince) has reached
+//     FlapDwellSeconds.
+//   - No candidate is pending yet, or the pending candidate is the OPPOSITE
+//     of next (the metric reversed again before its own dwell completed):
+//     (re)starts the dwell clock at `now` and reports false. This is what
+//     collapses rapid oscillation into at most one eventual transition —
+//     every reversal resets the clock rather than compounding toward one.
+func (e *Evaluator) dwellSatisfied(ctx context.Context, rule *domain.AlertRule, next domain.AlertRuleState, now time.Time) bool {
+	if rule.FlapDwellSeconds <= 0 {
+		return true
+	}
+	if rule.PendingState == next {
+		return now.Sub(rule.PendingSince) >= time.Duration(rule.FlapDwellSeconds)*time.Second
+	}
+	if _, err := e.store.RecordPending(ctx, rule.RuleID, rule.RowVersion, &next, &now); err != nil {
+		if errors.Is(err, domain.ErrVersionMismatch) || errors.Is(err, domain.ErrNotFound) {
+			// The rule was edited, disabled or deleted between this tick's read
+			// and this write; its own next read reflects that. Nothing to retry
+			// with the version this tick held — the same non-fatal shape
+			// RecordTransition's own version-mismatch branch takes.
+			return false
+		}
+		e.log.Error("alert rule evaluator: record pending candidate", "rule_id", rule.RuleID, "err", err)
+		e.metrics.IncErrors()
+	}
+	return false
 }
 
 // sustainedBreach reports whether every sample in [from, now] breaches

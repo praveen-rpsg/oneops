@@ -253,6 +253,148 @@ func TestAlertRuleStore_EnabledRulesAndRecordTransition(t *testing.T) {
 	}
 }
 
+// TestAlertRuleStore_CreateDefaultsFlapDwellAndUpdatePatchesOrClearsPending
+// proves E3.2's store-level contract: a freshly created rule gets
+// domain.DefaultAlertRuleFlapDwellSeconds with no pending candidate; Update
+// can patch flap_dwell_seconds like any other config field; and Update
+// unconditionally clears pending_state/pending_since (even one that only
+// touched an unrelated field) — a dwell measured against the OLD config must
+// never survive an edit.
+func TestAlertRuleStore_CreateDefaultsFlapDwellAndUpdatePatchesOrClearsPending(t *testing.T) {
+	priv := testPool(t)
+	tn := assetTenant(t, NewTenantStore(priv), "alert-rule-flap")
+
+	scoped := tenantScopedPool(t)
+	assets := NewAssetStore(scoped)
+	rules := NewAlertRuleStore(scoped)
+	ctx := assetTestCtx(tn)
+	host := telemetryAsset(t, assets, ctx, tn.TenantID, "flap-host")
+
+	r, err := domain.NewAlertRule(tn.TenantID, host.AssetID, "cpu_utilization", domain.ComparatorGT, 90, 60, domain.AlertSeverityCritical)
+	if err != nil {
+		t.Fatalf("new alert rule: %v", err)
+	}
+	created, err := rules.Create(ctx, r)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if created.FlapDwellSeconds != domain.DefaultAlertRuleFlapDwellSeconds {
+		t.Errorf("flap_dwell_seconds = %d, want default %d", created.FlapDwellSeconds, domain.DefaultAlertRuleFlapDwellSeconds)
+	}
+	if created.PendingState != "" || !created.PendingSince.IsZero() {
+		t.Errorf("a new rule must start with nothing pending: %+v", created)
+	}
+
+	// Privileged surface: give the rule a pending candidate, as the evaluator
+	// would mid-dwell.
+	priv2 := NewAlertRuleStore(priv)
+	pending := domain.AlertRuleStateFiring
+	pendingSince := time.Now().UTC()
+	withPending, err := priv2.RecordPending(context.Background(), created.RuleID, created.RowVersion, &pending, &pendingSince)
+	if err != nil {
+		t.Fatalf("record pending: %v", err)
+	}
+	if withPending.PendingState != domain.AlertRuleStateFiring || !withPending.PendingSince.Equal(pendingSince) {
+		t.Fatalf("record pending = %+v, want firing at %v", withPending, pendingSince)
+	}
+
+	// A PATCH that only changes threshold — nothing about flap_dwell_seconds
+	// — must still discard that pending candidate.
+	newThreshold := 95.0
+	updated, err := rules.Update(ctx, created.RuleID, withPending.RowVersion, domain.AlertRulePatch{Threshold: &newThreshold})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.PendingState != "" || !updated.PendingSince.IsZero() {
+		t.Errorf("update must clear pending_state/pending_since even when it does not itself touch them: %+v", updated)
+	}
+
+	// flap_dwell_seconds itself is patchable, like any other config field.
+	newDwell := 120
+	updated, err = rules.Update(ctx, created.RuleID, updated.RowVersion, domain.AlertRulePatch{FlapDwellSeconds: &newDwell})
+	if err != nil {
+		t.Fatalf("update flap_dwell_seconds: %v", err)
+	}
+	if updated.FlapDwellSeconds != newDwell {
+		t.Errorf("flap_dwell_seconds after patch = %d, want %d", updated.FlapDwellSeconds, newDwell)
+	}
+}
+
+// TestAlertRuleStore_RecordPendingIsFencedAndClearedByRecordTransition proves
+// two things about the E3.2 privileged surface: RecordPending is a fenced CAS
+// exactly like RecordTransition (a stale row_version is refused, not silently
+// re-applied), and a committed RecordTransition clears whatever candidate was
+// pending — the persisted state a restarted/failed-over evaluator would read
+// back never shows a stale pending candidate for a rule that has already
+// settled.
+func TestAlertRuleStore_RecordPendingIsFencedAndClearedByRecordTransition(t *testing.T) {
+	priv := testPool(t)
+	tn := assetTenant(t, NewTenantStore(priv), "alert-rule-pending")
+
+	scoped := tenantScopedPool(t)
+	assets := NewAssetStore(scoped)
+	scopedRules := NewAlertRuleStore(scoped)
+	ctx := assetTestCtx(tn)
+	host := telemetryAsset(t, assets, ctx, tn.TenantID, "pending-host")
+
+	r, err := domain.NewAlertRule(tn.TenantID, host.AssetID, "cpu_utilization", domain.ComparatorGT, 90, 60, domain.AlertSeverityWarning)
+	if err != nil {
+		t.Fatalf("new alert rule: %v", err)
+	}
+	created, err := scopedRules.Create(ctx, r)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	privRules := NewAlertRuleStore(priv)
+	pending := domain.AlertRuleStateFiring
+	pendingSince := time.Now().UTC()
+	withPending, err := privRules.RecordPending(context.Background(), created.RuleID, created.RowVersion, &pending, &pendingSince)
+	if err != nil {
+		t.Fatalf("record pending: %v", err)
+	}
+
+	// A stale row_version is refused — the same fencing RecordTransition
+	// already proves, extended to RecordPending.
+	if _, err := privRules.RecordPending(context.Background(), created.RuleID, created.RowVersion, &pending, &pendingSince); err != domain.ErrVersionMismatch {
+		t.Errorf("stale RecordPending err = %v, want ErrVersionMismatch", err)
+	}
+
+	// Simulating a restart: a brand new read off the row (as EnabledRules
+	// would hand the evaluator) still shows the persisted candidate.
+	reread, err := privRules.EnabledRules(context.Background(), 100, "")
+	if err != nil {
+		t.Fatalf("enabled rules: %v", err)
+	}
+	found := false
+	for _, rr := range reread {
+		if rr.RuleID != created.RuleID {
+			continue
+		}
+		found = true
+		if rr.PendingState != domain.AlertRuleStateFiring || !rr.PendingSince.Equal(pendingSince) {
+			t.Errorf("re-read pending state = %q at %v, want firing at %v — the dwell clock did not survive "+
+				"a fresh read", rr.PendingState, rr.PendingSince, pendingSince)
+		}
+	}
+	if !found {
+		t.Fatal("created rule not found in EnabledRules")
+	}
+
+	// Committing the transition clears the pending candidate atomically.
+	now := time.Now().UTC()
+	committed, err := privRules.RecordTransition(context.Background(), created.RuleID, withPending.RowVersion, domain.AlertRuleStateFiring, now, nil)
+	if err != nil {
+		t.Fatalf("record transition: %v", err)
+	}
+	if committed.PendingState != "" || !committed.PendingSince.IsZero() {
+		t.Errorf("a committed transition must clear pending_state/pending_since: %+v", committed)
+	}
+	if committed.LastState != domain.AlertRuleStateFiring {
+		t.Errorf("last_state = %q, want firing", committed.LastState)
+	}
+}
+
 // TestTelemetryStore_QueryRangeForTenantIsolatesTenant is the store-level
 // proof for E3.1's #1 risk: even on the PRIVILEGED pool (no row-level
 // security), QueryRangeForTenant returns only the named tenant's samples.
