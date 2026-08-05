@@ -586,10 +586,23 @@ func run(logger *slog.Logger) error {
 	srv.SetAlertRules(postgres.NewAlertRuleStore(appPool))
 	alertRuleStore := postgres.NewAlertRuleStore(pool)
 	incidentCorrelator := postgres.NewIncidentStore(pool)
+
+	// Maintenance window administration + the evaluator's suppression check
+	// (E3.3a, ADR-ALERTING-002): maintenance_window is tenant-owned and under
+	// row-level security, exactly like alert_rule/incident above, so the
+	// admin CRUD API is built from the tenant-scoped pool. The evaluator's
+	// active-window check is the identical dual-role split AlertRuleStore
+	// already has — one MaintenanceWindowStore type, two roles depending on
+	// which pool constructs it. It must never be nil (see
+	// alerting.NewEvaluator's doc comment): planned maintenance must not page
+	// regardless of whether a deployment remembers to wire it.
+	srv.SetMaintenanceWindows(postgres.NewMaintenanceWindowStore(appPool))
+	maintenanceChecker := postgres.NewMaintenanceWindowStore(pool)
+
 	alertingMetrics := alerting.NewPromMetrics(metrics.Registry())
 	alertEvaluator := alerting.NewEvaluator(
 		alertRuleStore, postgres.NewTelemetryStore(pool), notificationSvc, incidentCorrelator,
-		alertingMetrics, logger, alerting.Config{})
+		maintenanceChecker, alertingMetrics, logger, alerting.Config{})
 	workers = append(workers, alertEvaluator.Run)
 
 	// Operational diagnostics + administration APIs: both reuse one diagnostics

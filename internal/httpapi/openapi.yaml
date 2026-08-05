@@ -1893,6 +1893,86 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/maintenance-windows:
+    get:
+      summary: List the caller's tenant's maintenance windows (E3.3a)
+      operationId: listMaintenanceWindows
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last window_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of maintenance windows
+          content: { application/json: { schema: { $ref: '#/components/schemas/MaintenanceWindowList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Declare a one-shot maintenance window over one asset (E3.3a)
+      description: >-
+        asset_id must already name a Configuration Item visible to the
+        caller's tenant, re-verified server-side before the row is written
+        (ADR-ASSET-001 §6, extended here) — a cross-tenant or nonexistent
+        asset_id is rejected with 404. While `now` falls inside
+        [starts_at, ends_at), the leader-gated evaluator's ok->firing
+        transition for that asset does not create/link an Incident and does
+        not notify (ADR-ALERTING-002) — planned maintenance must not page.
+        Recovery (firing->ok) is never suppressed.
+      operationId: createMaintenanceWindow
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateMaintenanceWindowRequest' }
+      responses:
+        '201':
+          description: The declared maintenance window
+          content: { application/json: { schema: { $ref: '#/components/schemas/MaintenanceWindow' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/maintenance-windows/{id}:
+    get:
+      summary: Get one maintenance window by identifier
+      operationId: getMaintenanceWindow
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The maintenance window
+          content: { application/json: { schema: { $ref: '#/components/schemas/MaintenanceWindow' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    delete:
+      summary: Cancel/withdraw a maintenance window
+      description: >-
+        There is no other lifecycle: a window either exists (and is
+        consulted by its [starts_at, ends_at) bounds) or it does not.
+      operationId: deleteMaintenanceWindow
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/incidents:
     get:
       summary: List the caller's tenant's incidents (E5.1)
@@ -3312,6 +3392,62 @@ components:
         severity: { type: string, enum: [critical, warning, info] }
         enabled: { type: boolean }
         flap_dwell_seconds: { type: integer, minimum: 0, maximum: 86400 }
+    MaintenanceWindow:
+      type: object
+      description: >-
+        An operator-declared, one-shot [starts_at, ends_at) window during
+        which one asset's alert firing->incident/notify side effect is
+        suppressed (E3.3a, ADR-ALERTING-002). Never suppresses the underlying
+        firing-state derivation itself, only the side effect; a recovery
+        (firing->ok) is never suppressed. suppressed_count/last_suppressed_at
+        are the visible, queryable record that a suppression happened — a
+        suppression is never a silent drop. Dependency-aware suppression
+        (silencing a CI's downstream/dependent CIs too) is E3.3b, deferred;
+        this window covers exactly one asset_id.
+      properties:
+        window_id: { type: string }
+        asset_id: { type: string }
+        starts_at:
+          type: string
+          format: date-time
+          description: Inclusive lower bound — a firing at exactly starts_at IS suppressed.
+        ends_at:
+          type: string
+          format: date-time
+          description: Exclusive upper bound — a firing at exactly ends_at is NOT suppressed.
+        reason: { type: string, maxLength: 500 }
+        created_by:
+          type: string
+          description: The authenticated actor who declared this window. Set server-side.
+        suppressed_count:
+          type: integer
+          format: int64
+          description: How many evaluation ticks found this window active and suppressed a firing.
+        last_suppressed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When this window last suppressed a firing, or absent if it never has.
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    MaintenanceWindowList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/MaintenanceWindow' }
+    CreateMaintenanceWindowRequest:
+      type: object
+      required: [asset_id, starts_at, ends_at]
+      description: >-
+        ends_at must be strictly after starts_at — the window is half-open
+        [starts_at, ends_at). reason is optional free text, not interpreted.
+      properties:
+        asset_id: { type: string }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        reason: { type: string, maxLength: 500 }
     Incident:
       type: object
       description: >-

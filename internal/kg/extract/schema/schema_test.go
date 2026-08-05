@@ -55,7 +55,7 @@ func TestEveryTableIsANode(t *testing.T) {
 		"asset", "asset_change_history", "asset_relationship",
 		"audit_chain_head", "audit_event", "audit_event_default", "collector_check", "configuration_metadata",
 		"configuration_object", "dependency_edge", "idempotency_key", "incident", "incident_event", "invitation",
-		"membership", "notification", "organization", "policy", "policy_cursor", "policy_execution",
+		"maintenance_window", "membership", "notification", "organization", "policy", "policy_cursor", "policy_execution",
 		"setting", "team", "team_membership", "telemetry_rollup_5m", "telemetry_sample", "tenant", "webhook", "webhook_cursor",
 		"webhook_delivery", "webhook_replay_job",
 	}
@@ -99,8 +99,8 @@ func TestCommentsDoNotDeclareObjects(t *testing.T) {
 func TestIndexOnClauseMaySpanLines(t *testing.T) {
 	nodes, edges := extract(t)
 	idx := byKind(nodes)[kindIndex]
-	if len(idx) != 79 {
-		t.Errorf("extracted %d indexes, want 79", len(idx))
+	if len(idx) != 81 {
+		t.Errorf("extracted %d indexes, want 81", len(idx))
 	}
 	// ix_webhook_delivery_due declares ON on a following line.
 	const want = "index:ix_webhook_delivery_due"
@@ -283,7 +283,7 @@ func TestCorpusCensus(t *testing.T) {
 		got[n.Kind]++
 	}
 	want := map[string]int{
-		kindTable: 36, kindColumn: 334, kindIndex: 79, kindConstraint: 108, kindTrigger: 8,
+		kindTable: 37, kindColumn: 346, kindIndex: 81, kindConstraint: 113, kindTrigger: 8,
 	}
 	for kind, w := range want {
 		if got[kind] != w {
@@ -400,18 +400,22 @@ func TestMultiLineAlterTableIsExtracted(t *testing.T) {
 		}
 	}
 
-	// Thirty tables carry the discriminator (E2.1 added telemetry_sample;
+	// Thirty-one tables carry the discriminator (E2.1 added telemetry_sample;
 	// E2.1b adds telemetry_rollup_5m; E2.2a adds collector_check; E3.1 adds
-	// alert_rule; E5.1 adds incident and incident_event). Anything less is a
-	// wrong answer to the question the graph exists to answer.
+	// alert_rule; E5.1 adds incident and incident_event; E3.3a adds
+	// maintenance_window — declared inline in its CREATE TABLE, not a
+	// multi-line ALTER TABLE, but counted the same way: this assertion sweeps
+	// every tenant_id column node regardless of which declaration form
+	// produced it). Anything less is a wrong answer to the question the
+	// graph exists to answer.
 	scoped := 0
 	for _, n := range nodes {
 		if strings.HasSuffix(n.ID, ".tenant_id") && n.Kind == kindColumn {
 			scoped++
 		}
 	}
-	if scoped != 30 {
-		t.Errorf("%d tables carry tenant_id, want 30", scoped)
+	if scoped != 31 {
+		t.Errorf("%d tables carry tenant_id, want 31", scoped)
 	}
 
 	// A multi-line declaration must still be owned by its table.

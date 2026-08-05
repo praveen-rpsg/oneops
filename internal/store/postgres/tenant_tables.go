@@ -47,4 +47,5 @@ var TenantOwnedTables = []string{
 	"alert_rule",
 	"incident",
 	"incident_event",
+	"maintenance_window",
 }

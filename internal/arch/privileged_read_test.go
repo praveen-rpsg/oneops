@@ -62,6 +62,18 @@ import (
 //     Widening the key set is the way to extend it; the value is checked, not
 //     assumed. This mirrors the mutation guard, which likewise catches only its
 //     one narrow shape (id = ANY($)) rather than every possible ownership hole.
+//   - CTE-with-UPDATE BLIND SPOT (recorded 2026-08-05, E3.3a review). A read
+//     embedded in a statement that also contains "UPDATE <table>" (a
+//     write-CTE like MaintenanceWindowStore.Suppress or
+//     IncidentStore.FindOrCreateOpenAlertIncident) is SKIPPED here as the
+//     mutation guard's subject (see the DELETE/UPDATE skip below) — yet the
+//     mutation guard only fires on the id = ANY($) shape, which such methods
+//     do not have. So neither STATIC guard enforces the tenant predicate on a
+//     read hidden inside a write-CTE; that predicate is enforced only by a live
+//     cross-tenant integration test per method (e.g.
+//     TestMaintenanceWindowStore_SuppressIsTenantIsolated). Do NOT assume the
+//     static sweep covers this class. Closing it is tracked debt (plan: "arch
+//     guard — CTE-with-UPDATE tenant-read coverage").
 //
 // privilegedReadExemptions: each is a privileged-type SELECT that filters by
 // asset_id without tenant_id but is not a cross-tenant disclosure. A reason per
@@ -85,6 +97,10 @@ var privilegedReadExemptions = map[string]string{
 		"(ADR-TENANCY-012).",
 	"IncidentStore.verifyAssetExists": "asset existence probe; identical shape and reason to " +
 		"AlertRuleStore.Create (ADR-TENANCY-012).",
+	"MaintenanceWindowStore.Create": "asset existence probe; identical shape and reason to " +
+		"AlertRuleStore.Create (ADR-TENANCY-012). Runs on the request-path admin instance; listed because " +
+		"MaintenanceWindowStore is dual-role (the same admin-CRUD/evaluator-surface split AlertRuleStore " +
+		"draws) and this guard is type-granular.",
 }
 
 func TestPrivilegedReads_AreScopedToATenant(t *testing.T) {
