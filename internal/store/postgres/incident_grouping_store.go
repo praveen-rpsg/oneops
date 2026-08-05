@@ -68,8 +68,15 @@ func (s *IncidentGroupingStore) TenantsWithOpenAlertIncidents(ctx context.Contex
 }
 
 // OpenAlertIncidents implements grouping.Store. tenant_id is an explicit
-// predicate on this privileged connection (ADR-TENANCY-012) — the read this
-// guard actively covers (internal/arch.TestPrivilegedReads_AreScopedToATenant).
+// predicate on this privileged connection (ADR-TENANCY-012), REQUIRED because
+// RLS is off on this pool. NOTE on coverage (do not overstate it): the static
+// guard internal/arch.TestPrivilegedReads_AreScopedToATenant does NOT cover
+// this read — its detector matches an `asset_id = $/ANY` disclosure shape, but
+// this read filters `asset_id IS NOT NULL`, so it is outside the guard's
+// documented asset_id-disclosure recall bound (privileged_read_test.go:59-64)
+// and the guard stays green even if this predicate were removed. Tenant
+// isolation here is enforced SOLELY by the live, mutation-proven integration
+// test TestIncidentGroupingStore_OpenAlertIncidentsIsTenantIsolated — keep it.
 func (s *IncidentGroupingStore) OpenAlertIncidents(ctx context.Context, tenantID string) ([]grouping.OpenAlertIncident, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT incident_id, asset_id, root_incident_id

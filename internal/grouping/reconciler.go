@@ -151,6 +151,13 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, tenantID string) {
 
 	candidate := make(map[string]*string, len(incidents))
 	for _, inc := range incidents {
+		// Direction guarantee (coverage note): this package's own
+		// TestReconciler_DirectionCorrectness uses a FAKE graph, so it pins the
+		// reconciler LOGIC but cannot catch a reversal of the real SQL. The
+		// real forward-direction of RecursiveDependenciesOfTypes is guarded by
+		// the shared store test TestAssetGraph_ServiceMapFiltersToCompositionEdges
+		// (flipping DirectionDependencies→Dependents in asset_graph_repo.go fails
+		// it) — do not orphan that shared guarantee in a future refactor.
 		nodes, err := r.graph.RecursiveDependenciesOfTypes(scopedCtx, inc.AssetID, GroupingEdgeTypes)
 		if err != nil {
 			r.log.Error("incident grouping reconciler: walk dependency closure",

@@ -166,6 +166,15 @@ but out of scope here.
 - **Heuristic, not ML.** "Deepest down dependency" is a topology-shape
   heuristic (ADR-ALERTING-004 §2), not a probabilistic root-cause ranking.
   E13 is where a learned model, if ever built, would replace or augment this.
+- **A resolved CHILD's root pointer is frozen, by design.** The reconciler acts
+  only on OPEN alert-incidents; once a collateral incident resolves it leaves
+  the working set, so its `root_incident_id` is never re-evaluated or cleared
+  and its historical record (and DTO) keeps showing the group it belonged to at
+  resolution. This is deliberate — the grouping is a true historical fact about
+  that outage, not live state — but it is a decision, not a surprise: a resolved
+  incident's `is_root`/`root_incident_id` reflect the topology at its resolution,
+  not "now". (Contrast the resolved-ROOT case, which DOES re-heal its still-open
+  children on the next pass — Consequences below.)
 - **A silently-dead root with no open incident of its own is not recognized as
   a root at all.** "Down" is defined exactly as ADR-ALERTING-003 §1 defines it:
   an asset with its own open, alert-sourced incident. An asset that is
