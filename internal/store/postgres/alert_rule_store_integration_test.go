@@ -4,8 +4,11 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/rpsg/oneops/internal/domain"
 )
@@ -392,6 +395,148 @@ func TestAlertRuleStore_RecordPendingIsFencedAndClearedByRecordTransition(t *tes
 	}
 	if committed.LastState != domain.AlertRuleStateFiring {
 		t.Errorf("last_state = %q, want firing", committed.LastState)
+	}
+}
+
+// TestAlertRuleStore_SymptomClassRoundTripsAndDefaultsToUnspecified proves
+// E3.4's create/patch/read round trip against real Postgres: a rule created
+// with symptom_class omitted reads back "unspecified" (the CTO-locked
+// default, never inferred from metric); a rule created with each defined
+// class reads back exactly that class; and PATCH changes it under optimistic
+// locking like any other config field.
+func TestAlertRuleStore_SymptomClassRoundTripsAndDefaultsToUnspecified(t *testing.T) {
+	priv := testPool(t)
+	tn := assetTenant(t, NewTenantStore(priv), "alert-rule-symptom")
+
+	scoped := tenantScopedPool(t)
+	assets := NewAssetStore(scoped)
+	rules := NewAlertRuleStore(scoped)
+	ctx := assetTestCtx(tn)
+	host := telemetryAsset(t, assets, ctx, tn.TenantID, "symptom-host")
+
+	// Omitted (NewAlertRule sets no symptom_class argument at all) defaults
+	// to unspecified, both on the value returned by Create and on a fresh Get.
+	unclassed, err := domain.NewAlertRule(tn.TenantID, host.AssetID, "cpu_utilization", domain.ComparatorGT, 90, 60, domain.AlertSeverityWarning)
+	if err != nil {
+		t.Fatalf("new alert rule: %v", err)
+	}
+	createdUnclassed, err := rules.Create(ctx, unclassed)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if createdUnclassed.SymptomClass != domain.AlertSymptomClassUnspecified {
+		t.Errorf("created.SymptomClass = %q, want %q", createdUnclassed.SymptomClass, domain.AlertSymptomClassUnspecified)
+	}
+	reread, err := rules.Get(ctx, createdUnclassed.RuleID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if reread.SymptomClass != domain.AlertSymptomClassUnspecified {
+		t.Errorf("reread.SymptomClass = %q, want %q", reread.SymptomClass, domain.AlertSymptomClassUnspecified)
+	}
+
+	// Each defined class round-trips through Create->Get.
+	for _, class := range []domain.AlertSymptomClass{
+		domain.AlertSymptomClassAvailability, domain.AlertSymptomClassResource, domain.AlertSymptomClassUnspecified,
+	} {
+		r, err := domain.NewAlertRule(tn.TenantID, host.AssetID, "disk_free_bytes", domain.ComparatorLT, 10, 60, domain.AlertSeverityCritical)
+		if err != nil {
+			t.Fatalf("new alert rule: %v", err)
+		}
+		r.SymptomClass = class
+		created, err := rules.Create(ctx, r)
+		if err != nil {
+			t.Fatalf("create with symptom_class=%q: %v", class, err)
+		}
+		if created.SymptomClass != class {
+			t.Errorf("created.SymptomClass = %q, want %q", created.SymptomClass, class)
+		}
+		got, err := rules.Get(ctx, created.RuleID)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got.SymptomClass != class {
+			t.Errorf("get.SymptomClass = %q, want %q", got.SymptomClass, class)
+		}
+	}
+
+	// PATCH changes symptom_class under optimistic locking, like any other
+	// config field, without disturbing anything else.
+	newClass := domain.AlertSymptomClassAvailability
+	patched, err := rules.Update(ctx, createdUnclassed.RuleID, createdUnclassed.RowVersion, domain.AlertRulePatch{SymptomClass: &newClass})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if patched.SymptomClass != domain.AlertSymptomClassAvailability {
+		t.Errorf("patched.SymptomClass = %q, want %q", patched.SymptomClass, domain.AlertSymptomClassAvailability)
+	}
+	if patched.Threshold != 90 || patched.Comparator != domain.ComparatorGT {
+		t.Errorf("patching symptom_class must not disturb other fields: %+v", patched)
+	}
+}
+
+// TestAlertRuleStore_ExistingRuleBackfillsToUnspecified proves the migration
+// backfill's no-behaviour-change guarantee at the row level: a rule inserted
+// with NO symptom_class named at all (a raw INSERT that omits the column,
+// simulating what every pre-E3.4 row already looks like after the
+// migration's DEFAULT applied) reads back exactly "unspecified" through the
+// same store path every other rule uses.
+func TestAlertRuleStore_ExistingRuleBackfillsToUnspecified(t *testing.T) {
+	priv := testPool(t)
+	tn := assetTenant(t, NewTenantStore(priv), "alert-rule-backfill")
+
+	scoped := tenantScopedPool(t)
+	assets := NewAssetStore(scoped)
+	rules := NewAlertRuleStore(scoped)
+	ctx := assetTestCtx(tn)
+	host := telemetryAsset(t, assets, ctx, tn.TenantID, "backfill-host")
+
+	ruleID := domain.NewID()
+	if _, err := priv.Exec(ctx, `
+		INSERT INTO alert_rule
+			(rule_id, tenant_id, asset_id, metric, comparator, threshold, for_duration_seconds,
+			 severity, enabled, last_state, flap_dwell_seconds, row_version, created_at, updated_at)
+		VALUES ($1,$2,$3,'cpu_utilization','gt',90,60,'warning',true,'ok',60,1,now(),now())`,
+		ruleID, tn.TenantID, host.AssetID); err != nil {
+		t.Fatalf("raw insert omitting symptom_class: %v", err)
+	}
+
+	got, err := rules.Get(ctx, ruleID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.SymptomClass != domain.AlertSymptomClassUnspecified {
+		t.Errorf("a rule inserted without symptom_class read back %q, want %q — the migration's "+
+			"DEFAULT must cover pre-existing rows", got.SymptomClass, domain.AlertSymptomClassUnspecified)
+	}
+}
+
+// TestAlertRuleStore_SymptomClassOutOfEnumRejectedByDBCheck proves the
+// second line of defense (defense in depth alongside domain.AlertRule.
+// Validate): a raw INSERT naming an out-of-enum symptom_class is rejected by
+// ck_alert_rule_symptom_class at the database layer, even if a caller somehow
+// bypassed domain validation entirely.
+func TestAlertRuleStore_SymptomClassOutOfEnumRejectedByDBCheck(t *testing.T) {
+	priv := testPool(t)
+	tn := assetTenant(t, NewTenantStore(priv), "alert-rule-badclass")
+
+	scoped := tenantScopedPool(t)
+	assets := NewAssetStore(scoped)
+	ctx := assetTestCtx(tn)
+	host := telemetryAsset(t, assets, ctx, tn.TenantID, "badclass-host")
+
+	_, err := priv.Exec(ctx, `
+		INSERT INTO alert_rule
+			(rule_id, tenant_id, asset_id, metric, comparator, threshold, for_duration_seconds,
+			 severity, symptom_class, enabled, last_state, flap_dwell_seconds, row_version, created_at, updated_at)
+		VALUES ($1,$2,$3,'cpu_utilization','gt',90,60,'warning','bogus',true,'ok',60,1,now(),now())`,
+		domain.NewID(), tn.TenantID, host.AssetID)
+	if err == nil {
+		t.Fatal("insert with an out-of-enum symptom_class succeeded, want ck_alert_rule_symptom_class to reject it")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != "ck_alert_rule_symptom_class" {
+		t.Errorf("insert err = %v, want a 23514 CHECK violation naming ck_alert_rule_symptom_class", err)
 	}
 }
 

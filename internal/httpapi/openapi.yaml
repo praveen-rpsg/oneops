@@ -3321,6 +3321,10 @@ components:
         evaluator commits it (de-flap/hysteresis dwell), suppressing a
         metric oscillating around the threshold; it does not change what
         severity is attached, only when a transition is committed.
+        symptom_class (E3.4) classifies WHAT this rule detects; explicit and
+        operator-set, never inferred from metric, defaulting to
+        "unspecified". Primitive only — nothing reads it to make a decision
+        yet.
       properties:
         rule_id: { type: string }
         asset_id: { type: string }
@@ -3333,6 +3337,16 @@ components:
           maximum: 86400
           description: How long the breach must be sustained before the rule fires.
         severity: { type: string, enum: [critical, warning, info] }
+        symptom_class:
+          type: string
+          enum: [availability, resource, unspecified]
+          default: unspecified
+          description: >-
+            WHAT this rule detects (E3.4): availability = reachability/up-ness
+            (cascades through dependencies); resource = a resource/utilization
+            metric (cpu/disk/mem/latency — usually independent);
+            unspecified = not classified (the default). Explicit,
+            operator-set; never inferred from metric.
         enabled: { type: boolean }
         last_state:
           type: string
@@ -3365,7 +3379,8 @@ components:
       type: object
       required: [asset_id, metric, comparator, threshold, for_duration_seconds]
       description: >-
-        severity defaults to "warning" when omitted. enabled defaults to
+        severity defaults to "warning" when omitted. symptom_class defaults
+        to "unspecified" when omitted (E3.4). enabled defaults to
         true. flap_dwell_seconds defaults to 60 when omitted (E3.2).
       properties:
         asset_id: { type: string }
@@ -3374,6 +3389,10 @@ components:
         threshold: { type: number, format: double }
         for_duration_seconds: { type: integer, minimum: 1, maximum: 86400 }
         severity: { type: string, enum: [critical, warning, info] }
+        symptom_class:
+          type: string
+          enum: [availability, resource, unspecified]
+          default: unspecified
         enabled: { type: boolean }
         flap_dwell_seconds: { type: integer, minimum: 0, maximum: 86400, default: 60 }
     PatchAlertRuleRequest:
@@ -3381,15 +3400,16 @@ components:
       required: [row_version]
       description: >-
         Supply one or more of comparator, threshold, for_duration_seconds,
-        severity, enabled or flap_dwell_seconds. asset_id and metric cannot be
-        changed — delete and recreate the rule instead. Any patch clears the
-        rule's in-flight de-flap dwell candidate (E3.2).
+        severity, symptom_class, enabled or flap_dwell_seconds. asset_id and
+        metric cannot be changed — delete and recreate the rule instead. Any
+        patch clears the rule's in-flight de-flap dwell candidate (E3.2).
       properties:
         row_version: { type: integer, format: int64 }
         comparator: { type: string, enum: [gt, lt, gte, lte] }
         threshold: { type: number, format: double }
         for_duration_seconds: { type: integer, minimum: 1, maximum: 86400 }
         severity: { type: string, enum: [critical, warning, info] }
+        symptom_class: { type: string, enum: [availability, resource, unspecified] }
         enabled: { type: boolean }
         flap_dwell_seconds: { type: integer, minimum: 0, maximum: 86400 }
     MaintenanceWindow:
