@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OneOps — NOC</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0e14;
+    --panel: #131722;
+    --panel-border: #232a3b;
+    --text: #e6e9ef;
+    --muted: #8b93a7;
+    --ok: #2fbf71;
+    --warn: #e8a33d;
+    --crit: #e5484d;
+    --info: #4d8de8;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.9rem 1.25rem;
+    border-bottom: 1px solid var(--panel-border);
+    flex-wrap: wrap;
+  }
+  header h1 {
+    font-size: 1.05rem;
+    margin: 0;
+    letter-spacing: 0.02em;
+    font-weight: 600;
+  }
+  header h1 .dot {
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--ok);
+    margin-right: 0.5rem;
+  }
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  #last-updated {
+    color: var(--muted);
+    font-size: 0.8rem;
+    white-space: nowrap;
+  }
+  button {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    color: var(--text);
+    padding: 0.4rem 0.75rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.82rem;
+  }
+  button:hover { border-color: #3a4358; }
+  #token-form {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+  }
+  #token-input {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    color: var(--text);
+    padding: 0.35rem 0.5rem;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    width: 14rem;
+  }
+  #error-banner {
+    display: none;
+    margin: 0.75rem 1.25rem 0;
+    padding: 0.6rem 0.9rem;
+    border-radius: 6px;
+    background: rgba(229, 72, 77, 0.12);
+    border: 1px solid var(--crit);
+    color: #ffb4b6;
+    font-size: 0.85rem;
+  }
+  main {
+    padding: 1.25rem;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1rem;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 1rem 1.1rem;
+  }
+  .card h2 {
+    margin: 0 0 0.75rem;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .big {
+    font-size: 2rem;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.25rem 0;
+    font-size: 0.9rem;
+  }
+  .row + .row { border-top: 1px solid var(--panel-border); }
+  .pill {
+    display: inline-block;
+    min-width: 1.6rem;
+    text-align: center;
+    padding: 0.05rem 0.5rem;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 0.8rem;
+  }
+  .pill.crit { background: rgba(229,72,77,0.18); color: var(--crit); }
+  .pill.warn { background: rgba(232,163,61,0.18); color: var(--warn); }
+  .pill.info { background: rgba(77,141,232,0.18); color: var(--info); }
+  .pill.ok { background: rgba(47,191,113,0.18); color: var(--ok); }
+  .pill.muted { background: rgba(139,147,167,0.14); color: var(--muted); }
+  .empty {
+    color: var(--muted);
+    font-size: 0.85rem;
+    font-style: italic;
+  }
+  #oncall-list .row span:first-child {
+    color: var(--muted);
+    max-width: 60%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  footer {
+    padding: 1rem 1.25rem 1.5rem;
+    color: var(--muted);
+    font-size: 0.75rem;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="dot" id="status-dot"></span>OneOps NOC — Live Operational State</h1>
+  <div class="header-right">
+    <span id="last-updated">never updated</span>
+    <button id="refresh-btn" type="button">Refresh</button>
+    <form id="token-form" title="Only needed when this deployment requires authentication">
+      <input id="token-input" type="password" placeholder="Bearer token (if required)" autocomplete="off" />
+      <button id="token-save-btn" type="submit">Save</button>
+    </form>
+  </div>
+</header>
+
+<div id="error-banner"></div>
+
+<main>
+  <section class="card" id="incidents-card">
+    <h2>Incidents (open)</h2>
+    <div class="big" id="incidents-open-total">—</div>
+    <div style="margin-top:0.75rem" id="incidents-by-status"></div>
+    <div style="margin-top:0.5rem" id="incidents-by-severity"></div>
+    <div style="margin-top:0.5rem" id="incidents-grouped" class="empty"></div>
+  </section>
+
+  <section class="card" id="alerts-card">
+    <h2>Alerts (firing)</h2>
+    <div class="big" id="alerts-firing-total">—</div>
+    <div style="margin-top:0.75rem" id="alerts-by-severity"></div>
+  </section>
+
+  <section class="card" id="assets-card">
+    <h2>Asset health</h2>
+    <div id="assets-health"></div>
+  </section>
+
+  <section class="card" id="oncall-card">
+    <h2>On call now</h2>
+    <div id="oncall-list"></div>
+  </section>
+
+  <section class="card" id="escalations-card">
+    <h2>Escalations</h2>
+    <div class="big" id="escalations-active">—</div>
+    <div class="empty">active escalation(s) in progress</div>
+  </section>
+</main>
+
+<footer>
+  Polls <code>GET /v1/admin/noc/overview</code> every 15s. Read-only projection — nothing on this
+  screen is stored. See ADR-NOC-001 (the endpoint) and ADR-NOC-002 (this screen).
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var POLL_MS = 15000;
+  var TOKEN_KEY = "oneops.noc.token";
+  var endpoint = "/v1/admin/noc/overview";
+  var timer = null;
+
+  function getToken() {
+    try { return sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
+  }
+  function setToken(t) {
+    try {
+      if (t) { sessionStorage.setItem(TOKEN_KEY, t); }
+      else { sessionStorage.removeItem(TOKEN_KEY); }
+    } catch (e) { /* sessionStorage unavailable; token simply isn't persisted */ }
+  }
+
+  function el(id) { return document.getElementById(id); }
+
+  function severityPillClass(sev) {
+    switch (sev) {
+      case "critical": return "crit";
+      case "high": return "crit";
+      case "warning": return "warn";
+      case "medium": return "warn";
+      case "low": return "info";
+      case "info": return "info";
+      default: return "muted";
+    }
+  }
+
+  function row(label, value, pillClass) {
+    var v = document.createElement("div");
+    v.className = "row";
+    var l = document.createElement("span");
+    l.textContent = label;
+    var r = document.createElement("span");
+    if (pillClass) {
+      r.className = "pill " + pillClass;
+    }
+    r.textContent = String(value);
+    v.appendChild(l);
+    v.appendChild(r);
+    return v;
+  }
+
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+  function renderIncidents(data) {
+    var d = data.incidents || {};
+    el("incidents-open-total").textContent = d.open_total != null ? d.open_total : 0;
+
+    var byStatus = el("incidents-by-status");
+    clear(byStatus);
+    var st = d.by_status || {};
+    byStatus.appendChild(row("Open", st.open || 0, "crit"));
+    byStatus.appendChild(row("Acknowledged", st.acknowledged || 0, "warn"));
+    byStatus.appendChild(row("Investigating", st.investigating || 0, "info"));
+
+    var bySev = el("incidents-by-severity");
+    clear(bySev);
+    var sv = d.by_severity || {};
+    bySev.appendChild(row("Critical", sv.critical || 0, "crit"));
+    bySev.appendChild(row("High", sv.high || 0, "crit"));
+    bySev.appendChild(row("Medium", sv.medium || 0, "warn"));
+    bySev.appendChild(row("Low", sv.low || 0, "info"));
+
+    var grouped = el("incidents-grouped");
+    var g = d.grouped || {};
+    grouped.className = "";
+    clear(grouped);
+    grouped.appendChild(row("Root incidents", g.root_count || 0));
+    grouped.appendChild(row("Collateral incidents", g.collateral_count || 0));
+  }
+
+  function renderAlerts(data) {
+    var d = data.alerts || {};
+    el("alerts-firing-total").textContent = d.firing_total != null ? d.firing_total : 0;
+
+    var bySev = el("alerts-by-severity");
+    clear(bySev);
+    var sv = d.by_severity || {};
+    bySev.appendChild(row("Critical", sv.critical || 0, "crit"));
+    bySev.appendChild(row("Warning", sv.warning || 0, "warn"));
+    bySev.appendChild(row("Info", sv.info || 0, "info"));
+  }
+
+  function renderAssets(data) {
+    var d = data.assets || {};
+    var wrap = el("assets-health");
+    clear(wrap);
+    var total = (d.stale || 0) + (d.orphaned_assets || 0) + (d.orphaned_business_services || 0) + (d.incomplete || 0);
+    wrap.appendChild(row("Stale", d.stale || 0, d.stale ? "warn" : "ok"));
+    wrap.appendChild(row("Orphaned assets", d.orphaned_assets || 0, d.orphaned_assets ? "warn" : "ok"));
+    wrap.appendChild(row("Orphaned business services", d.orphaned_business_services || 0, d.orphaned_business_services ? "warn" : "ok"));
+    wrap.appendChild(row("Incomplete", d.incomplete || 0, d.incomplete ? "warn" : "ok"));
+    wrap.appendChild(row("Healthy", total === 0 ? "all clear" : "—", "ok"));
+  }
+
+  function renderOnCall(data) {
+    var list = el("oncall-list");
+    clear(list);
+    var entries = data.on_call || [];
+    if (entries.length === 0) {
+      var e = document.createElement("div");
+      e.className = "empty";
+      e.textContent = "no active on-call schedules";
+      list.appendChild(e);
+      return;
+    }
+    entries.forEach(function (entry) {
+      var name = entry.display_name || entry.user_id || "unassigned";
+      list.appendChild(row(entry.schedule_name || entry.schedule_id, name, entry.display_name ? "ok" : "muted"));
+    });
+  }
+
+  function renderEscalations(data) {
+    var d = data.escalations || {};
+    el("escalations-active").textContent = d.active_total != null ? d.active_total : 0;
+  }
+
+  function showError(message) {
+    var banner = el("error-banner");
+    banner.textContent = message;
+    banner.style.display = "block";
+    el("status-dot").style.background = "var(--crit)";
+  }
+
+  function hideError() {
+    var banner = el("error-banner");
+    banner.style.display = "none";
+    banner.textContent = "";
+    el("status-dot").style.background = "var(--ok)";
+  }
+
+  function setLastUpdated(when) {
+    el("last-updated").textContent = "updated " + when.toLocaleTimeString();
+  }
+
+  function load() {
+    var headers = { Accept: "application/json" };
+    var token = getToken();
+    if (token) headers.Authorization = "Bearer " + token;
+
+    fetch(endpoint, { headers: headers, credentials: "same-origin" })
+      .then(function (res) {
+        if (res.status === 401 || res.status === 403) {
+          throw new Error("not authenticated — this deployment requires a bearer token; paste one above");
+        }
+        if (res.status === 501) {
+          throw new Error("the NOC overview endpoint is not fully configured on this server");
+        }
+        if (!res.ok) {
+          throw new Error("server returned " + res.status + " — will retry");
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        hideError();
+        renderIncidents(data);
+        renderAlerts(data);
+        renderAssets(data);
+        renderOnCall(data);
+        renderEscalations(data);
+        setLastUpdated(new Date());
+      })
+      .catch(function (err) {
+        showError(err.message || "failed to reach the server");
+      });
+  }
+
+  function scheduleNext() {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(function () { load(); scheduleNext(); }, POLL_MS);
+  }
+
+  el("refresh-btn").addEventListener("click", function () { load(); });
+  el("token-form").addEventListener("submit", function (evt) {
+    evt.preventDefault();
+    setToken(el("token-input").value.trim());
+    el("token-input").value = "";
+    load();
+  });
+
+  load();
+  scheduleNext();
+})();
+</script>
+</body>
+</html>
