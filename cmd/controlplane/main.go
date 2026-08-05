@@ -600,6 +600,15 @@ func run(logger *slog.Logger) error {
 	srv.SetMaintenanceWindows(postgres.NewMaintenanceWindowStore(appPool))
 	maintenanceChecker := postgres.NewMaintenanceWindowStore(pool)
 
+	// On-call schedule administration (E5.2a): on_call_schedule/
+	// on_call_participant are tenant-owned and under row-level security,
+	// exactly like maintenance_window above, so the admin CRUD + roster +
+	// "who's on call" API is built from the tenant-scoped pool. Unlike
+	// alert_rule/maintenance_window there is no privileged-pool counterpart —
+	// no background worker in E5.2a consults this store (E5.2b's escalation
+	// worker, when built, is what would need one).
+	srv.SetOnCallSchedules(postgres.NewOnCallScheduleStore(appPool))
+
 	// Dependency-aware suppression (E3.3b, ADR-ALERTING-003): the down-check
 	// and the suppression record are privileged and cross-tenant (built over
 	// pool, same as maintenanceChecker above), but the dependency WALK itself
