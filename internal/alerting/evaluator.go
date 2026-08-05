@@ -70,6 +70,7 @@ type Evaluator struct {
 	notifier    Notifier
 	correlator  IncidentCorrelator
 	maintenance MaintenanceWindowChecker
+	dependency  DependencySuppressionChecker
 	metrics     Metrics
 	log         *slog.Logger
 	now         func() time.Time
@@ -93,9 +94,16 @@ type Evaluator struct {
 // E3.3a's own success criterion (ADR-ALERTING-002). Callers with no
 // maintenance-window capability configured pass a checker that always
 // reports no active window, never nil.
+//
+// dependency MUST NOT be nil either, for the identical reason
+// (ADR-ALERTING-003): a genuinely independent failure on a CI whose
+// dependency also happens to be down must not depend on whether this
+// argument happened to be wired. Callers with no CMDB-backed dependency
+// checker configured pass NopDependencySuppressionChecker, never nil.
 func NewEvaluator(
 	store Store, telemetry TelemetryReader, notifier Notifier, correlator IncidentCorrelator,
-	maintenance MaintenanceWindowChecker, metrics Metrics, log *slog.Logger, cfg Config,
+	maintenance MaintenanceWindowChecker, dependency DependencySuppressionChecker,
+	metrics Metrics, log *slog.Logger, cfg Config,
 ) *Evaluator {
 	if log == nil {
 		log = slog.Default()
@@ -106,7 +114,8 @@ func NewEvaluator(
 	cfg.withDefaults()
 	return &Evaluator{
 		store: store, telemetry: telemetry, notifier: notifier, correlator: correlator, maintenance: maintenance,
-		metrics: metrics, log: log,
+		dependency: dependency,
+		metrics:    metrics, log: log,
 		now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
 	}
 }
@@ -262,6 +271,32 @@ func (e *Evaluator) evaluateRule(ctx context.Context, rule *domain.AlertRule, no
 			e.metrics.IncSuppressed()
 			return // no notify, no correlate, no RecordTransition — see doc comment above
 		}
+
+		// E3.3b (ADR-ALERTING-003): dependency-aware suppression is a
+		// SEPARATE reason from E3.3a's operator-declared maintenance window
+		// above — either one suppresses independently, and this check runs
+		// second (an operator's explicit declaration takes precedence in
+		// the log/metric trail over an inferred topology fact; it is also
+		// the cheaper check of the two, so it is not the reason for the
+		// order). Everything E3.3a's own doc comment says about WHY this is
+		// "skip entirely, never persist" rather than "commit but suppress
+		// the side effect" applies identically here — see
+		// dependencySuppressed's own doc comment for the down-signal, the
+		// traversal direction/type filter, and the honest all-or-nothing
+		// bound this check accepts (ADR-ALERTING-003's Honest Bound: no
+		// symptom-class scoping exists, so a genuinely independent failure
+		// on X while a dependency is down is masked too, mitigated only by
+		// visible recording and self-clearing).
+		depSuppressed, err := e.dependencySuppressed(ctx, rule, now)
+		if err != nil {
+			e.log.Error("alert rule evaluator: check dependency suppression", "rule_id", rule.RuleID, "err", err)
+			e.metrics.IncErrors()
+			return // do not persist the transition; retry next tick
+		}
+		if depSuppressed {
+			e.metrics.IncDependencySuppressed()
+			return // no notify, no correlate, no RecordTransition — see doc comment above
+		}
 	}
 
 	if err := e.notify(ctx, rule, next); err != nil {
@@ -317,6 +352,40 @@ func (e *Evaluator) maintenanceSuppressed(ctx context.Context, rule *domain.Aler
 	if suppressed {
 		e.log.Info("alert rule evaluator: firing suppressed by an active maintenance window",
 			"rule_id", rule.RuleID, "tenant_id", rule.TenantID, "asset_id", rule.AssetID, "window_id", windowID)
+	}
+	return suppressed, nil
+}
+
+// dependencySuppressed reports whether rule's own (tenant, asset) currently
+// transitively depends — via depends_on/runs_on edges only — on some asset
+// that is itself "down" (E3.3b, ADR-ALERTING-003): has its own enabled,
+// firing alert_rule. tenantID is sourced from rule.TenantID — never assumed
+// or cached across rules — the same non-decision maintenanceSuppressed's own
+// doc comment already states for this package's other privileged,
+// cross-tenant checks.
+//
+// HONEST BOUND (ADR-ALERTING-003's Honest Bound, recorded here because this
+// is the call site that accepts it): there is no rule symptom-class/taxonomy
+// (deliberately deferred — docs/PLATFORM-BUILD-PLAN.md E3.3b), so this
+// suppresses X's ENTIRE firing whenever ANY dependency is down, all-or-
+// nothing per asset. A genuinely independent failure on X, coincidentally
+// concurrent with a dependency's outage, is masked too. This is mitigated,
+// never eliminated, by two properties already built above:
+// dependency_suppression's suppressed_count/last_suppressed_at make every
+// occurrence visible (never a silent drop), and — because RecordTransition
+// is skipped entirely, exactly like E3.3a — the suppression is self-
+// clearing: the moment the dependency recovers, X's next tick re-detects the
+// same ok->firing candidate and, finding no down dependency, pages normally.
+// Symptom-class scoping (suppress only reachability-class symptoms on X, not
+// every metric) is the named future refinement; it is not built here.
+func (e *Evaluator) dependencySuppressed(ctx context.Context, rule *domain.AlertRule, now time.Time) (bool, error) {
+	rootAssetID, suppressed, err := e.dependency.Suppress(ctx, rule.TenantID, rule.AssetID, now)
+	if err != nil {
+		return false, fmt.Errorf("check dependency suppression: %w", err)
+	}
+	if suppressed {
+		e.log.Info("alert rule evaluator: firing suppressed because a dependency is down",
+			"rule_id", rule.RuleID, "tenant_id", rule.TenantID, "asset_id", rule.AssetID, "root_asset_id", rootAssetID)
 	}
 	return suppressed, nil
 }

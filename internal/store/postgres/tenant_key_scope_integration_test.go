@@ -108,6 +108,12 @@ var keyScopeJustifications = map[string]string{
 
 	// Maintenance window (E3.3a).
 	"maintenance_window.maintenance_window_pkey": "window_id is platform-generated (domain.NewMaintenanceWindow); clients never supply it and there is no create route that accepts one",
+
+	// Dependency suppression (E3.3b). suppression_id is server-minted
+	// (domain.NewID in DependencySuppressionStore.record); the table is
+	// written ONLY by the leader-gated evaluator's privileged path — there is
+	// no client-facing create route that accepts a suppression_id at all.
+	"dependency_suppression.dependency_suppression_pkey": "suppression_id is server-minted (domain.NewID); the table is written only by the evaluator's privileged path, no client route accepts one",
 }
 
 func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {

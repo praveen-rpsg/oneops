@@ -78,6 +78,9 @@ var serverGeneratedIdentifiers = map[string]string{
 
 	// Maintenance window (E3.3a).
 	"maintenance_window_pkey": "window_id is server-minted (domain.NewMaintenanceWindow); no create route accepts one from a client",
+
+	// Dependency suppression (E3.3b).
+	"dependency_suppression_pkey": "suppression_id is server-minted (domain.NewID); written only by the evaluator's privileged path, no client create route accepts one",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

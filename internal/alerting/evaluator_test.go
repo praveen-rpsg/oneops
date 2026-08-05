@@ -24,14 +24,26 @@ func newTestEvaluatorWithCorrelator(store Store, tel TelemetryReader, notifier N
 	return newTestEvaluatorWithMaintenance(store, tel, notifier, correlator, newFakeMaintenanceChecker(), now)
 }
 
-// newTestEvaluatorWithMaintenance is the fully-general constructor every other
-// helper in this file delegates to, for the tests in maintenance_test.go that
-// need to control what the maintenance-window checker reports.
+// newTestEvaluatorWithMaintenance delegates to newTestEvaluatorWithDependency
+// with a dependency checker that never suppresses (newFakeDependencyChecker's
+// zero value), for every test that needs to control the maintenance-window
+// checker but not E3.3b's dependency checker.
 func newTestEvaluatorWithMaintenance(
 	store Store, tel TelemetryReader, notifier Notifier, correlator IncidentCorrelator,
 	maintenance MaintenanceWindowChecker, now time.Time,
 ) *Evaluator {
-	e := NewEvaluator(store, tel, notifier, correlator, maintenance, NopMetrics{}, quiet(), Config{Concurrency: 4})
+	return newTestEvaluatorWithDependency(store, tel, notifier, correlator, maintenance, newFakeDependencyChecker(), now)
+}
+
+// newTestEvaluatorWithDependency is the fully-general constructor every
+// other helper in this file delegates to, for the tests in
+// dependency_suppression_test.go that need to control what the
+// dependency-suppression checker reports.
+func newTestEvaluatorWithDependency(
+	store Store, tel TelemetryReader, notifier Notifier, correlator IncidentCorrelator,
+	maintenance MaintenanceWindowChecker, dependency DependencySuppressionChecker, now time.Time,
+) *Evaluator {
+	e := NewEvaluator(store, tel, notifier, correlator, maintenance, dependency, NopMetrics{}, quiet(), Config{Concurrency: 4})
 	e.now = func() time.Time { return now }
 	return e
 }
@@ -304,7 +316,7 @@ func TestEvaluator_CrossTenantTelemetryIsolation(t *testing.T) {
 
 	store := newFakeStore(rules...)
 	notifier := &fakeNotifier{}
-	e := NewEvaluator(store, tel, notifier, nil, newFakeMaintenanceChecker(), NopMetrics{}, quiet(), Config{Concurrency: 8})
+	e := NewEvaluator(store, tel, notifier, nil, newFakeMaintenanceChecker(), newFakeDependencyChecker(), NopMetrics{}, quiet(), Config{Concurrency: 8})
 	e.now = func() time.Time { return now }
 
 	e.RunOnce(context.Background())
