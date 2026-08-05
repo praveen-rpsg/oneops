@@ -6,9 +6,9 @@ import "github.com/prometheus/client_golang/prometheus"
 // alerting.PromMetrics. No tenant_id/incident_id label, the same cardinality
 // restraint every other background worker's metrics in this platform apply.
 type PromMetrics struct {
-	tenantsProcessed  prometheus.Counter
-	incidentsChanged  prometheus.Counter
-	errors            prometheus.Counter
+	tenantsProcessed prometheus.Counter
+	incidentsChanged prometheus.Counter
+	errors           prometheus.Counter
 }
 
 var _ Metrics = (*PromMetrics)(nil)
