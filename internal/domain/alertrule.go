@@ -66,6 +66,46 @@ func (s AlertSeverity) Valid() bool {
 	}
 }
 
+// AlertSymptomClass classifies WHAT a rule detects, not how severe it is
+// (that is AlertSeverity) — a taxonomy future consumers act on (E3.4). It is
+// deliberately minimal: the one distinction dependency suppression (E3.3b)
+// and root-cause ranking (E4.2) actually need is whether the symptom cascades
+// through dependencies. availability = reachability/up-ness (it cascades: a
+// downstream CI looks unreachable because its dependency is down); resource =
+// a resource/utilization metric such as cpu/disk/mem/latency (it is usually
+// independent of a dependency's own health). unspecified is the default for
+// every rule an operator has not explicitly classified. E3.4 is the
+// PRIMITIVE ONLY: this field is stored and exposed but nothing reads it to
+// make a decision yet — see DefaultAlertSymptomClass's doc comment.
+type AlertSymptomClass string
+
+const (
+	AlertSymptomClassAvailability AlertSymptomClass = "availability"
+	AlertSymptomClassResource     AlertSymptomClass = "resource"
+	AlertSymptomClassUnspecified  AlertSymptomClass = "unspecified"
+)
+
+// Valid reports whether c is a defined symptom class.
+func (c AlertSymptomClass) Valid() bool {
+	switch c {
+	case AlertSymptomClassAvailability, AlertSymptomClassResource, AlertSymptomClassUnspecified:
+		return true
+	default:
+		return false
+	}
+}
+
+// DefaultAlertSymptomClass is what a rule gets when an operator does not
+// explicitly classify it, on create and via the migration backfill of every
+// pre-existing row. It is NEVER inferred from Metric — a name-based guess is
+// fragile and would silently mis-suppress or mis-rank once a future story
+// (class-scoped E3.3b suppression, class-aware E4.2 root-cause ranking)
+// starts consuming this field — so an unclassified rule stays unspecified,
+// and unspecified is deliberately excluded from any future
+// dependency/root-cause behaviour those stories add, keeping every rule that
+// predates E3.4 behaving EXACTLY as it did before this field existed.
+const DefaultAlertSymptomClass = AlertSymptomClassUnspecified
+
 // AlertRuleState is the firing state a rule's evaluation last settled on.
 // It is a derived fact the evaluator writes, not a caller-settable field —
 // see AlertRulePatch's doc comment, the same split CollectorCheck draws for
@@ -137,7 +177,13 @@ type AlertRule struct {
 	Threshold   float64
 	ForDuration int // seconds; see MinAlertRuleForDurationSeconds/Max's doc comment
 	Severity    AlertSeverity
-	Enabled     bool
+	// SymptomClass is E3.4's taxonomy primitive — see AlertSymptomClass's own
+	// doc comment. Explicit and operator-set, defaulting to
+	// DefaultAlertSymptomClass; unlike LastState/PendingState it IS patchable
+	// through the row_version-guarded Update path, the same config-field
+	// treatment FlapDwellSeconds gets.
+	SymptomClass AlertSymptomClass
+	Enabled      bool
 	// LastState/LastTransitionAt are set only by the evaluator
 	// (internal/alerting.Evaluator via AlertRuleRepository's background
 	// counterpart), never through the row_version-guarded Update path — see
@@ -223,6 +269,9 @@ func (r *AlertRule) Validate() error {
 	if !r.Severity.Valid() {
 		return newValidation("severity", "must be one of: critical, warning, info")
 	}
+	if !r.SymptomClass.Valid() {
+		return newValidation("symptom_class", "must be one of: availability, resource, unspecified")
+	}
 	if !r.LastState.Valid() {
 		return newValidation("last_state", "must be one of: ok, firing")
 	}
@@ -252,6 +301,7 @@ func NewAlertRule(
 		Threshold:        threshold,
 		ForDuration:      forDurationSeconds,
 		Severity:         severity,
+		SymptomClass:     DefaultAlertSymptomClass,
 		Enabled:          true,
 		LastState:        AlertRuleStateOK,
 		FlapDwellSeconds: DefaultAlertRuleFlapDwellSeconds,
@@ -281,6 +331,7 @@ type AlertRulePatch struct {
 	Threshold        *float64
 	ForDuration      *int
 	Severity         *AlertSeverity
+	SymptomClass     *AlertSymptomClass
 	Enabled          *bool
 	FlapDwellSeconds *int
 }

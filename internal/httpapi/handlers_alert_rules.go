@@ -25,6 +25,7 @@ type alertRuleDTO struct {
 	Threshold        float64    `json:"threshold"`
 	ForDurationSecs  int        `json:"for_duration_seconds"`
 	Severity         string     `json:"severity"`
+	SymptomClass     string     `json:"symptom_class"`
 	Enabled          bool       `json:"enabled"`
 	LastState        string     `json:"last_state"`
 	LastTransitionAt *time.Time `json:"last_transition_at,omitempty"`
@@ -39,12 +40,15 @@ type alertRuleDTO struct {
 // It also omits pending_state/pending_since (E3.2) — the de-flap dwell's
 // in-flight candidate is internal evaluator bookkeeping, not something an
 // operator administers or needs to see; flap_dwell_seconds (the config knob)
-// is the only part of E3.2 that is part of this contract.
+// is the only part of E3.2 that is part of this contract. symptom_class
+// (E3.4) is always present, never omitted — every rule has one, defaulting
+// to "unspecified".
 func toAlertRuleDTO(r *domain.AlertRule) alertRuleDTO {
 	dto := alertRuleDTO{
 		RuleID: r.RuleID, AssetID: r.AssetID, Metric: r.Metric,
 		Comparator: string(r.Comparator), Threshold: r.Threshold, ForDurationSecs: r.ForDuration,
-		Severity: string(r.Severity), Enabled: r.Enabled, LastState: string(r.LastState),
+		Severity: string(r.Severity), SymptomClass: string(r.SymptomClass),
+		Enabled: r.Enabled, LastState: string(r.LastState),
 		FlapDwellSecs: r.FlapDwellSeconds,
 		RowVersion:    r.RowVersion, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
@@ -59,7 +63,9 @@ func toAlertRuleDTO(r *domain.AlertRule) alertRuleDTO {
 // rule createCollectorCheckRequest follows) and no last_state/
 // last_transition_at (evaluator-owned — see domain.AlertRule's doc comment).
 // severity defaults to "warning" when omitted; flap_dwell_seconds defaults to
-// domain.DefaultAlertRuleFlapDwellSeconds when omitted (E3.2).
+// domain.DefaultAlertRuleFlapDwellSeconds when omitted (E3.2);
+// symptom_class defaults to domain.DefaultAlertSymptomClass ("unspecified")
+// when omitted (E3.4) — never inferred from metric.
 type createAlertRuleRequest struct {
 	AssetID         string  `json:"asset_id"`
 	Metric          string  `json:"metric"`
@@ -67,6 +73,7 @@ type createAlertRuleRequest struct {
 	Threshold       float64 `json:"threshold"`
 	ForDurationSecs int     `json:"for_duration_seconds"`
 	Severity        string  `json:"severity"`
+	SymptomClass    string  `json:"symptom_class"`
 	Enabled         *bool   `json:"enabled"`
 	FlapDwellSecs   *int    `json:"flap_dwell_seconds"`
 }
@@ -76,20 +83,22 @@ type createAlertRuleRequest struct {
 // so are last_state/last_transition_at/pending_state/pending_since, which
 // only the evaluator sets (patching ANY field, including flap_dwell_seconds
 // itself, clears a rule's in-flight pending candidate — see
-// domain.AlertRulePatch's doc comment).
+// domain.AlertRulePatch's doc comment). symptom_class (E3.4) is patchable
+// like severity.
 type patchAlertRuleRequest struct {
 	RowVersion      int64    `json:"row_version"`
 	Comparator      *string  `json:"comparator"`
 	Threshold       *float64 `json:"threshold"`
 	ForDurationSecs *int     `json:"for_duration_seconds"`
 	Severity        *string  `json:"severity"`
+	SymptomClass    *string  `json:"symptom_class"`
 	Enabled         *bool    `json:"enabled"`
 	FlapDwellSecs   *int     `json:"flap_dwell_seconds"`
 }
 
 func (req patchAlertRuleRequest) anyFieldSet() bool {
 	return req.Comparator != nil || req.Threshold != nil || req.ForDurationSecs != nil ||
-		req.Severity != nil || req.Enabled != nil || req.FlapDwellSecs != nil
+		req.Severity != nil || req.SymptomClass != nil || req.Enabled != nil || req.FlapDwellSecs != nil
 }
 
 // listAlertRules returns a page of the caller's alert rules.
@@ -143,6 +152,10 @@ func (s *Server) createAlertRule(w http.ResponseWriter, r *http.Request) {
 	if severity == "" {
 		severity = domain.AlertSeverityWarning
 	}
+	symptomClass := domain.AlertSymptomClass(req.SymptomClass)
+	if symptomClass == "" {
+		symptomClass = domain.DefaultAlertSymptomClass
+	}
 
 	rule, err := domain.NewAlertRule(
 		tenant.TenantID, req.AssetID, req.Metric, domain.AlertComparator(req.Comparator),
@@ -151,6 +164,7 @@ func (s *Server) createAlertRule(w http.ResponseWriter, r *http.Request) {
 		s.mapError(w, r, err)
 		return
 	}
+	rule.SymptomClass = symptomClass
 	if req.Enabled != nil {
 		rule.Enabled = *req.Enabled
 	}
@@ -208,7 +222,7 @@ func (s *Server) patchAlertRule(w http.ResponseWriter, r *http.Request) {
 	}
 	if !req.anyFieldSet() {
 		s.mapError(w, r, domain.NewValidationError("body",
-			"supply at least one of comparator, threshold, for_duration_seconds, severity, enabled or flap_dwell_seconds"))
+			"supply at least one of comparator, threshold, for_duration_seconds, severity, symptom_class, enabled or flap_dwell_seconds"))
 		return
 	}
 
@@ -223,6 +237,10 @@ func (s *Server) patchAlertRule(w http.ResponseWriter, r *http.Request) {
 	if req.Severity != nil {
 		sev := domain.AlertSeverity(*req.Severity)
 		patch.Severity = &sev
+	}
+	if req.SymptomClass != nil {
+		sc := domain.AlertSymptomClass(*req.SymptomClass)
+		patch.SymptomClass = &sc
 	}
 
 	updated, err := s.alertRules.Update(r.Context(), id, req.RowVersion, patch)

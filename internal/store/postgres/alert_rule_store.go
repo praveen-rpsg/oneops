@@ -19,7 +19,7 @@ const (
 )
 
 const alertRuleCols = `rule_id, tenant_id, asset_id, metric, comparator, threshold, for_duration_seconds,
-	severity, enabled, last_state, last_transition_at, flap_dwell_seconds, pending_state, pending_since,
+	severity, symptom_class, enabled, last_state, last_transition_at, flap_dwell_seconds, pending_state, pending_since,
 	current_incident_id, row_version, created_at, updated_at`
 
 // AlertRuleStore administers alert_rule: the admin CRUD API's tenant-scoped
@@ -62,6 +62,7 @@ func scanAlertRule(sc scanner) (*domain.AlertRule, error) {
 		r                domain.AlertRule
 		comparator       string
 		severity         string
+		symptomClass     string
 		lastState        string
 		lastTransitionAt *time.Time
 		pendingState     *string
@@ -69,13 +70,14 @@ func scanAlertRule(sc scanner) (*domain.AlertRule, error) {
 	)
 	if err := sc.Scan(
 		&r.RuleID, &r.TenantID, &r.AssetID, &r.Metric, &comparator, &r.Threshold, &r.ForDuration,
-		&severity, &r.Enabled, &lastState, &lastTransitionAt, &r.FlapDwellSeconds, &pendingState, &pendingSince,
+		&severity, &symptomClass, &r.Enabled, &lastState, &lastTransitionAt, &r.FlapDwellSeconds, &pendingState, &pendingSince,
 		&r.CurrentIncidentID, &r.RowVersion, &r.CreatedAt, &r.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
 	r.Comparator = domain.AlertComparator(comparator)
 	r.Severity = domain.AlertSeverity(severity)
+	r.SymptomClass = domain.AlertSymptomClass(symptomClass)
 	r.LastState = domain.AlertRuleState(lastState)
 	if lastTransitionAt != nil {
 		r.LastTransitionAt = *lastTransitionAt
@@ -112,12 +114,12 @@ func (s *AlertRuleStore) Create(ctx context.Context, r *domain.AlertRule) (*doma
 	row := s.pool.QueryRow(ctx, `
 		INSERT INTO alert_rule
 			(rule_id, tenant_id, asset_id, metric, comparator, threshold, for_duration_seconds,
-			 severity, enabled, last_state, last_transition_at, flap_dwell_seconds, pending_state, pending_since,
+			 severity, symptom_class, enabled, last_state, last_transition_at, flap_dwell_seconds, pending_state, pending_since,
 			 row_version, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,$11,NULL,NULL,1,now(),now())
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULL,$12,NULL,NULL,1,now(),now())
 		RETURNING `+alertRuleCols,
 		r.RuleID, r.TenantID, r.AssetID, r.Metric, string(r.Comparator), r.Threshold, r.ForDuration,
-		string(r.Severity), r.Enabled, string(r.LastState), r.FlapDwellSeconds)
+		string(r.Severity), string(r.SymptomClass), r.Enabled, string(r.LastState), r.FlapDwellSeconds)
 
 	created, err := scanAlertRule(row)
 	if err != nil {
@@ -197,6 +199,9 @@ func (s *AlertRuleStore) Update(
 	if patch.Severity != nil {
 		current.Severity = *patch.Severity
 	}
+	if patch.SymptomClass != nil {
+		current.SymptomClass = *patch.SymptomClass
+	}
 	if patch.Enabled != nil {
 		current.Enabled = *patch.Enabled
 	}
@@ -209,13 +214,13 @@ func (s *AlertRuleStore) Update(
 
 	row := s.pool.QueryRow(ctx, `
 		UPDATE alert_rule
-		   SET comparator = $3, threshold = $4, for_duration_seconds = $5, severity = $6, enabled = $7,
-		       flap_dwell_seconds = $8, pending_state = NULL, pending_since = NULL,
+		   SET comparator = $3, threshold = $4, for_duration_seconds = $5, severity = $6, symptom_class = $7,
+		       enabled = $8, flap_dwell_seconds = $9, pending_state = NULL, pending_since = NULL,
 		       row_version = row_version + 1, updated_at = now()
 		 WHERE rule_id = $1 AND row_version = $2
 		RETURNING `+alertRuleCols,
 		ruleID, rowVersion, string(current.Comparator), current.Threshold, current.ForDuration,
-		string(current.Severity), current.Enabled, current.FlapDwellSeconds)
+		string(current.Severity), string(current.SymptomClass), current.Enabled, current.FlapDwellSeconds)
 
 	updated, err := scanAlertRule(row)
 	if errors.Is(err, pgx.ErrNoRows) {
