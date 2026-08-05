@@ -232,6 +232,39 @@ func (s *AlertRuleStore) Update(
 	return updated, nil
 }
 
+// CountFiring implements domain.AlertRuleRepository (E7.1's NOC overview
+// projection): a single bounded GROUP BY, confined to enabled rows by
+// ix_alert_rule_enabled — a partial index on `enabled = true`, the same one
+// EnabledRules' own due-scan uses — before last_state is even checked, so
+// cost tracks the caller's own enabled-rule count, never the whole table,
+// and row-level security narrows it to the caller's own tenant on this
+// tenant-scoped connection.
+func (s *AlertRuleStore) CountFiring(ctx context.Context) (*domain.AlertFiringCounts, error) {
+	out := &domain.AlertFiringCounts{BySeverity: map[domain.AlertSeverity]int{}}
+	rows, err := s.pool.Query(ctx, `
+		SELECT severity, COUNT(*)
+		  FROM alert_rule
+		 WHERE enabled = true AND last_state = 'firing'
+		 GROUP BY severity`)
+	if err != nil {
+		return nil, fmt.Errorf("count firing alert rules: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var severity string
+		var n int
+		if err := rows.Scan(&severity, &n); err != nil {
+			return nil, fmt.Errorf("scan firing alert rule count: %w", err)
+		}
+		out.BySeverity[domain.AlertSeverity(severity)] = n
+		out.Total += n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate firing alert rule counts: %w", err)
+	}
+	return out, nil
+}
+
 // explainMissedUpdate distinguishes "gone" from "stale version" after an
 // UPDATE matched no row — mirrors CollectorCheckStore.explainMissedUpdate.
 func (s *AlertRuleStore) explainMissedUpdate(ctx context.Context, ruleID string) error {

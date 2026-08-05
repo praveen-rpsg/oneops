@@ -50,9 +50,17 @@ const escalationSeedCandidatesQuery = `
 // escalation work-queue (E5.2b-2, ADR-ONCALL-003). Built over the PRIVILEGED
 // pool: the Seeder and Worker that use it both process every tenant from one
 // process, the identical dual-role split notification/grouping/
-// collector-check already draw in this codebase. There is no tenant-scoped
-// counterpart — escalation_state has no HTTP write path and no admin API at
-// all; this store is its only writer.
+// collector-check already draw in this codebase. This store is
+// escalation_state's only WRITER, and there is still no HTTP write path or
+// admin CRUD API for it at all.
+//
+// E7.1 (NOC overview) adds this type's first tenant-scoped READ role:
+// CountActive is called through a SECOND instance built over the
+// tenant-scoped appPool, not the privileged instance above — the identical
+// dual-role split AlertRuleStore/IncidentStore already draw between their
+// admin-CRUD and privileged-worker instances, applied here between a
+// read-only projection and the privileged Seeder/Worker instead of between
+// two writers.
 type EscalationStateStore struct {
 	pool *pgxpool.Pool
 }
@@ -219,6 +227,27 @@ func (s *EscalationStateStore) MarkTerminal(
 		return escalation.ErrStaleClaim
 	}
 	return nil
+}
+
+// CountActive returns how many escalation_state rows are currently 'active'
+// (E7.1's NOC overview projection) — a plain COUNT with no explicit
+// tenant_id predicate, correct here ONLY because this method must be called
+// through an instance built over the tenant-scoped appPool (see this type's
+// own doc comment), where row-level security supplies the filter, exactly
+// as every other tenant-scoped store in this package assumes. Bounded by
+// ix_escalation_state_claim: that partial index's own condition
+// (`WHERE status = 'active'`) matches this query's WHERE clause exactly, so
+// Postgres can satisfy it by walking the index rather than the whole table —
+// cost tracks the current work-queue depth, not escalation_state's full
+// history.
+func (s *EscalationStateStore) CountActive(ctx context.Context) (int, error) {
+	var n int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM escalation_state WHERE status = 'active'`,
+	).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count active escalation states: %w", err)
+	}
+	return n, nil
 }
 
 // ReleaseClaim implements escalation.Store: claimed_at is cleared and the

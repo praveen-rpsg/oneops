@@ -29,6 +29,12 @@ type fakeOnCallSchedules struct {
 
 	getSchedule *domain.OnCallSchedule
 	onCallRes   *domain.OnCallResolution
+
+	// listSchedules, when non-nil, is returned by List as-is (E7.1's NOC
+	// overview test needs to control which schedules — and which Status —
+	// come back). nil preserves every existing caller's expectation of an
+	// empty list.
+	listSchedules []*domain.OnCallSchedule
 }
 
 func (f *fakeOnCallSchedules) touched() int {
@@ -66,7 +72,7 @@ func (f *fakeOnCallSchedules) Get(context.Context, string) (*domain.OnCallSchedu
 
 func (f *fakeOnCallSchedules) List(context.Context, int, string) ([]*domain.OnCallSchedule, error) {
 	f.lists++
-	return nil, nil
+	return f.listSchedules, nil
 }
 
 func (f *fakeOnCallSchedules) Update(

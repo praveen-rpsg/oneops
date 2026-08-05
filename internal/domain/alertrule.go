@@ -361,4 +361,22 @@ type AlertRuleRepository interface {
 	Update(ctx context.Context, ruleID string, rowVersion int64, patch AlertRulePatch) (*AlertRule, error)
 	// Delete removes a rule, or returns ErrNotFound.
 	Delete(ctx context.Context, ruleID string) error
+	// CountFiring returns how many of the caller's ENABLED rules are
+	// currently firing (enabled = true AND last_state = 'firing'), broken
+	// down by severity — a bounded COUNT/GROUP BY, never a List (E7.1's NOC
+	// overview projection).
+	CountFiring(ctx context.Context) (*AlertFiringCounts, error)
+}
+
+// AlertFiringCounts is the bounded aggregate behind the NOC overview
+// projection's "alerts" section (E7.1) — a computed read over the derived
+// firing state alert_rule already carries, never a reified Alert/Event/
+// Signal row (docs/PLATFORM-BUILD-PLAN.md §4).
+type AlertFiringCounts struct {
+	// Total is the count of every enabled, currently-firing rule — the sum
+	// of BySeverity's values.
+	Total int
+	// BySeverity breaks Total down by AlertSeverity. A severity with no
+	// firing rules is absent, not a zero-valued entry.
+	BySeverity map[AlertSeverity]int
 }

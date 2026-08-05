@@ -2575,6 +2575,35 @@ paths:
         '422': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/noc/overview:
+    get:
+      summary: NOC operational-overview projection (E7.1, read-only)
+      description: >-
+        The current operational state of the whole NOC loop, computed at
+        request time from the incident/alert-rule/asset/on-call/
+        escalation-state stores — a transient DTO, never a stored
+        Dashboard/Report/Overview entity (docs/PLATFORM-BUILD-PLAN.md §4,
+        Vol III §3.4). incidents/alerts are scoped to open-class incidents
+        (open, acknowledged, investigating) and currently-firing enabled
+        alert rules respectively; assets reuses GET /admin/assets/health's
+        category counts; on_call lists up to 100 of the caller's ACTIVE
+        on-call schedules (bounded — see the handler's own doc comment) with
+        who is on call right now for each; escalations is the current size
+        of the escalation_state work-queue. Every read is on the
+        tenant-scoped, row-level-security-enforced connection: no explicit
+        tenant predicate is needed and none is added. Telemetry summary and
+        real-time streaming are deliberately out of scope for this story
+        (ADR-NOC-001).
+      operationId: nocOverview
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: The current NOC overview
+          content: { application/json: { schema: { $ref: '#/components/schemas/NOCOverview' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/notifications:
     get:
       summary: List the caller's tenant's notifications
@@ -4027,6 +4056,94 @@ components:
         at: { type: string, format: date-time }
         user_id: { type: string }
         display_name: { type: string }
+    NOCIncidentStatusCounts:
+      type: object
+      description: Open-class incident counts by status (E7.1).
+      properties:
+        open: { type: integer }
+        acknowledged: { type: integer }
+        investigating: { type: integer }
+    NOCIncidentSeverityCounts:
+      type: object
+      description: Open-class incident counts by severity (E7.1).
+      properties:
+        critical: { type: integer }
+        high: { type: integer }
+        medium: { type: integer }
+        low: { type: integer }
+    NOCIncidentGrouping:
+      type: object
+      description: >-
+        E4.2's root/collateral summary over the same open-class incident set.
+        collateral_count is how many open-class incidents have a non-null
+        root_incident_id; root_count is how many distinct roots those
+        collateral incidents name.
+      properties:
+        root_count: { type: integer }
+        collateral_count: { type: integer }
+    NOCIncidentsOverview:
+      type: object
+      properties:
+        open_total: { type: integer }
+        by_status: { $ref: '#/components/schemas/NOCIncidentStatusCounts' }
+        by_severity: { $ref: '#/components/schemas/NOCIncidentSeverityCounts' }
+        grouped: { $ref: '#/components/schemas/NOCIncidentGrouping' }
+    NOCAlertSeverityCounts:
+      type: object
+      properties:
+        critical: { type: integer }
+        warning: { type: integer }
+        info: { type: integer }
+    NOCAlertsOverview:
+      type: object
+      description: >-
+        Currently-firing ENABLED alert rules (enabled = true AND
+        last_state = 'firing') — derived state, never a reified Alert row.
+      properties:
+        firing_total: { type: integer }
+        by_severity: { $ref: '#/components/schemas/NOCAlertSeverityCounts' }
+    NOCAssetsOverview:
+      type: object
+      description: >-
+        Category counts reused unchanged from GET /admin/assets/health
+        (E1.5) — the bounded per-category sample list that endpoint also
+        returns is not reproduced here.
+      properties:
+        stale: { type: integer }
+        orphaned_assets: { type: integer }
+        orphaned_business_services: { type: integer }
+        incomplete: { type: integer }
+    NOCOnCallEntry:
+      type: object
+      description: >-
+        One ACTIVE schedule's current on-call resolution. user_id/
+        display_name are both null when the schedule's roster is empty — an
+        ordinary state, not an error.
+      properties:
+        schedule_id: { type: string }
+        schedule_name: { type: string }
+        user_id: { type: string, nullable: true }
+        display_name: { type: string, nullable: true }
+    NOCEscalationsOverview:
+      type: object
+      description: The current size of the escalation_state work-queue (E5.2b-2).
+      properties:
+        active_total: { type: integer }
+    NOCOverview:
+      type: object
+      description: >-
+        The current operational state of the whole NOC loop (E7.1) — a
+        transient, computed-at-request-time projection, never a stored
+        Dashboard/Report/Overview entity (docs/PLATFORM-BUILD-PLAN.md §4).
+      properties:
+        incidents: { $ref: '#/components/schemas/NOCIncidentsOverview' }
+        alerts: { $ref: '#/components/schemas/NOCAlertsOverview' }
+        assets: { $ref: '#/components/schemas/NOCAssetsOverview' }
+        on_call:
+          type: array
+          items: { $ref: '#/components/schemas/NOCOnCallEntry' }
+        escalations: { $ref: '#/components/schemas/NOCEscalationsOverview' }
+        generated_at: { type: string, format: date-time }
     Incident:
       type: object
       description: >-
