@@ -107,6 +107,33 @@ type IncidentCorrelator interface {
 	AppendAlertNote(ctx context.Context, tenantID, incidentID, note, actor string) error
 }
 
+// MaintenanceWindowChecker is E3.3a's privileged read+record port
+// (ADR-ALERTING-002): whether (tenantID, assetID) is inside an ACTIVE
+// maintenance window at `at`, and, when it is, recording that a firing was
+// suppressed because of it. *postgres.MaintenanceWindowStore satisfies it
+// when built over the PRIVILEGED pool — the same dual-role split Store and
+// IncidentCorrelator above already document; the admin CRUD API
+// (domain.MaintenanceWindowRepository) is built from the tenant-scoped pool
+// instead.
+//
+// tenantID is always sourced from the firing rule's own row (rule.TenantID),
+// never assumed or cached across rules — the identical non-decision
+// ADR-TENANCY-012 requires of QueryRangeForTenant and IncidentCorrelator's
+// methods, applied here a third time: this connection has row-level
+// security switched off.
+type MaintenanceWindowChecker interface {
+	// Suppress reports whether an ACTIVE window (at ∈ [starts_at, ends_at),
+	// half-open) covers (tenantID, assetID) at `at` and, if one does,
+	// atomically records the suppression on it (suppressed_count++,
+	// last_suppressed_at = at) in the SAME operation — see
+	// postgres.MaintenanceWindowStore.Suppress's doc comment for why a
+	// check-then-act race between two rules firing on the same asset at once
+	// must not undercount. windowID is meaningful only when suppressed is
+	// true (used for logging, not for any further decision the evaluator
+	// makes).
+	Suppress(ctx context.Context, tenantID, assetID string, at time.Time) (windowID string, suppressed bool, err error)
+}
+
 // TelemetryReader is the narrow, tenant-explicit telemetry read the evaluator
 // needs — see domain.TelemetryRepository.QueryRangeForTenant's doc comment
 // for why QueryRange itself (RLS-only isolation) is unsafe to call from this
@@ -128,13 +155,18 @@ type Metrics interface {
 	IncEvaluated()
 	IncFired()
 	IncRecovered()
+	// IncSuppressed counts an ok->firing transition suppressed by an active
+	// maintenance window (E3.3a) — distinct from IncErrors: a suppression is
+	// the maintenance-window check working as designed, not a failure.
+	IncSuppressed()
 	IncErrors()
 }
 
 // NopMetrics is the no-op Metrics.
 type NopMetrics struct{}
 
-func (NopMetrics) IncEvaluated() {}
-func (NopMetrics) IncFired()     {}
-func (NopMetrics) IncRecovered() {}
-func (NopMetrics) IncErrors()    {}
+func (NopMetrics) IncEvaluated()  {}
+func (NopMetrics) IncFired()      {}
+func (NopMetrics) IncRecovered()  {}
+func (NopMetrics) IncSuppressed() {}
+func (NopMetrics) IncErrors()     {}

@@ -65,14 +65,15 @@ func (c *Config) withDefaults() {
 // Evaluator is the leader-gated alert-rule evaluator — see the package doc
 // comment.
 type Evaluator struct {
-	store      Store
-	telemetry  TelemetryReader
-	notifier   Notifier
-	correlator IncidentCorrelator
-	metrics    Metrics
-	log        *slog.Logger
-	now        func() time.Time
-	cfg        Config
+	store       Store
+	telemetry   TelemetryReader
+	notifier    Notifier
+	correlator  IncidentCorrelator
+	maintenance MaintenanceWindowChecker
+	metrics     Metrics
+	log         *slog.Logger
+	now         func() time.Time
+	cfg         Config
 }
 
 // NewEvaluator builds the evaluator over the privileged pool's Store and
@@ -84,9 +85,17 @@ type Evaluator struct {
 // metrics there is no safe no-op IncidentCorrelator to default to (any
 // stand-in either lies about creating an incident or silently drops the
 // correlation, and this package does not decide which is less wrong).
+//
+// maintenance MUST NOT be nil: unlike correlator, a maintenance window
+// suppresses a page an operator has explicitly declared unwanted, and a
+// silent no-op stand-in would make "planned maintenance must not page"
+// depend on whether this argument happened to be wired — the opposite of
+// E3.3a's own success criterion (ADR-ALERTING-002). Callers with no
+// maintenance-window capability configured pass a checker that always
+// reports no active window, never nil.
 func NewEvaluator(
 	store Store, telemetry TelemetryReader, notifier Notifier, correlator IncidentCorrelator,
-	metrics Metrics, log *slog.Logger, cfg Config,
+	maintenance MaintenanceWindowChecker, metrics Metrics, log *slog.Logger, cfg Config,
 ) *Evaluator {
 	if log == nil {
 		log = slog.Default()
@@ -96,7 +105,8 @@ func NewEvaluator(
 	}
 	cfg.withDefaults()
 	return &Evaluator{
-		store: store, telemetry: telemetry, notifier: notifier, correlator: correlator, metrics: metrics, log: log,
+		store: store, telemetry: telemetry, notifier: notifier, correlator: correlator, maintenance: maintenance,
+		metrics: metrics, log: log,
 		now: func() time.Time { return time.Now().UTC() }, cfg: cfg,
 	}
 }

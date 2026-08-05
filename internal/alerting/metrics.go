@@ -6,10 +6,11 @@ import "github.com/prometheus/client_golang/prometheus"
 // collector.PromMetrics. No rule_id or tenant_id label, the same cardinality
 // restraint notification.PromMetrics and collector.PromMetrics document.
 type PromMetrics struct {
-	evaluated prometheus.Counter
-	fired     prometheus.Counter
-	recovered prometheus.Counter
-	errors    prometheus.Counter
+	evaluated  prometheus.Counter
+	fired      prometheus.Counter
+	recovered  prometheus.Counter
+	suppressed prometheus.Counter
+	errors     prometheus.Counter
 }
 
 var _ Metrics = (*PromMetrics)(nil)
@@ -26,11 +27,15 @@ func NewPromMetrics(reg prometheus.Registerer) *PromMetrics {
 		recovered: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "oneops_alert_rules_recovered_total", Help: "Total firing->ok transitions.",
 		}),
+		suppressed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "oneops_alert_rules_maintenance_suppressed_total",
+			Help: "Total ok->firing transitions suppressed by an active maintenance window (E3.3a).",
+		}),
 		errors: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "oneops_alert_rules_evaluation_errors_total", Help: "Total evaluation errors (telemetry read, notify, or persist failures).",
 		}),
 	}
-	reg.MustRegister(m.evaluated, m.fired, m.recovered, m.errors)
+	reg.MustRegister(m.evaluated, m.fired, m.recovered, m.suppressed, m.errors)
 	return m
 }
 
@@ -42,6 +47,9 @@ func (m *PromMetrics) IncFired() { m.fired.Inc() }
 
 // IncRecovered implements Metrics.
 func (m *PromMetrics) IncRecovered() { m.recovered.Inc() }
+
+// IncSuppressed implements Metrics.
+func (m *PromMetrics) IncSuppressed() { m.suppressed.Inc() }
 
 // IncErrors implements Metrics.
 func (m *PromMetrics) IncErrors() { m.errors.Inc() }
