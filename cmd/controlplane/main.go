@@ -599,10 +599,25 @@ func run(logger *slog.Logger) error {
 	srv.SetMaintenanceWindows(postgres.NewMaintenanceWindowStore(appPool))
 	maintenanceChecker := postgres.NewMaintenanceWindowStore(pool)
 
+	// Dependency-aware suppression (E3.3b, ADR-ALERTING-003): the down-check
+	// and the suppression record are privileged and cross-tenant (built over
+	// pool, same as maintenanceChecker above), but the dependency WALK itself
+	// must stay RLS-scoped — see DependencySuppressionStore's own doc comment
+	// for why bypassing RLS on asset_relationship would let a firing on one
+	// tenant's asset be "explained away" by another tenant's edge. It is
+	// therefore handed its own AssetGraphRepo built over appPool (the
+	// tenant-scoped pool), not the instance srv.SetAssetGraph above uses —
+	// same stateless adapter, wired a second time for a different caller. It
+	// must never be nil either, for the identical "must not depend on
+	// whether this was wired" reason maintenanceChecker's comment states
+	// (alerting.NewEvaluator's doc comment).
+	dependencyGraph := postgres.NewAssetGraphRepo(appPool)
+	dependencyChecker := postgres.NewDependencySuppressionStore(pool, dependencyGraph, 0)
+
 	alertingMetrics := alerting.NewPromMetrics(metrics.Registry())
 	alertEvaluator := alerting.NewEvaluator(
 		alertRuleStore, postgres.NewTelemetryStore(pool), notificationSvc, incidentCorrelator,
-		maintenanceChecker, alertingMetrics, logger, alerting.Config{})
+		maintenanceChecker, dependencyChecker, alertingMetrics, logger, alerting.Config{})
 	workers = append(workers, alertEvaluator.Run)
 
 	// Operational diagnostics + administration APIs: both reuse one diagnostics

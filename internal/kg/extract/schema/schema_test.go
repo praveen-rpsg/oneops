@@ -54,7 +54,7 @@ func TestEveryTableIsANode(t *testing.T) {
 		"admin_audit_chain_head", "admin_audit_event", "alert_rule", "app_user", "approval_record", "artifact_version",
 		"asset", "asset_change_history", "asset_relationship",
 		"audit_chain_head", "audit_event", "audit_event_default", "collector_check", "configuration_metadata",
-		"configuration_object", "dependency_edge", "idempotency_key", "incident", "incident_event", "invitation",
+		"configuration_object", "dependency_edge", "dependency_suppression", "idempotency_key", "incident", "incident_event", "invitation",
 		"maintenance_window", "membership", "notification", "organization", "policy", "policy_cursor", "policy_execution",
 		"setting", "team", "team_membership", "telemetry_rollup_5m", "telemetry_sample", "tenant", "webhook", "webhook_cursor",
 		"webhook_delivery", "webhook_replay_job",
@@ -99,8 +99,8 @@ func TestCommentsDoNotDeclareObjects(t *testing.T) {
 func TestIndexOnClauseMaySpanLines(t *testing.T) {
 	nodes, edges := extract(t)
 	idx := byKind(nodes)[kindIndex]
-	if len(idx) != 81 {
-		t.Errorf("extracted %d indexes, want 81", len(idx))
+	if len(idx) != 82 {
+		t.Errorf("extracted %d indexes, want 82", len(idx))
 	}
 	// ix_webhook_delivery_due declares ON on a following line.
 	const want = "index:ix_webhook_delivery_due"
@@ -283,7 +283,7 @@ func TestCorpusCensus(t *testing.T) {
 		got[n.Kind]++
 	}
 	want := map[string]int{
-		kindTable: 37, kindColumn: 346, kindIndex: 81, kindConstraint: 113, kindTrigger: 8,
+		kindTable: 38, kindColumn: 355, kindIndex: 82, kindConstraint: 117, kindTrigger: 8,
 	}
 	for kind, w := range want {
 		if got[kind] != w {
@@ -400,22 +400,22 @@ func TestMultiLineAlterTableIsExtracted(t *testing.T) {
 		}
 	}
 
-	// Thirty-one tables carry the discriminator (E2.1 added telemetry_sample;
+	// Thirty-two tables carry the discriminator (E2.1 added telemetry_sample;
 	// E2.1b adds telemetry_rollup_5m; E2.2a adds collector_check; E3.1 adds
 	// alert_rule; E5.1 adds incident and incident_event; E3.3a adds
-	// maintenance_window — declared inline in its CREATE TABLE, not a
-	// multi-line ALTER TABLE, but counted the same way: this assertion sweeps
-	// every tenant_id column node regardless of which declaration form
-	// produced it). Anything less is a wrong answer to the question the
-	// graph exists to answer.
+	// maintenance_window; E3.3b adds dependency_suppression — both declared
+	// inline in their CREATE TABLE, not a multi-line ALTER TABLE, but counted
+	// the same way: this assertion sweeps every tenant_id column node
+	// regardless of which declaration form produced it). Anything less is a
+	// wrong answer to the question the graph exists to answer.
 	scoped := 0
 	for _, n := range nodes {
 		if strings.HasSuffix(n.ID, ".tenant_id") && n.Kind == kindColumn {
 			scoped++
 		}
 	}
-	if scoped != 31 {
-		t.Errorf("%d tables carry tenant_id, want 31", scoped)
+	if scoped != 32 {
+		t.Errorf("%d tables carry tenant_id, want 32", scoped)
 	}
 
 	// A multi-line declaration must still be owned by its table.
