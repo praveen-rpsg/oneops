@@ -170,6 +170,59 @@ func TestMembership_RevocationPreservesTheRow(t *testing.T) {
 	}
 }
 
+// TestMembershipStore_ActiveMember is the live-Postgres proof behind
+// internal/escalation's page-time active-membership re-check (E5.2a review
+// nit 1, ADR-ONCALL-003 §4): revoking a membership must flip ActiveMember
+// from true to false against real RLS-scoped data, not merely in a fake.
+func TestMembershipStore_ActiveMember(t *testing.T) {
+	pool := testPool(t)
+	ctx := adminTestCtx()
+	org, user := membershipFixture(t)
+	store := NewMembershipStore(pool)
+
+	// A user nobody ever granted membership to is not active.
+	active, err := store.ActiveMember(ctx, user.UserID)
+	if err != nil {
+		t.Fatalf("active member (ungranted): %v", err)
+	}
+	if active {
+		t.Error("a user with no membership row was reported active")
+	}
+
+	granted, err := store.Grant(ctx, mustNewMembership(t, org, user))
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	active, err = store.ActiveMember(ctx, user.UserID)
+	if err != nil {
+		t.Fatalf("active member (granted): %v", err)
+	}
+	if !active {
+		t.Error("an actively granted member was reported not active")
+	}
+
+	// The bite: revoking flips it back to false, live.
+	if _, err := store.Revoke(ctx, granted.MembershipID); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	active, err = store.ActiveMember(ctx, user.UserID)
+	if err != nil {
+		t.Fatalf("active member (revoked): %v", err)
+	}
+	if active {
+		t.Fatal("a revoked member was still reported active — the page-time re-check would not bite")
+	}
+}
+
+func mustNewMembership(t *testing.T, org *domain.Organization, user *domain.User) *domain.Membership {
+	t.Helper()
+	m, err := domain.NewMembership(org.OrgID, org.TenantID, user.UserID)
+	if err != nil {
+		t.Fatalf("new membership: %v", err)
+	}
+	return m
+}
+
 // Listing is bounded and keyset-paginated over a unique key, so a page can
 // neither skip a row nor repeat one.
 func TestMembership_ListPaginatesDeterministically(t *testing.T) {

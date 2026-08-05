@@ -101,6 +101,18 @@ func TestAppUserMigration_AppliesAndRollsBackOnPopulatedDatabase(t *testing.T) {
 		t.Fatalf("roll back team before app_user: %v", err)
 	}
 
+	// escalation_state (E5.2b-2) references BOTH incident and
+	// escalation_policy, so its rollback must run before either of theirs —
+	// the same ordering protection every other referencing table's rollback
+	// documents here.
+	esDown, err := os.ReadFile("../migrate/rollback/20260903000001_escalation_state.down.sql")
+	if err != nil {
+		t.Fatalf("read escalation state rollback: %v", err)
+	}
+	if _, err := tx.Exec(ctx, string(esDown)); err != nil {
+		t.Fatalf("roll back escalation_state before incident and escalation_policy: %v", err)
+	}
+
 	// alert_rule.current_incident_id (E4.1) references incident, so that
 	// migration's rollback must run before incident's own — the same
 	// ordering protection this whole chain already documents (see this
