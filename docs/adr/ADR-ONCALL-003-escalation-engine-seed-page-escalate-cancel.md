@@ -229,9 +229,32 @@ takes `TenantID` as an explicit struct field for the identical reason
 `domain.Notification`'s own doc comment already states — the delivery
 worker that eventually sends it is itself cross-tenant).
 
+**Precisely what each test proves, stated without overclaiming.**
 `TestWorker_BindsEachTenantScopedReadToTheStateRowsOwnTenant`
-(`internal/escalation/worker_test.go`) processes two tenants' rows in one
-`RunOnce` batch and asserts the resulting notifications are never crossed;
+(`internal/escalation/worker_test.go`) is a UNIT-level proof only: each fake
+dependency (`IncidentReader`/`PolicyReader`/`OnCallResolver`/
+`MembershipChecker`) records the literal ctx tenant it was called with
+(`tenantCalls`, not an inference from which fake-map entry was returned), and
+the test asserts tenant A's own incident/policy/schedule/user were each
+queried under `ctx` bound to `"tn-a"` and tenant B's under `"tn-b"` — never
+crossed, never a third value. This is deliberately a **stronger** check than
+"the two resulting notifications were not crossed": a broken binding that
+bound every claimed row to the *same* wrong tenant (mutation-verified by
+hand: hard-coding `scopedCtx := domain.WithTenant(ctx, &domain.
+Tenant{TenantID: "WRONG-TENANT"})` at `Worker.process`, `worker.go`, made
+every one of the eight assertions fail, reverted afterward) would, in this
+test's specific fixture, also happen to produce zero notifications rather
+than two crossed ones — the direct ctx-tenant assertion catches it either
+way; a notification-count-only assertion would not necessarily have.
+`fakeUsers` is deliberately excluded from this proof: `UserReader.Get`
+resolves `app_user`, a GLOBAL table with no row-level security
+(ADR-IDENTITY-002 §3.1), so it is correctly NOT tenant-scoped, and this test
+does not claim otherwise.
+
+This unit test proves the Worker's own Go code passes the right ctx to each
+dependency. It does **not**, and cannot, prove PostgreSQL's row-level
+security itself confines a real connection — fakes have no RLS to defeat.
+That is a live-database property, proven separately:
 `TestEscalationStateStore_RLSIsolatesByTenant`
 (`internal/store/postgres/escalation_state_store_integration_test.go`)
 proves the live-Postgres half — a connection bound to tenant B cannot read
@@ -308,11 +331,14 @@ operation, and a stale claim's outcome write is rejected rather than
 overwriting a reclaiming worker's decision
 (`TestWorker_ConcurrentRunOnce_NeverPagesTheSameTierTwice`,
 `TestWorker_StaleClaimFence_OutcomeNotOverwritten`,
-`TestEscalationStateStore_ClaimDueClaimsAndFencesTheOutcome`). Tenant
-isolation holds both at the engine level (never crossing a page to the
-wrong tenant) and at the database level
-(`TestWorker_BindsEachTenantScopedReadToTheStateRowsOwnTenant`,
-`TestEscalationStateStore_RLSIsolatesByTenant`). Neither `internal/alerting`
+`TestEscalationStateStore_ClaimDueClaimsAndFencesTheOutcome`). The Worker's
+own code binds each tenant-scoped read to the claimed row's own tenant, never
+a fixed or crossed one, proven at the unit level by asserting the literal ctx
+tenant each dependency call received
+(`TestWorker_BindsEachTenantScopedReadToTheStateRowsOwnTenant`); that a real
+PostgreSQL connection is actually confined by that binding is a separate,
+live-database claim proven by
+`TestEscalationStateStore_RLSIsolatesByTenant`. Neither `internal/alerting`
 nor `internal/notification` nor `internal/grouping` has any change in this
 story.
 
@@ -380,9 +406,15 @@ directly; an operator's only visibility is the Prometheus counters
   argument.
 - `postgres.TestEscalationStateStore_ClaimDueClaimsAndFencesTheOutcome` —
   §6's live-Postgres half.
-- `postgres.TestEscalationStateStore_RLSIsolatesByTenant` /
-  `escalation.TestWorker_BindsEachTenantScopedReadToTheStateRowsOwnTenant`
-  — §7's tenant-isolation argument.
+- `escalation.TestWorker_BindsEachTenantScopedReadToTheStateRowsOwnTenant` —
+  §7's unit-level claim: each tenant-scoped dependency call is bound to the
+  claimed row's own tenant (asserted on the literal ctx tenant each fake
+  received, not inferred from output), mutation-verified by hand
+  (hard-coding a single wrong tenant at `Worker.process` fails all eight
+  assertions; reverted).
+- `postgres.TestEscalationStateStore_RLSIsolatesByTenant` — §7's SEPARATE
+  live-database claim: a real connection bound to one tenant cannot read
+  another's `escalation_state` row. Neither test stands in for the other.
 - `postgres.TestEscalationStateStore_UniqueConstraintPreventsSecondRowPerIncident`
   — the CTO-locked "at most one escalation per incident" invariant.
 - `arch.TestServerWiringUsesTenantScopedPool` /

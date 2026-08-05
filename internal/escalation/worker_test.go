@@ -439,23 +439,39 @@ func TestWorker_MidBatchCancellation_ReleasesUnprocessedClaims(t *testing.T) {
 // ---- tenant re-derivation --------------------------------------------------
 
 // TestWorker_BindsEachTenantScopedReadToTheStateRowsOwnTenant proves
-// ADR-TENANCY-003 is actually exercised: the incident/policy/on-call reads
-// are bound to st.TenantID via domain.WithTenant on every call, not a fixed
-// or ambient tenant.
+// domain.WithTenant is actually called with EACH claimed row's OWN tenant on
+// every tenant-scoped read (incident/policy-tiers/on-call/active-membership),
+// not a fixed or ambient one — the direct evidence, via tenantCalls, of what
+// ctx each fake dependency actually received, not an inference from which
+// notification came out the other end. (fakeUsers is deliberately excluded:
+// app_user is a GLOBAL table with no row-level security — ADR-IDENTITY-002
+// §3.1 — so UserReader.Get is correctly NOT tenant-scoped, and asserting a
+// tenant on it here would misrepresent that.)
+//
+// This test is a UNIT-level proof only: it shows the Worker's own Go code
+// passes the right ctx to each dependency it calls. It does not, and cannot,
+// prove PostgreSQL's row-level security itself confines a real connection —
+// that is a live-database property, proven separately by
+// postgres.TestEscalationStateStore_RLSIsolatesByTenant (ADR-ONCALL-003 §7).
 func TestWorker_BindsEachTenantScopedReadToTheStateRowsOwnTenant(t *testing.T) {
 	now := time.Now().UTC()
 	store := newFakeStore(
 		newActiveState("st-a", "tn-a", "inc-a", "pol-a", 0, now),
 		newActiveState("st-b", "tn-b", "inc-b", "pol-b", 0, now),
 	)
+	calls := newTenantCalls()
 	incidents := newFakeIncidents(newOpenIncident("inc-a", "tn-a"), newOpenIncident("inc-b", "tn-b"))
+	incidents.calls = calls
 	policies := newFakePolicies()
+	policies.calls = calls
 	policies.setTiers("pol-a", newTier("pol-a", 0, "sched-a", 60))
 	policies.setTiers("pol-b", newTier("pol-b", 0, "sched-b", 60))
 	oncall := newFakeOnCall()
+	oncall.calls = calls
 	oncall.set("sched-a", "usr-a")
 	oncall.set("sched-b", "usr-b")
 	membership := newFakeMembership()
+	membership.calls = calls
 	membership.setActive("usr-a", true)
 	membership.setActive("usr-b", true)
 	users := newFakeUsers()
@@ -465,6 +481,23 @@ func TestWorker_BindsEachTenantScopedReadToTheStateRowsOwnTenant(t *testing.T) {
 
 	w := newTestWorker(store, incidents, policies, oncall, membership, users, notifier, nil)
 	w.RunOnce(context.Background())
+
+	// The direct evidence: each dependency call for tenant A's own
+	// incident/policy/schedule/user was made under a ctx bound to "tn-a",
+	// and likewise for tenant B under "tn-b" — never crossed, never a third
+	// (wrong/fixed/ambient) value. A broken binding (e.g. every row processed
+	// under the same hard-coded tenant) makes at least one of these fail even
+	// though the fake-map lookups above would still resolve by ID alone.
+	for key, want := range map[string]string{
+		"inc-a": "tn-a", "inc-b": "tn-b",
+		"pol-a": "tn-a", "pol-b": "tn-b",
+		"sched-a": "tn-a", "sched-b": "tn-b",
+		"usr-a": "tn-a", "usr-b": "tn-b",
+	} {
+		if got := calls.only(key); got != want {
+			t.Errorf("ctx tenant seen for %q = %q, want %q (or seen under more than one tenant)", key, got, want)
+		}
+	}
 
 	if notifier.count() != 2 {
 		t.Fatalf("notifications = %d, want 2 (one per tenant, never crossed)", notifier.count())

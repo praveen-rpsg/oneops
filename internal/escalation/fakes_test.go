@@ -12,6 +12,57 @@ import (
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// tenantCalls records, for a given lookup key (an incident/policy/schedule/
+// user id), every ctx tenant id a fake dependency actually received when
+// queried with it — direct evidence of what domain.WithTenant bound on that
+// call, not an inference from a side effect. Used by
+// TestWorker_BindsEachTenantScopedReadToTheStateRowsOwnTenant to prove the
+// Worker binds each tenant-scoped read to the claimed row's OWN tenant
+// (ADR-TENANCY-003), rather than a fixed or ambient one: a broken binding
+// (e.g. every row bound to the same wrong tenant) changes what gets recorded
+// here even when it does not change which fake-map entry is returned.
+type tenantCalls struct {
+	mu   sync.Mutex
+	seen map[string][]string // key -> ctx tenant ids seen, in call order
+}
+
+func newTenantCalls() *tenantCalls { return &tenantCalls{seen: map[string][]string{}} }
+
+// record notes the ctx tenant seen for one call keyed by key. A nil *tenantCalls
+// is valid and a no-op, so every other test that does not care about this can
+// leave the field unset.
+func (c *tenantCalls) record(ctx context.Context, key string) {
+	if c == nil {
+		return
+	}
+	tid := ""
+	if t, ok := domain.TenantFrom(ctx); ok {
+		tid = t.TenantID
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.seen[key] = append(c.seen[key], tid)
+}
+
+// only returns the single ctx tenant id recorded for key, or "" if key was
+// never queried or was queried under more than one tenant (a test asserting
+// on this wants a single, unambiguous answer, not a silently-picked one).
+func (c *tenantCalls) only(key string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ids := c.seen[key]
+	if len(ids) == 0 {
+		return ""
+	}
+	first := ids[0]
+	for _, id := range ids[1:] {
+		if id != first {
+			return ""
+		}
+	}
+	return first
+}
+
 // fakeStore is an in-memory Store. Its ClaimDue/Advance/MarkTerminal mirror
 // the real store's contract closely enough to exercise the Worker: the claim
 // charges the attempt, a claimed row is excluded until its lease elapses, and
@@ -133,11 +184,13 @@ func newActiveState(id, tenantID, incidentID, policyID string, tierIndex int, du
 	}
 }
 
-// fakeIncidents is a fake IncidentReader.
+// fakeIncidents is a fake IncidentReader. calls, when set, records the ctx
+// tenant seen per incidentID (see tenantCalls's own doc comment).
 type fakeIncidents struct {
-	mu  sync.Mutex
-	m   map[string]*domain.Incident
-	err error
+	mu    sync.Mutex
+	m     map[string]*domain.Incident
+	err   error
+	calls *tenantCalls
 }
 
 func newFakeIncidents(incs ...*domain.Incident) *fakeIncidents {
@@ -148,7 +201,8 @@ func newFakeIncidents(incs ...*domain.Incident) *fakeIncidents {
 	return f
 }
 
-func (f *fakeIncidents) Get(_ context.Context, incidentID string) (*domain.Incident, error) {
+func (f *fakeIncidents) Get(ctx context.Context, incidentID string) (*domain.Incident, error) {
+	f.calls.record(ctx, incidentID)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
@@ -168,10 +222,12 @@ func newOpenIncident(id, tenantID string) *domain.Incident {
 	}
 }
 
-// fakePolicies is a fake PolicyReader: policyID -> ordered tiers.
+// fakePolicies is a fake PolicyReader: policyID -> ordered tiers. calls, when
+// set, records the ctx tenant seen per policyID.
 type fakePolicies struct {
-	mu sync.Mutex
-	m  map[string][]*domain.EscalationTier
+	mu    sync.Mutex
+	m     map[string][]*domain.EscalationTier
+	calls *tenantCalls
 }
 
 func newFakePolicies() *fakePolicies { return &fakePolicies{m: map[string][]*domain.EscalationTier{}} }
@@ -182,7 +238,8 @@ func (f *fakePolicies) setTiers(policyID string, tiers ...*domain.EscalationTier
 	f.m[policyID] = tiers
 }
 
-func (f *fakePolicies) ListTiers(_ context.Context, policyID string, limit int, _ string) ([]*domain.EscalationTier, error) {
+func (f *fakePolicies) ListTiers(ctx context.Context, policyID string, limit int, _ string) ([]*domain.EscalationTier, error) {
+	f.calls.record(ctx, policyID)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := f.m[policyID]
@@ -200,10 +257,11 @@ func newTier(policyID string, position int, scheduleID string, waitSeconds int) 
 }
 
 // fakeOnCall is a fake OnCallResolver: scheduleID -> the userID on call (or
-// none).
+// none). calls, when set, records the ctx tenant seen per scheduleID.
 type fakeOnCall struct {
-	mu sync.Mutex
-	m  map[string]*string
+	mu    sync.Mutex
+	m     map[string]*string
+	calls *tenantCalls
 }
 
 func newFakeOnCall() *fakeOnCall { return &fakeOnCall{m: map[string]*string{}} }
@@ -215,7 +273,8 @@ func (f *fakeOnCall) set(scheduleID, userID string) {
 	f.m[scheduleID] = &u
 }
 
-func (f *fakeOnCall) OnCall(_ context.Context, scheduleID string, at time.Time) (*domain.OnCallResolution, error) {
+func (f *fakeOnCall) OnCall(ctx context.Context, scheduleID string, at time.Time) (*domain.OnCallResolution, error) {
+	f.calls.record(ctx, scheduleID)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	res := &domain.OnCallResolution{ScheduleID: scheduleID, At: at}
@@ -225,10 +284,12 @@ func (f *fakeOnCall) OnCall(_ context.Context, scheduleID string, at time.Time) 
 	return res, nil
 }
 
-// fakeMembership is a fake MembershipChecker: userID -> active?
+// fakeMembership is a fake MembershipChecker: userID -> active? calls, when
+// set, records the ctx tenant seen per userID.
 type fakeMembership struct {
-	mu sync.Mutex
-	m  map[string]bool
+	mu    sync.Mutex
+	m     map[string]bool
+	calls *tenantCalls
 }
 
 func newFakeMembership() *fakeMembership { return &fakeMembership{m: map[string]bool{}} }
@@ -239,7 +300,8 @@ func (f *fakeMembership) setActive(userID string, active bool) {
 	f.m[userID] = active
 }
 
-func (f *fakeMembership) ActiveMember(_ context.Context, userID string) (bool, error) {
+func (f *fakeMembership) ActiveMember(ctx context.Context, userID string) (bool, error) {
+	f.calls.record(ctx, userID)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.m[userID], nil
