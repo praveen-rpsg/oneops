@@ -165,6 +165,24 @@ func (s *MembershipStore) Revoke(ctx context.Context, membershipID string) (*dom
 	return revoked, nil
 }
 
+// ActiveMember reports whether userID has an ACTIVE membership row in the
+// caller's tenant — a public, read-only counterpart to the private
+// verifyActiveMember check several other stores each carry their own copy of
+// (OnCallScheduleStore.verifyActiveMember, IncidentStore.verifyAssigneeExists),
+// exposed here so a consumer outside this package can perform the identical
+// check without a fourth copy of the same SQL. Used by internal/escalation's
+// page-time active-membership re-check (E5.2a review nit 1, ADR-ONCALL-003
+// §4): an on-call user who has since been revoked must not be paged.
+func (s *MembershipStore) ActiveMember(ctx context.Context, userID string) (bool, error) {
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM membership WHERE user_id = $1 AND status = 'active')`, userID,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check active member: %w", err)
+	}
+	return exists, nil
+}
+
 // ListByOrg returns a page of an organisation's memberships, ordered by
 // membership_id — a ULID, and therefore ordered by creation. Keyset rather than
 // OFFSET so a page does not shift under concurrent grants.

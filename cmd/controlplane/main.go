@@ -22,6 +22,7 @@ import (
 	"github.com/rpsg/oneops/internal/compliance"
 	"github.com/rpsg/oneops/internal/config"
 	"github.com/rpsg/oneops/internal/diag"
+	"github.com/rpsg/oneops/internal/escalation"
 	"github.com/rpsg/oneops/internal/events"
 	"github.com/rpsg/oneops/internal/governance"
 	"github.com/rpsg/oneops/internal/grouping"
@@ -497,7 +498,14 @@ func run(logger *slog.Logger) error {
 	// The organisation registry writes the `tenant` row too, inside one
 	// transaction (ADR-IDENTITY-001 §7.1); `tenant` is likewise outside RLS and
 	// grantable, so the scoped role can complete that write.
-	srv.SetUsers(postgres.NewUserStore(appPool))
+	// Captured in a named variable, not only handed to SetUsers, because
+	// internal/escalation's paging Worker also reads it (resolving an
+	// on-call user's email) — see that wiring below for why reusing this
+	// exact tenant-scoped instance, rather than a new privileged-pool
+	// re-implementation, is correct (app_user is a GLOBAL table with no
+	// row-level security, ADR-IDENTITY-002 §3.1).
+	userStore := postgres.NewUserStore(appPool)
+	srv.SetUsers(userStore)
 	srv.SetOrganizations(postgres.NewOrganizationStore(appPool))
 	// The administrative audit reader is built from the PRIVILEGED pool, and
 	// that is the least-privilege choice rather than a shortcut: the tenant
@@ -507,8 +515,11 @@ func run(logger *slog.Logger) error {
 	// (ADR-AUDIT-007 §6.4, §6.5).
 	srv.SetAdminAudit(postgres.NewAdminAuditQueryStore(pool))
 	// Tenant-owned and under row-level security, so the tenant-scoped pool is
-	// correct and no exemption is needed.
-	srv.SetMemberships(postgres.NewMembershipStore(appPool))
+	// correct and no exemption is needed. Captured in a named variable for
+	// the same reason userStore is above: internal/escalation's Worker also
+	// reads it, for the page-time active-membership re-check.
+	membershipStore := postgres.NewMembershipStore(appPool)
+	srv.SetMemberships(membershipStore)
 	// Team is tenant-owned and under row-level security, exactly like
 	// membership above, so no exemption is needed here either.
 	srv.SetTeams(postgres.NewTeamStore(appPool))
@@ -560,8 +571,11 @@ func run(logger *slog.Logger) error {
 	// Incident administration (E5.1, the ITSM core): incident/incident_event
 	// are tenant-owned and under row-level security, exactly like asset
 	// above, so the admin CRUD + lifecycle + timeline API is built from the
-	// tenant-scoped pool.
-	srv.SetIncidents(postgres.NewIncidentStore(appPool))
+	// tenant-scoped pool. Captured in a named variable for the same reason
+	// userStore is above: internal/escalation's Worker also reads it, to
+	// re-check an incident is still open before paging it.
+	incidentStore := postgres.NewIncidentStore(appPool)
+	srv.SetIncidents(incidentStore)
 
 	// Alert rule administration + the leader-gated evaluator (E3.1, E4.1):
 	// alert_rule is tenant-owned and under row-level security, exactly like
@@ -605,18 +619,21 @@ func run(logger *slog.Logger) error {
 	// exactly like maintenance_window above, so the admin CRUD + roster +
 	// "who's on call" API is built from the tenant-scoped pool. Unlike
 	// alert_rule/maintenance_window there is no privileged-pool counterpart —
-	// no background worker in E5.2a consults this store (E5.2b's escalation
-	// worker, when built, is what would need one).
-	srv.SetOnCallSchedules(postgres.NewOnCallScheduleStore(appPool))
+	// no background worker in E5.2a consults this store directly (E5.2b-2's
+	// escalation Worker below reads it, but as this exact tenant-scoped
+	// instance bound per-row via domain.WithTenant, not a privileged one).
+	// Captured in a named variable for the same reason userStore is above.
+	onCallScheduleStore := postgres.NewOnCallScheduleStore(appPool)
+	srv.SetOnCallSchedules(onCallScheduleStore)
 
 	// Escalation policy + tier administration (E5.2b-1): escalation_policy/
 	// escalation_tier are tenant-owned and under row-level security, exactly
 	// like on_call_schedule above, so the admin CRUD + tier ladder API is
-	// built from the tenant-scoped pool. CONFIG ONLY: there is no
-	// privileged-pool counterpart and no engine/worker wired here — the
-	// escalation engine that pages and advances tiers (E5.2b-2) is a later,
-	// separate story.
-	srv.SetEscalationPolicies(postgres.NewEscalationPolicyStore(appPool))
+	// built from the tenant-scoped pool. Captured in a named variable for
+	// the same reason userStore is above: E5.2b-2's escalation Worker below
+	// walks a policy's tier ladder through this exact instance.
+	escalationPolicyStore := postgres.NewEscalationPolicyStore(appPool)
+	srv.SetEscalationPolicies(escalationPolicyStore)
 
 	// Dependency-aware suppression (E3.3b, ADR-ALERTING-003): the down-check
 	// and the suppression record are privileged and cross-tenant (built over
@@ -655,6 +672,35 @@ func run(logger *slog.Logger) error {
 	groupingMetrics := grouping.NewPromMetrics(metrics.Registry())
 	groupingReconciler := grouping.NewReconciler(groupingStore, dependencyGraph, groupingMetrics, logger, grouping.Config{})
 	workers = append(workers, groupingReconciler.Run)
+
+	// Escalation engine (E5.2b-2, ADR-ONCALL-003): pages an incident's
+	// on-call chain and escalates through its policy's tiers while it stays
+	// open and unacknowledged, stopping the moment it is acked or resolved.
+	// TWO SEPARATE leader-gated passes, mirroring notificationWorker/
+	// groupingReconciler above rather than a third shape: a Seeder that
+	// enrols newly-open, unacked, alert-sourced incidents (decoupled from
+	// alertEvaluator's own hot path — it never touches it), and a Worker
+	// that claims due escalation_state rows and pages/escalates them.
+	// escalation_state is the work-queue: privileged and cross-tenant, the
+	// identical dual-role split notificationStore/groupingStore above
+	// already draw (built over pool). Every OTHER read the Worker performs —
+	// the incident, the policy's tiers, who is on call, active membership,
+	// the on-call user's email — reuses the EXISTING tenant-scoped stores
+	// captured above (incidentStore, escalationPolicyStore,
+	// onCallScheduleStore, membershipStore, userStore) UNCHANGED, bound to
+	// each claimed row's own tenant per call (domain.WithTenant) rather than
+	// a privileged re-implementation of any of them — see
+	// internal/escalation's own package doc comment for why re-deriving the
+	// tenant this way is safe (ADR-TENANCY-003). Paging reuses notificationSvc
+	// (built over pool above) to enqueue an email Notification — no change to
+	// internal/notification at all.
+	escalationStateStore := postgres.NewEscalationStateStore(pool)
+	escalationMetrics := escalation.NewPromMetrics(metrics.Registry())
+	escalationSeeder := escalation.NewSeeder(escalationStateStore, escalationMetrics, logger, escalation.SeederConfig{})
+	escalationWorker := escalation.NewWorker(
+		escalationStateStore, incidentStore, escalationPolicyStore, onCallScheduleStore,
+		membershipStore, userStore, notificationSvc, escalationMetrics, logger, escalation.WorkerConfig{})
+	workers = append(workers, escalationSeeder.Run, escalationWorker.Run)
 
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.

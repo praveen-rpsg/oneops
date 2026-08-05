@@ -91,6 +91,11 @@ var serverGeneratedIdentifiers = map[string]string{
 	// Escalation policy + tier config, CRUD only (E5.2b-1).
 	"escalation_policy_pkey": "policy_id is server-minted (domain.NewEscalationPolicy); no create route accepts one from a client",
 	"escalation_tier_pkey":   "tier_id is server-minted (domain.NewEscalationTier); no create route accepts one from a client",
+
+	// Escalation engine work-queue (E5.2b-2). uq_escalation_state_tenant_incident
+	// already carries tenant_id directly and so never reaches this map; only
+	// the surrogate PK does.
+	"escalation_state_pkey": "state_id is server-minted (domain.NewEscalationState); there is no HTTP write path onto this table at all — it is written only by the leader-gated Seeder",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

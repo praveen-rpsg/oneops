@@ -126,6 +126,11 @@ var keyScopeJustifications = map[string]string{
 	// PKs need justifying here.
 	"escalation_policy.escalation_policy_pkey": "policy_id is server-minted (domain.NewEscalationPolicy); clients never supply it and there is no create route that accepts one",
 	"escalation_tier.escalation_tier_pkey":     "tier_id is server-minted (domain.NewEscalationTier); clients never supply it and there is no create route that accepts one",
+
+	// Escalation engine work-queue (E5.2b-2). uq_escalation_state_tenant_incident
+	// already contains tenant_id directly (route 1), so only the surrogate PK
+	// needs justifying here.
+	"escalation_state.escalation_state_pkey": "state_id is server-minted (domain.NewEscalationState); there is no HTTP write path onto this table at all — it is written only by the leader-gated Seeder",
 }
 
 func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {

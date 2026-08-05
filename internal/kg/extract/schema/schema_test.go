@@ -54,7 +54,7 @@ func TestEveryTableIsANode(t *testing.T) {
 		"admin_audit_chain_head", "admin_audit_event", "alert_rule", "app_user", "approval_record", "artifact_version",
 		"asset", "asset_change_history", "asset_relationship",
 		"audit_chain_head", "audit_event", "audit_event_default", "collector_check", "configuration_metadata",
-		"configuration_object", "dependency_edge", "dependency_suppression", "escalation_policy", "escalation_tier",
+		"configuration_object", "dependency_edge", "dependency_suppression", "escalation_policy", "escalation_state", "escalation_tier",
 		"idempotency_key", "incident", "incident_event", "invitation",
 		"maintenance_window", "membership", "notification", "on_call_participant", "on_call_schedule", "organization", "policy", "policy_cursor", "policy_execution",
 		"setting", "team", "team_membership", "telemetry_rollup_5m", "telemetry_sample", "tenant", "webhook", "webhook_cursor",
@@ -100,8 +100,8 @@ func TestCommentsDoNotDeclareObjects(t *testing.T) {
 func TestIndexOnClauseMaySpanLines(t *testing.T) {
 	nodes, edges := extract(t)
 	idx := byKind(nodes)[kindIndex]
-	if len(idx) != 88 {
-		t.Errorf("extracted %d indexes, want 88", len(idx))
+	if len(idx) != 90 {
+		t.Errorf("extracted %d indexes, want 90", len(idx))
 	}
 	// ix_webhook_delivery_due declares ON on a following line.
 	const want = "index:ix_webhook_delivery_due"
@@ -284,7 +284,7 @@ func TestCorpusCensus(t *testing.T) {
 		got[n.Kind]++
 	}
 	want := map[string]int{
-		kindTable: 42, kindColumn: 390, kindIndex: 88, kindConstraint: 135, kindTrigger: 8,
+		kindTable: 43, kindColumn: 402, kindIndex: 90, kindConstraint: 140, kindTrigger: 8,
 	}
 	for kind, w := range want {
 		if got[kind] != w {
@@ -401,24 +401,24 @@ func TestMultiLineAlterTableIsExtracted(t *testing.T) {
 		}
 	}
 
-	// Thirty-six tables carry the discriminator (E2.1 added telemetry_sample;
+	// Thirty-seven tables carry the discriminator (E2.1 added telemetry_sample;
 	// E2.1b adds telemetry_rollup_5m; E2.2a adds collector_check; E3.1 adds
 	// alert_rule; E5.1 adds incident and incident_event; E3.3a adds
 	// maintenance_window; E3.3b adds dependency_suppression; E5.2a adds
 	// on_call_schedule and on_call_participant; E5.2b-1 adds escalation_policy
-	// and escalation_tier — all declared inline in their CREATE TABLE, not a
-	// multi-line ALTER TABLE, but counted the same way: this assertion sweeps
-	// every tenant_id column node regardless of which declaration form
-	// produced it). Anything less is a wrong answer to the question the graph
-	// exists to answer.
+	// and escalation_tier; E5.2b-2 adds escalation_state — all declared inline
+	// in their CREATE TABLE, not a multi-line ALTER TABLE, but counted the
+	// same way: this assertion sweeps every tenant_id column node regardless
+	// of which declaration form produced it). Anything less is a wrong
+	// answer to the question the graph exists to answer.
 	scoped := 0
 	for _, n := range nodes {
 		if strings.HasSuffix(n.ID, ".tenant_id") && n.Kind == kindColumn {
 			scoped++
 		}
 	}
-	if scoped != 36 {
-		t.Errorf("%d tables carry tenant_id, want 36", scoped)
+	if scoped != 37 {
+		t.Errorf("%d tables carry tenant_id, want 37", scoped)
 	}
 
 	// A multi-line declaration must still be owned by its table.
