@@ -379,6 +379,78 @@ func (f *fakeMaintenanceChecker) suppressions() int {
 	return f.suppressedCount
 }
 
+// fakeDownDependency is one (tenant, affected asset) -> down root fixture a
+// fakeDependencyChecker consults — the test-side equivalent of a
+// dependency_suppression evaluator decision, keyed the same way
+// production's DependencySuppressionStore.Suppress computes it (a walk
+// result crossed with a down-check) but expressed directly as the ANSWER a
+// test wants, since these unit tests are exercising the EVALUATOR's
+// orchestration around the checker, not the checker's own graph-walk logic
+// (that is internal/store/postgres's job, proven against real PostgreSQL).
+type fakeDownDependency struct {
+	tenantID, assetID string
+	rootAssetID       string
+}
+
+// dependencyCall records one Suppress invocation, so a test can assert what
+// tenant/asset/time the evaluator actually consulted — the dependency-
+// suppression equivalent of maintenanceCall.
+type dependencyCall struct {
+	tenantID, assetID string
+	at                time.Time
+}
+
+// fakeDependencyChecker is an in-memory alerting.DependencySuppressionChecker.
+// With no downs configured it never suppresses — the same "off by default"
+// shape fakeMaintenanceChecker gives E3.3a, so every pre-E3.3b test in this
+// package (via newTestEvaluatorWithMaintenance's default) is unaffected by
+// this checker existing.
+type fakeDependencyChecker struct {
+	mu              sync.Mutex
+	downs           []fakeDownDependency
+	calls           []dependencyCall
+	suppressedCount int
+	failNext        error
+}
+
+func newFakeDependencyChecker(downs ...fakeDownDependency) *fakeDependencyChecker {
+	return &fakeDependencyChecker{downs: downs}
+}
+
+// Suppress mirrors alerting.DependencySuppressionChecker's contract: reports
+// whether a configured down dependency matches (tenantID, assetID) and, if
+// so, the root asset id that caused it.
+func (f *fakeDependencyChecker) Suppress(_ context.Context, tenantID, assetID string, at time.Time) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, dependencyCall{tenantID, assetID, at})
+	if f.failNext != nil {
+		err := f.failNext
+		f.failNext = nil
+		return "", false, err
+	}
+	for _, d := range f.downs {
+		if d.tenantID != tenantID || d.assetID != assetID {
+			continue
+		}
+		f.suppressedCount++
+		return d.rootAssetID, true, nil
+	}
+	return "", false, nil
+}
+
+func (f *fakeDependencyChecker) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
+func (f *fakeDependencyChecker) suppressions() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.suppressedCount
+}
+
 func breachingSamples(from, to time.Time, step time.Duration, value float64) []domain.Sample {
 	var out []domain.Sample
 	for ts := from; !ts.After(to); ts = ts.Add(step) {

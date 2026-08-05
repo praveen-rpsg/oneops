@@ -134,6 +134,49 @@ type MaintenanceWindowChecker interface {
 	Suppress(ctx context.Context, tenantID, assetID string, at time.Time) (windowID string, suppressed bool, err error)
 }
 
+// DependencySuppressionChecker is E3.3b's privileged read+record port
+// (ADR-ALERTING-003): whether assetID (tenantID) transitively depends — via
+// depends_on/runs_on edges only, up to an implementation-chosen bounded
+// depth — on some asset that is currently "down" (has its own enabled,
+// firing alert_rule), and, when it does, recording that a firing was
+// suppressed because of it, naming the root. *postgres.
+// DependencySuppressionStore satisfies it when built over the PRIVILEGED
+// pool for its down-check/recording AND handed a domain.TypedGraphTraversal
+// built over the TENANT-SCOPED pool for the dependency walk — see that
+// type's own doc comment for why the walk must stay RLS-scoped even though
+// the down-check is privileged and cross-tenant (ADR-TENANCY-001).
+//
+// tenantID is always sourced from the firing rule's own row (rule.TenantID),
+// never assumed or cached across rules — the identical non-decision
+// ADR-TENANCY-012 already requires of MaintenanceWindowChecker,
+// IncidentCorrelator and TelemetryReader, applied here a fourth time.
+type DependencySuppressionChecker interface {
+	// Suppress reports whether assetID's dependency closure contains a
+	// currently-down asset for tenantID and, if so, atomically records the
+	// suppression against every down root found (suppressed_count++,
+	// last_suppressed_at = at), naming rootAssetID as the shallowest,
+	// then lexicographically-first, one — meaningful only when suppressed
+	// is true (used for logging, not for any further decision the
+	// evaluator makes, the same convention MaintenanceWindowChecker.
+	// Suppress's windowID follows).
+	Suppress(ctx context.Context, tenantID, assetID string, at time.Time) (rootAssetID string, suppressed bool, err error)
+}
+
+// NopDependencySuppressionChecker is the "no dependency-suppression
+// capability configured" stand-in NewEvaluator's doc comment requires: it
+// always reports no down dependency, so a deployment with no CMDB-backed
+// checker wired gets E3.1/E3.2/E3.3a/E4.1's exact pre-E3.3b behaviour rather
+// than a nil-pointer panic. Unlike IncidentCorrelator,
+// DependencySuppressionChecker has no nil-means-skip convention — the same
+// reason MaintenanceWindowChecker does not — so this exists to be passed
+// explicitly instead.
+type NopDependencySuppressionChecker struct{}
+
+// Suppress implements DependencySuppressionChecker: never suppresses.
+func (NopDependencySuppressionChecker) Suppress(context.Context, string, string, time.Time) (string, bool, error) {
+	return "", false, nil
+}
+
 // NopMaintenanceWindowChecker is the "no maintenance-window capability
 // configured" stand-in NewEvaluator's doc comment requires: it always reports
 // no active window, so a deployment with no maintenance_window store wired
@@ -173,14 +216,21 @@ type Metrics interface {
 	// maintenance window (E3.3a) — distinct from IncErrors: a suppression is
 	// the maintenance-window check working as designed, not a failure.
 	IncSuppressed()
+	// IncDependencySuppressed counts an ok->firing transition suppressed
+	// because the firing asset transitively depends on a currently-down
+	// asset (E3.3b) — a separate reason from IncSuppressed, so an operator
+	// reading these two counters can tell "planned maintenance" apart from
+	// "collateral of a dependency outage" without grepping logs.
+	IncDependencySuppressed()
 	IncErrors()
 }
 
 // NopMetrics is the no-op Metrics.
 type NopMetrics struct{}
 
-func (NopMetrics) IncEvaluated()  {}
-func (NopMetrics) IncFired()      {}
-func (NopMetrics) IncRecovered()  {}
-func (NopMetrics) IncSuppressed() {}
-func (NopMetrics) IncErrors()     {}
+func (NopMetrics) IncEvaluated()            {}
+func (NopMetrics) IncFired()                {}
+func (NopMetrics) IncRecovered()            {}
+func (NopMetrics) IncSuppressed()           {}
+func (NopMetrics) IncDependencySuppressed() {}
+func (NopMetrics) IncErrors()               {}
