@@ -280,6 +280,11 @@ func (s *Server) routes() *chi.Mux {
 		r.Get("/", s.serveRoot)
 	}
 
+	// The NOC live screen (E7.2): a second, independent embedded page — never
+	// part of webdist/ and never gated on the console having been built — so
+	// it is unconditional, unlike the r.Get("/", ...) branch above.
+	r.Get("/noc", serveNOCPage)
+
 	// Operational diagnostics: read-only, authenticated, no secrets. Additive.
 	if s.diag != nil {
 		r.With(s.authenticate, s.requirePermission(auth.PermRead)).
