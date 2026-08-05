@@ -138,6 +138,14 @@ type Server struct {
 	// worker (domain.OnCallScheduleRepository's doc comment).
 	onCallSchedules domain.OnCallScheduleRepository
 
+	// Escalation policy registry (E5.2b-1); nil until SetEscalationPolicies.
+	// escalation_policy/escalation_tier are TENANT-OWNED, like
+	// on_call_schedule above, so nothing here needs an exemption from
+	// row-level security. CONFIG ONLY: there is no privileged-pool
+	// counterpart and no engine/worker in this story — the escalation engine
+	// that pages and advances tiers (E5.2b-2) is a later, separate story.
+	escalationPolicies domain.EscalationPolicyRepository
+
 	// Notification registry (read-only); nil until SetNotifications.
 	// notification is TENANT-OWNED, like team above, so nothing here needs an
 	// exemption from row-level security.
@@ -490,6 +498,23 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/on-call-schedules/{id}/participants/{participantId}", s.removeOnCallParticipant)
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/on-call-schedules/{id}/participants/reorder", s.reorderOnCallParticipants)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/on-call-schedules/{id}/on-call", s.getOnCallNow)
+
+		// Escalation policy + tier administration (E5.2b-1). escalation_policy/
+		// escalation_tier are TENANT-OWNED, exactly like on_call_schedule
+		// above, so the permission tier is tenant administration, not
+		// requirePlatformAdmin. CONFIG ONLY: no engine, worker or paging
+		// exists behind these routes yet (E5.2b-2). The tier sub-resource is
+		// mounted alongside /admin/escalation-policies/{id}, the same shape
+		// /admin/on-call-schedules/{id}/participants already uses.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/escalation-policies", s.listEscalationPolicies)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/escalation-policies", s.createEscalationPolicy)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/escalation-policies/{id}", s.getEscalationPolicy)
+		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/escalation-policies/{id}", s.patchEscalationPolicy)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/escalation-policies/{id}", s.deleteEscalationPolicy)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/escalation-policies/{id}/tiers", s.listEscalationTiers)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/escalation-policies/{id}/tiers", s.addEscalationTier)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/escalation-policies/{id}/tiers/{tierId}", s.removeEscalationTier)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/escalation-policies/{id}/tiers/reorder", s.reorderEscalationTiers)
 
 		// Incident administration (E5.1). incident/incident_event are
 		// TENANT-OWNED, exactly like asset/alert_rule above, so the

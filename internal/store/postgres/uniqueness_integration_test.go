@@ -87,6 +87,10 @@ var serverGeneratedIdentifiers = map[string]string{
 	// and so never reach this map; only the two surrogate PKs do.
 	"on_call_schedule_pkey":    "schedule_id is server-minted (domain.NewOnCallSchedule); no create route accepts one from a client",
 	"on_call_participant_pkey": "participant_id is server-minted (domain.NewOnCallParticipant); no create route accepts one from a client",
+
+	// Escalation policy + tier config, CRUD only (E5.2b-1).
+	"escalation_policy_pkey": "policy_id is server-minted (domain.NewEscalationPolicy); no create route accepts one from a client",
+	"escalation_tier_pkey":   "tier_id is server-minted (domain.NewEscalationTier); no create route accepts one from a client",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

@@ -120,6 +120,12 @@ var keyScopeJustifications = map[string]string{
 	// directly (route 1), so only the two surrogate PKs need justifying here.
 	"on_call_schedule.on_call_schedule_pkey":       "schedule_id is server-minted (domain.NewOnCallSchedule); clients never supply it and there is no create route that accepts one",
 	"on_call_participant.on_call_participant_pkey": "participant_id is server-minted (domain.NewOnCallParticipant); clients never supply it and there is no create route that accepts one",
+
+	// Escalation policy + tier config, CRUD only (E5.2b-1). uq_escalation_tier_policy_position
+	// already contains tenant_id directly (route 1), so only the two surrogate
+	// PKs need justifying here.
+	"escalation_policy.escalation_policy_pkey": "policy_id is server-minted (domain.NewEscalationPolicy); clients never supply it and there is no create route that accepts one",
+	"escalation_tier.escalation_tier_pkey":     "tier_id is server-minted (domain.NewEscalationTier); clients never supply it and there is no create route that accepts one",
 }
 
 func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {

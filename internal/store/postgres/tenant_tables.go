@@ -51,4 +51,6 @@ var TenantOwnedTables = []string{
 	"dependency_suppression",
 	"on_call_schedule",
 	"on_call_participant",
+	"escalation_policy",
+	"escalation_tier",
 }
