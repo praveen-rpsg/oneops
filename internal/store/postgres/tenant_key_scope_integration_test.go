@@ -114,6 +114,12 @@ var keyScopeJustifications = map[string]string{
 	// written ONLY by the leader-gated evaluator's privileged path — there is
 	// no client-facing create route that accepts a suppression_id at all.
 	"dependency_suppression.dependency_suppression_pkey": "suppression_id is server-minted (domain.NewID); the table is written only by the evaluator's privileged path, no client route accepts one",
+
+	// On-call schedules & rotations (E5.2a). uq_on_call_participant_schedule_position
+	// and uq_on_call_participant_schedule_user both already contain tenant_id
+	// directly (route 1), so only the two surrogate PKs need justifying here.
+	"on_call_schedule.on_call_schedule_pkey":       "schedule_id is server-minted (domain.NewOnCallSchedule); clients never supply it and there is no create route that accepts one",
+	"on_call_participant.on_call_participant_pkey": "participant_id is server-minted (domain.NewOnCallParticipant); clients never supply it and there is no create route that accepts one",
 }
 
 func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {

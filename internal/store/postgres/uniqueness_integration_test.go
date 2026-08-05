@@ -81,6 +81,12 @@ var serverGeneratedIdentifiers = map[string]string{
 
 	// Dependency suppression (E3.3b).
 	"dependency_suppression_pkey": "suppression_id is server-minted (domain.NewID); written only by the evaluator's privileged path, no client create route accepts one",
+
+	// On-call schedules & rotations (E5.2a). uq_on_call_participant_schedule_position
+	// and uq_on_call_participant_schedule_user both carry tenant_id directly
+	// and so never reach this map; only the two surrogate PKs do.
+	"on_call_schedule_pkey":    "schedule_id is server-minted (domain.NewOnCallSchedule); no create route accepts one from a client",
+	"on_call_participant_pkey": "participant_id is server-minted (domain.NewOnCallParticipant); no create route accepts one from a client",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

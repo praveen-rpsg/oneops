@@ -1973,6 +1973,222 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/on-call-schedules:
+    get:
+      summary: List the caller's tenant's on-call schedules (E5.2a)
+      operationId: listOnCallSchedules
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last schedule_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of on-call schedules
+          content: { application/json: { schema: { $ref: '#/components/schemas/OnCallScheduleList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Declare a new on-call rotation (E5.2a)
+      description: >-
+        Who is on call is never stored: it is computed on every read from
+        rotation_start_at/handoff_interval_seconds and the current ordered
+        participant list (ADR-ONCALL-001). All rotation math is UTC and
+        seconds-based — no calendar, timezone or DST semantics.
+      operationId: createOnCallSchedule
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateOnCallScheduleRequest' }
+      responses:
+        '201':
+          description: The declared schedule
+          content: { application/json: { schema: { $ref: '#/components/schemas/OnCallSchedule' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/on-call-schedules/{id}:
+    get:
+      summary: Get an on-call schedule by identifier
+      operationId: getOnCallSchedule
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The on-call schedule
+          content: { application/json: { schema: { $ref: '#/components/schemas/OnCallSchedule' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Change one or more fields of a schedule under optimistic locking
+      operationId: patchOnCallSchedule
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchOnCallScheduleRequest' }
+      responses:
+        '200':
+          description: The updated schedule
+          content: { application/json: { schema: { $ref: '#/components/schemas/OnCallSchedule' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    delete:
+      summary: Delete an on-call schedule
+      description: ON DELETE CASCADE removes its participants with it.
+      operationId: deleteOnCallSchedule
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/on-call-schedules/{id}/participants:
+    get:
+      summary: List a schedule's roster, in rotation order
+      operationId: listOnCallParticipants
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last position of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of the schedule's participants, in rotation order
+          content: { application/json: { schema: { $ref: '#/components/schemas/OnCallParticipantList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Append a participant to a schedule's rotation
+      description: >-
+        user_id must already be an ACTIVE member of the caller's tenant,
+        re-verified server-side (ADR-IDENTITY-002 §3.1) — a cross-tenant or
+        suspended user_id is rejected with 404. Always appends at the end of
+        the rotation; use the reorder endpoint to change order.
+      operationId: addOnCallParticipant
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddOnCallParticipantRequest' }
+      responses:
+        '201':
+          description: The added participant
+          content: { application/json: { schema: { $ref: '#/components/schemas/OnCallParticipant' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/on-call-schedules/{id}/participants/{participantId}:
+    delete:
+      summary: Remove a participant from a schedule's rotation
+      description: Closes the resulting gap in position; positions stay contiguous 0..N-1.
+      operationId: removeOnCallParticipant
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: participantId, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Removed }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/on-call-schedules/{id}/participants/reorder:
+    post:
+      summary: Atomically replace a schedule's rotation order
+      description: >-
+        participant_ids must name exactly the schedule's current participant
+        set, in the desired new order — no more, no fewer. Positions are
+        rewritten to their new 0-based rank and stay contiguous 0..N-1.
+      operationId: reorderOnCallParticipants
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReorderOnCallParticipantsRequest' }
+      responses:
+        '200':
+          description: The schedule's participants, in the new rotation order
+          content: { application/json: { schema: { $ref: '#/components/schemas/OnCallParticipantList' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/on-call-schedules/{id}/on-call:
+    get:
+      summary: Who is on call for this schedule, now or at a given instant (E5.2a)
+      description: >-
+        Computed on every call from the schedule's own rotation_start_at/
+        handoff_interval_seconds and its current ordered participant list —
+        never a stored fact. user_id/display_name are both absent when the
+        schedule has no participants, which is an ordinary state, not an
+        error.
+      operationId: getOnCallNow
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: at
+          in: query
+          description: RFC3339 instant to resolve on-call for; defaults to now.
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: The resolved on-call user, or an empty resolution if the schedule has no participants
+          content: { application/json: { schema: { $ref: '#/components/schemas/OnCallNow' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/incidents:
     get:
       summary: List the caller's tenant's incidents (E5.1)
@@ -3468,6 +3684,91 @@ components:
         starts_at: { type: string, format: date-time }
         ends_at: { type: string, format: date-time }
         reason: { type: string, maxLength: 500 }
+    OnCallSchedule:
+      type: object
+      description: >-
+        A named on-call rotation (E5.2a). Who is on call is never a field on
+        this object — it is always computed via GET .../on-call from
+        rotation_start_at/handoff_interval_seconds and the current ordered
+        participant list.
+      properties:
+        schedule_id: { type: string }
+        name: { type: string, maxLength: 200 }
+        handoff_interval_seconds:
+          type: integer
+          minimum: 1
+          description: Seconds between handoffs. UTC/seconds-based rotation math only.
+        rotation_start_at: { type: string, format: date-time }
+        status: { type: string, enum: [active, archived] }
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    OnCallScheduleList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/OnCallSchedule' }
+    CreateOnCallScheduleRequest:
+      type: object
+      required: [name, handoff_interval_seconds, rotation_start_at]
+      properties:
+        name: { type: string, maxLength: 200 }
+        handoff_interval_seconds: { type: integer, minimum: 1 }
+        rotation_start_at: { type: string, format: date-time }
+    PatchOnCallScheduleRequest:
+      type: object
+      required: [row_version]
+      description: Supply one or more of name, handoff_interval_seconds, rotation_start_at or status.
+      properties:
+        row_version: { type: integer, format: int64 }
+        name: { type: string, maxLength: 200 }
+        handoff_interval_seconds: { type: integer, minimum: 1 }
+        rotation_start_at: { type: string, format: date-time }
+        status: { type: string, enum: [active, archived] }
+    OnCallParticipant:
+      type: object
+      description: One person's seat in a schedule's rotation order. Position is 0-based and contiguous 0..N-1.
+      properties:
+        participant_id: { type: string }
+        schedule_id: { type: string }
+        user_id: { type: string }
+        position: { type: integer, minimum: 0 }
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    OnCallParticipantList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/OnCallParticipant' }
+    AddOnCallParticipantRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id: { type: string }
+    ReorderOnCallParticipantsRequest:
+      type: object
+      required: [participant_ids]
+      description: >-
+        Must name exactly the schedule's current participant set, in the
+        desired new order — no more, no fewer.
+      properties:
+        participant_ids:
+          type: array
+          items: { type: string }
+    OnCallNow:
+      type: object
+      description: >-
+        The resolved on-call user for a schedule at a given instant.
+        user_id/display_name are both absent when the schedule has no
+        participants — an ordinary state, not an error.
+      properties:
+        schedule_id: { type: string }
+        at: { type: string, format: date-time }
+        user_id: { type: string }
+        display_name: { type: string }
     Incident:
       type: object
       description: >-

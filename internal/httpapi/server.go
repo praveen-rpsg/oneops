@@ -129,6 +129,15 @@ type Server struct {
 	// field is only the admin CRUD surface.
 	maintenanceWindows domain.MaintenanceWindowRepository
 
+	// On-call schedule registry (E5.2a); nil until SetOnCallSchedules.
+	// on_call_schedule/on_call_participant are TENANT-OWNED, like
+	// maintenance_window above, so nothing here needs an exemption from
+	// row-level security. Unlike alert_rule/maintenance_window there is no
+	// privileged-pool counterpart: "who's on call" is answered at request
+	// time for one already-known tenant, never by a cross-tenant background
+	// worker (domain.OnCallScheduleRepository's doc comment).
+	onCallSchedules domain.OnCallScheduleRepository
+
 	// Notification registry (read-only); nil until SetNotifications.
 	// notification is TENANT-OWNED, like team above, so nothing here needs an
 	// exemption from row-level security.
@@ -463,6 +472,24 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/maintenance-windows", s.createMaintenanceWindow)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/maintenance-windows/{id}", s.getMaintenanceWindow)
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/maintenance-windows/{id}", s.deleteMaintenanceWindow)
+
+		// On-call schedule administration (E5.2a). on_call_schedule/
+		// on_call_participant are TENANT-OWNED, exactly like maintenance_window
+		// above, so the permission tier is tenant administration, not
+		// requirePlatformAdmin. The roster sub-resource (participants) and the
+		// read-only "who's on call" projection are static/sub collections
+		// mounted alongside /admin/on-call-schedules/{id}, the same shape
+		// /admin/teams/{id}/members already uses.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/on-call-schedules", s.listOnCallSchedules)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/on-call-schedules", s.createOnCallSchedule)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/on-call-schedules/{id}", s.getOnCallSchedule)
+		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/on-call-schedules/{id}", s.patchOnCallSchedule)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/on-call-schedules/{id}", s.deleteOnCallSchedule)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/on-call-schedules/{id}/participants", s.listOnCallParticipants)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/on-call-schedules/{id}/participants", s.addOnCallParticipant)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/on-call-schedules/{id}/participants/{participantId}", s.removeOnCallParticipant)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/on-call-schedules/{id}/participants/reorder", s.reorderOnCallParticipants)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/on-call-schedules/{id}/on-call", s.getOnCallNow)
 
 		// Incident administration (E5.1). incident/incident_event are
 		// TENANT-OWNED, exactly like asset/alert_rule above, so the

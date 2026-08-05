@@ -49,4 +49,6 @@ var TenantOwnedTables = []string{
 	"incident_event",
 	"maintenance_window",
 	"dependency_suppression",
+	"on_call_schedule",
+	"on_call_participant",
 }
