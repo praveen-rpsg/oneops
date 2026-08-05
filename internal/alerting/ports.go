@@ -134,6 +134,20 @@ type MaintenanceWindowChecker interface {
 	Suppress(ctx context.Context, tenantID, assetID string, at time.Time) (windowID string, suppressed bool, err error)
 }
 
+// NopMaintenanceWindowChecker is the "no maintenance-window capability
+// configured" stand-in NewEvaluator's doc comment requires: it always reports
+// no active window, so a deployment with no maintenance_window store wired
+// gets E3.1/E4.1's exact pre-E3.3a behaviour rather than a nil-pointer panic.
+// Unlike IncidentCorrelator, MaintenanceWindowChecker has no nil-means-skip
+// convention — see NewEvaluator's doc comment for why — so this exists to be
+// passed explicitly instead.
+type NopMaintenanceWindowChecker struct{}
+
+// Suppress implements MaintenanceWindowChecker: never suppresses.
+func (NopMaintenanceWindowChecker) Suppress(context.Context, string, string, time.Time) (string, bool, error) {
+	return "", false, nil
+}
+
 // TelemetryReader is the narrow, tenant-explicit telemetry read the evaluator
 // needs — see domain.TelemetryRepository.QueryRangeForTenant's doc comment
 // for why QueryRange itself (RLS-only isolation) is unsafe to call from this

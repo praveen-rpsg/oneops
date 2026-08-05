@@ -50,7 +50,7 @@ func TestEvaluator_FlapSuppression_OscillationCollapsesToOneTransition(t *testin
 	store := newFakeStore(rule)
 	tel := newFakeTelemetry()
 	notifier := &fakeNotifier{}
-	e := NewEvaluator(store, tel, notifier, nil, NopMetrics{}, quiet(), Config{Concurrency: 1})
+	e := NewEvaluator(store, tel, notifier, nil, newFakeMaintenanceChecker(), NopMetrics{}, quiet(), Config{Concurrency: 1})
 	e.now = clock.now
 
 	tick := func(breaching bool) {
@@ -113,7 +113,7 @@ func TestEvaluator_FlapSuppression_SustainedChangeStillTransitionsPromptly(t *te
 	store := newFakeStore(rule)
 	tel := newFakeTelemetry()
 	notifier := &fakeNotifier{}
-	e := NewEvaluator(store, tel, notifier, nil, NopMetrics{}, quiet(), Config{Concurrency: 1})
+	e := NewEvaluator(store, tel, notifier, nil, newFakeMaintenanceChecker(), NopMetrics{}, quiet(), Config{Concurrency: 1})
 	e.now = clock.now
 
 	tick := func(breaching bool) {
@@ -189,7 +189,7 @@ func TestEvaluator_FlapSuppression_PendingSurvivesNewEvaluatorInstance(t *testin
 	tel := newFakeTelemetry()
 
 	notifier1 := &fakeNotifier{}
-	e1 := NewEvaluator(store, tel, notifier1, nil, NopMetrics{}, quiet(), Config{Concurrency: 1})
+	e1 := NewEvaluator(store, tel, notifier1, nil, newFakeMaintenanceChecker(), NopMetrics{}, quiet(), Config{Concurrency: 1})
 	e1.now = clock.now
 
 	setMetric(tel, rule, clock.t, true)
@@ -206,7 +206,7 @@ func TestEvaluator_FlapSuppression_PendingSurvivesNewEvaluatorInstance(t *testin
 	// the store's row says.
 	clock.t = start.Add(100 * time.Second)
 	notifier2 := &fakeNotifier{}
-	e2 := NewEvaluator(store, tel, notifier2, nil, NopMetrics{}, quiet(), Config{Concurrency: 1})
+	e2 := NewEvaluator(store, tel, notifier2, nil, newFakeMaintenanceChecker(), NopMetrics{}, quiet(), Config{Concurrency: 1})
 	e2.now = clock.now
 	setMetric(tel, rule, clock.t, true)
 	e2.RunOnce(context.Background())

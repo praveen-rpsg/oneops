@@ -85,6 +85,10 @@ var privilegedReadExemptions = map[string]string{
 		"(ADR-TENANCY-012).",
 	"IncidentStore.verifyAssetExists": "asset existence probe; identical shape and reason to " +
 		"AlertRuleStore.Create (ADR-TENANCY-012).",
+	"MaintenanceWindowStore.Create": "asset existence probe; identical shape and reason to " +
+		"AlertRuleStore.Create (ADR-TENANCY-012). Runs on the request-path admin instance; listed because " +
+		"MaintenanceWindowStore is dual-role (the same admin-CRUD/evaluator-surface split AlertRuleStore " +
+		"draws) and this guard is type-granular.",
 }
 
 func TestPrivilegedReads_AreScopedToATenant(t *testing.T) {

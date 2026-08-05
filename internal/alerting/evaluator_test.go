@@ -21,7 +21,17 @@ func newTestEvaluator(store Store, tel TelemetryReader, notifier Notifier, now t
 }
 
 func newTestEvaluatorWithCorrelator(store Store, tel TelemetryReader, notifier Notifier, correlator IncidentCorrelator, now time.Time) *Evaluator {
-	e := NewEvaluator(store, tel, notifier, correlator, NopMetrics{}, quiet(), Config{Concurrency: 4})
+	return newTestEvaluatorWithMaintenance(store, tel, notifier, correlator, newFakeMaintenanceChecker(), now)
+}
+
+// newTestEvaluatorWithMaintenance is the fully-general constructor every other
+// helper in this file delegates to, for the tests in maintenance_test.go that
+// need to control what the maintenance-window checker reports.
+func newTestEvaluatorWithMaintenance(
+	store Store, tel TelemetryReader, notifier Notifier, correlator IncidentCorrelator,
+	maintenance MaintenanceWindowChecker, now time.Time,
+) *Evaluator {
+	e := NewEvaluator(store, tel, notifier, correlator, maintenance, NopMetrics{}, quiet(), Config{Concurrency: 4})
 	e.now = func() time.Time { return now }
 	return e
 }
@@ -294,7 +304,7 @@ func TestEvaluator_CrossTenantTelemetryIsolation(t *testing.T) {
 
 	store := newFakeStore(rules...)
 	notifier := &fakeNotifier{}
-	e := NewEvaluator(store, tel, notifier, nil, NopMetrics{}, quiet(), Config{Concurrency: 8})
+	e := NewEvaluator(store, tel, notifier, nil, newFakeMaintenanceChecker(), NopMetrics{}, quiet(), Config{Concurrency: 8})
 	e.now = func() time.Time { return now }
 
 	e.RunOnce(context.Background())

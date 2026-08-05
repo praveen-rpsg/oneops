@@ -75,6 +75,9 @@ var serverGeneratedIdentifiers = map[string]string{
 	// Incident work item + append-only timeline (E5.1).
 	"incident_pkey":       "incident_id is server-minted (domain.NewIncident); no create route accepts one from a client",
 	"incident_event_pkey": "event_id is server-minted (domain.NewID() in IncidentStore.recordEvent); no route accepts one from a client",
+
+	// Maintenance window (E3.3a).
+	"maintenance_window_pkey": "window_id is server-minted (domain.NewMaintenanceWindow); no create route accepts one from a client",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

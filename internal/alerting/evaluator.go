@@ -231,6 +231,39 @@ func (e *Evaluator) evaluateRule(ctx context.Context, rule *domain.AlertRule, no
 		return // candidate persisted/extended; not yet stable long enough to commit (E3.2)
 	}
 
+	// E3.3a (ADR-ALERTING-002): a maintenance window suppresses only the
+	// ok->firing side effect (notify + incident create/link), never a
+	// recovery — a firing->ok transition always proceeds, window or not, so
+	// an operator watching for recovery is never the one thing this feature
+	// silently withholds. The check runs downstream of both sustainedBreach
+	// (E3.1) and dwellSatisfied (E3.2): it does not participate in deriving
+	// the candidate or timing its dwell, only in deciding what happens once
+	// the platform has already decided a real transition is ready to commit.
+	//
+	// Deliberately NOT persisted when suppressed: evaluateRule returns here
+	// without calling RecordTransition, so rule.LastState stays "ok" and, if
+	// a dwell is configured, rule.PendingState stays "firing" (dwellSatisfied
+	// already persisted it and will keep reporting the dwell as satisfied on
+	// every following tick without writing again). The next tick re-detects
+	// the very same transition and re-consults the window: while it is still
+	// active, this suppresses again (Suppress's own atomic increment records
+	// each occurrence, never silently); the instant the window has ended,
+	// this check no longer suppresses and the transition commits normally —
+	// a still-firing condition pages on the next evaluation tick after its
+	// maintenance window ends, not "whenever an operator next asks".
+	if next == domain.AlertRuleStateFiring {
+		suppressed, err := e.maintenanceSuppressed(ctx, rule, now)
+		if err != nil {
+			e.log.Error("alert rule evaluator: check maintenance window", "rule_id", rule.RuleID, "err", err)
+			e.metrics.IncErrors()
+			return // do not persist the transition; retry next tick
+		}
+		if suppressed {
+			e.metrics.IncSuppressed()
+			return // no notify, no correlate, no RecordTransition — see doc comment above
+		}
+	}
+
 	if err := e.notify(ctx, rule, next); err != nil {
 		e.log.Error("alert rule evaluator: enqueue notification", "rule_id", rule.RuleID, "err", err)
 		e.metrics.IncErrors()
@@ -267,6 +300,25 @@ func (e *Evaluator) evaluateRule(ctx context.Context, rule *domain.AlertRule, no
 	} else {
 		e.metrics.IncRecovered()
 	}
+}
+
+// maintenanceSuppressed reports whether rule's own (tenant, asset) is
+// currently inside an active maintenance window (E3.3a). tenantID is sourced
+// from rule.TenantID — never assumed or cached across rules — the same
+// non-decision ADR-TENANCY-012 already requires of every other privileged,
+// cross-tenant read/write this package performs (TelemetryReader,
+// IncidentCorrelator); MaintenanceWindowChecker's own doc comment states it a
+// third time for this specific port.
+func (e *Evaluator) maintenanceSuppressed(ctx context.Context, rule *domain.AlertRule, now time.Time) (bool, error) {
+	windowID, suppressed, err := e.maintenance.Suppress(ctx, rule.TenantID, rule.AssetID, now)
+	if err != nil {
+		return false, fmt.Errorf("check maintenance window: %w", err)
+	}
+	if suppressed {
+		e.log.Info("alert rule evaluator: firing suppressed by an active maintenance window",
+			"rule_id", rule.RuleID, "tenant_id", rule.TenantID, "asset_id", rule.AssetID, "window_id", windowID)
+	}
+	return suppressed, nil
 }
 
 // clearStalePending resets a rule's in-flight flap-suppression candidate

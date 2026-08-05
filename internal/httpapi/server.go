@@ -121,6 +121,14 @@ type Server struct {
 	// wiring is E4; incidents are created manually via this API until then.
 	incidents domain.IncidentRepository
 
+	// Maintenance window registry (E3.3a); nil until SetMaintenanceWindows.
+	// maintenance_window is TENANT-OWNED, like alert_rule above, so nothing
+	// here needs an exemption from row-level security. The evaluator's
+	// active-window/suppression check is wired separately
+	// (alerting.MaintenanceWindowChecker, over the privileged pool) — this
+	// field is only the admin CRUD surface.
+	maintenanceWindows domain.MaintenanceWindowRepository
+
 	// Notification registry (read-only); nil until SetNotifications.
 	// notification is TENANT-OWNED, like team above, so nothing here needs an
 	// exemption from row-level security.
@@ -443,6 +451,18 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/alert-rules/{id}", s.getAlertRule)
 		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/alert-rules/{id}", s.patchAlertRule)
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/alert-rules/{id}", s.deleteAlertRule)
+
+		// Maintenance window administration (E3.3a). maintenance_window is
+		// TENANT-OWNED, exactly like alert_rule above, so the permission tier
+		// is tenant administration, not requirePlatformAdmin. There is no
+		// PATCH: a window's bounds are declared once at Create and there is
+		// no other lifecycle to administer beyond "exists" / "does not exist"
+		// (domain.MaintenanceWindowRepository's doc comment) — DELETE is how
+		// an operator cancels/withdraws one, before or during it.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/maintenance-windows", s.listMaintenanceWindows)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/maintenance-windows", s.createMaintenanceWindow)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/maintenance-windows/{id}", s.getMaintenanceWindow)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/maintenance-windows/{id}", s.deleteMaintenanceWindow)
 
 		// Incident administration (E5.1). incident/incident_event are
 		// TENANT-OWNED, exactly like asset/alert_rule above, so the

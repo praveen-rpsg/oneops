@@ -2,6 +2,7 @@ package alerting
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"testing"
@@ -307,6 +308,75 @@ func mkRule(t *testing.T, tenantID, assetID, metric string, cmp domain.AlertComp
 	}
 	r.FlapDwellSeconds = 0
 	return r
+}
+
+// fakeWindow is one in-memory maintenance window a fakeMaintenanceChecker
+// consults — the test-side equivalent of a maintenance_window row.
+type fakeWindow struct {
+	tenantID, assetID string
+	startsAt, endsAt  time.Time
+}
+
+// maintenanceCall records one Suppress invocation, so a test can assert what
+// tenant/asset/time the evaluator actually consulted — the maintenance-window
+// equivalent of telemetryCall.
+type maintenanceCall struct {
+	tenantID, assetID string
+	at                time.Time
+}
+
+// fakeMaintenanceChecker is an in-memory alerting.MaintenanceWindowChecker.
+// With no windows configured it never suppresses — the same "off by default"
+// shape newTestEvaluator's nil IncidentCorrelator gives correlation, except
+// MaintenanceWindowChecker itself is never nil (NewEvaluator's doc comment),
+// so tests that do not care about E3.3a still get a working, harmless
+// implementation via newTestEvaluatorWithMaintenance's default.
+type fakeMaintenanceChecker struct {
+	mu              sync.Mutex
+	windows         []fakeWindow
+	calls           []maintenanceCall
+	suppressedCount int
+	failNext        error
+}
+
+func newFakeMaintenanceChecker(windows ...fakeWindow) *fakeMaintenanceChecker {
+	return &fakeMaintenanceChecker{windows: windows}
+}
+
+// Suppress mirrors postgres.MaintenanceWindowStore.Suppress's half-open
+// [starts_at, ends_at) contract exactly, so a boundary test against this fake
+// and against real PostgreSQL exercise the identical rule.
+func (f *fakeMaintenanceChecker) Suppress(_ context.Context, tenantID, assetID string, at time.Time) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, maintenanceCall{tenantID, assetID, at})
+	if f.failNext != nil {
+		err := f.failNext
+		f.failNext = nil
+		return "", false, err
+	}
+	for i, w := range f.windows {
+		if w.tenantID != tenantID || w.assetID != assetID {
+			continue
+		}
+		if !at.Before(w.startsAt) && at.Before(w.endsAt) {
+			f.suppressedCount++
+			return fmt.Sprintf("window-%d", i), true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func (f *fakeMaintenanceChecker) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
+func (f *fakeMaintenanceChecker) suppressions() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.suppressedCount
 }
 
 func breachingSamples(from, to time.Time, step time.Duration, value float64) []domain.Sample {

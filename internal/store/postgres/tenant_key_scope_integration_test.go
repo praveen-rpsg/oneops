@@ -105,6 +105,9 @@ var keyScopeJustifications = map[string]string{
 	// Incident work item + append-only timeline (E5.1).
 	"incident.incident_pkey":             "incident_id is platform-generated (domain.NewIncident); clients never supply it and there is no create route that accepts one",
 	"incident_event.incident_event_pkey": "event_id is platform-generated (domain.NewID() in IncidentStore.recordEvent); clients never supply it and there is no route that accepts one",
+
+	// Maintenance window (E3.3a).
+	"maintenance_window.maintenance_window_pkey": "window_id is platform-generated (domain.NewMaintenanceWindow); clients never supply it and there is no create route that accepts one",
 }
 
 func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {
