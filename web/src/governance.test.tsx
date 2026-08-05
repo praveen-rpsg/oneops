@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { renderApp } from './test-render';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import App from './App';
 import { setToken } from './auth';
 import type { ConfigObject } from './api';
 
@@ -66,7 +66,7 @@ const confirm = async () => {
 };
 
 beforeEach(() => {
-  window.history.replaceState(null, '', '/?artifact=ROOT');
+  window.history.replaceState(null, '', '/artifacts/ROOT');
   setToken(null);
 });
 afterEach(() => vi.unstubAllGlobals());
@@ -74,13 +74,13 @@ afterEach(() => vi.unstubAllGlobals());
 describe('ratify workflow', () => {
   it('offers Ratify on a draft artifact', async () => {
     vi.stubGlobal('fetch', mock());
-    render(<App />);
+    renderApp();
     expect(await screen.findByRole('button', { name: 'Ratify' })).toBeInTheDocument();
   });
 
   it('withholds Ratify when the precondition does not hold, and says why', async () => {
     vi.stubGlobal('fetch', mock({ obj: { lifecycle: 'ratified' } }));
-    render(<App />);
+    renderApp();
 
     expect(await screen.findByText('Ratify unavailable')).toBeInTheDocument();
     expect(screen.getByText('Ratify unavailable')).toHaveAttribute(
@@ -92,7 +92,7 @@ describe('ratify workflow', () => {
 
   it('states the effect before the user commits', async () => {
     vi.stubGlobal('fetch', mock());
-    render(<App />);
+    renderApp();
     const dialog = await openDialog();
 
     expect(dialog).toHaveTextContent(/Lifecycle → Ratified/);
@@ -102,7 +102,7 @@ describe('ratify workflow', () => {
   it('sends Idempotency-Key and If-Match, and reports the new state', async () => {
     const f = mock();
     vi.stubGlobal('fetch', f);
-    render(<App />);
+    renderApp();
     await openDialog();
 
     await confirm();
@@ -119,7 +119,7 @@ describe('ratify workflow', () => {
   it('reuses the same idempotency key when a failed attempt is retried', async () => {
     const f = mock({ ratify: fail(500, { title: 'internal error' }) });
     vi.stubGlobal('fetch', f);
-    render(<App />);
+    renderApp();
     await openDialog();
 
     await confirm();
@@ -143,7 +143,7 @@ describe('ratify workflow', () => {
     [500, 'OneOps could not complete the operation'],
   ])('explains a %i failure to the user', async (status, expected) => {
     vi.stubGlobal('fetch', mock({ ratify: fail(status, { title: 'x', detail: undefined }) }));
-    render(<App />);
+    renderApp();
     await openDialog();
 
     await confirm();
@@ -156,7 +156,7 @@ describe('ratify workflow', () => {
       'fetch',
       mock({ ratify: fail(409, { title: 'conflict', detail: 'ratification requires draft or in_review' }) }),
     );
-    render(<App />);
+    renderApp();
     await openDialog();
     await confirm();
 
@@ -166,10 +166,15 @@ describe('ratify workflow', () => {
   it('closes on Escape without performing the operation', async () => {
     const f = mock();
     vi.stubGlobal('fetch', f);
-    render(<App />);
-    await openDialog();
+    renderApp();
+    const dialog = await openDialog();
 
-    fireEvent.keyDown(window, { key: 'Escape' });
+    // Cloudscape's Modal listens on the dialog itself (matching real browser
+    // behaviour — focus is trapped inside) and checks the legacy `keyCode`, not `key`.
+    fireEvent.keyDown(within(dialog).getByRole('button', { name: 'Ratify' }), {
+      key: 'Escape',
+      keyCode: 27,
+    });
 
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(f.mock.calls.filter(([u]) => String(u).includes('/ratify'))).toHaveLength(0);

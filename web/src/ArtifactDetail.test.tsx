@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { renderApp } from './test-render';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import App from './App';
 import type { ConfigObject } from './api';
 
 const artifact = (over: Partial<ConfigObject> = {}): ConfigObject => ({
@@ -50,18 +50,18 @@ afterEach(() => vi.unstubAllGlobals());
 describe('artifact detail', () => {
   it('opens from the estate list and puts the id in the URL', async () => {
     vi.stubGlobal('fetch', routedFetch());
-    render(<App />);
+    renderApp();
 
     fireEvent.click(await screen.findByRole('button', { name: /Constitution-Volume-I/ }));
 
     expect(await screen.findByRole('heading', { name: /Constitution-Volume-I/ })).toBeInTheDocument();
-    expect(window.location.search).toContain('artifact=ROOT');
+    expect(window.location.pathname).toBe('/artifacts/ROOT');
   });
 
   it('shows all four classification dimensions', async () => {
     vi.stubGlobal('fetch', routedFetch());
-    window.history.replaceState(null, '', '/?artifact=ROOT');
-    render(<App />);
+    window.history.replaceState(null, '', '/artifacts/ROOT');
+    renderApp();
 
     const panel = (await screen.findByRole('heading', { name: 'Classification' })).closest('section')!;
     expect(within(panel).getByText('Authority')).toBeInTheDocument();
@@ -73,16 +73,16 @@ describe('artifact detail', () => {
 
   it('resolves relation names, since the graph returns ids only', async () => {
     vi.stubGlobal('fetch', routedFetch());
-    window.history.replaceState(null, '', '/?artifact=ROOT');
-    render(<App />);
+    window.history.replaceState(null, '', '/artifacts/ROOT');
+    renderApp();
 
     expect(await screen.findByText('Configuration-State-Model.md')).toBeInTheDocument();
   });
 
   it('still renders the artifact when the graph is unavailable', async () => {
     vi.stubGlobal('fetch', routedFetch({ '/dependencies': 'ERROR', '/dependents': 'ERROR' }));
-    window.history.replaceState(null, '', '/?artifact=ROOT');
-    render(<App />);
+    window.history.replaceState(null, '', '/artifacts/ROOT');
+    renderApp();
 
     expect(await screen.findByRole('heading', { name: /Constitution-Volume-I/ })).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
@@ -90,16 +90,16 @@ describe('artifact detail', () => {
 
   it('surfaces the problem detail when the artifact itself fails', async () => {
     vi.stubGlobal('fetch', routedFetch({ '/v1/artifacts/ROOT': 'ERROR' }));
-    window.history.replaceState(null, '', '/?artifact=ROOT');
-    render(<App />);
+    window.history.replaceState(null, '', '/artifacts/ROOT');
+    renderApp();
 
     expect(await screen.findByRole('alert')).toBeInTheDocument();
   });
 
   it('returns to the estate and clears the id from the URL', async () => {
     vi.stubGlobal('fetch', routedFetch());
-    window.history.replaceState(null, '', '/?artifact=ROOT');
-    render(<App />);
+    window.history.replaceState(null, '', '/artifacts/ROOT');
+    renderApp();
 
     fireEvent.click(await screen.findByRole('button', { name: /Back to estate/ }));
 

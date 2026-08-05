@@ -1,4 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
+import Alert from '@cloudscape-design/components/alert';
+import Box from '@cloudscape-design/components/box';
+import Button from '@cloudscape-design/components/button';
+import ColumnLayout from '@cloudscape-design/components/column-layout';
+import Container from '@cloudscape-design/components/container';
+import Header from '@cloudscape-design/components/header';
+import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
+import SpaceBetween from '@cloudscape-design/components/space-between';
 import { ApiError, executeGovernance, getArtifact, getRelations, newIdempotencyKey } from '../api';
 import type { ConfigObject, GovernanceResult, ProblemDetail, Relation } from '../api';
 import { RATIFY } from '../governance';
@@ -29,30 +37,30 @@ function RelationList({
   if (!data) return null;
 
   return (
-    <section className="panel">
-      <h3>
-        {title} <span className="count">{data.total}</span>
-      </h3>
-      <p className="panel-hint">{hint}</p>
-      {data.relations.length === 0 ? (
-        <p className="muted">None.</p>
-      ) : (
-        <ul className="relations">
-          {data.relations.map((r) => (
-            <li key={r.cfg_id}>
-              <button type="button" className="link" onClick={() => onOpen(r.cfg_id)}>
-                {r.artifact ?? r.cfg_id}
-              </button>
-              {r.authority && <AuthorityPill value={r.authority} />}
-            </li>
-          ))}
-          {data.total > data.relations.length && (
-            <li className="muted">
-              …and {data.total - data.relations.length} more, not shown.
-            </li>
-          )}
-        </ul>
-      )}
+    <section>
+      <Container header={<Header variant="h3" description={hint} counter={`(${data.total})`}>{title}</Header>}>
+        {data.relations.length === 0 ? (
+          <Box color="text-body-secondary">None.</Box>
+        ) : (
+          <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {data.relations.map((r) => (
+              <li key={r.cfg_id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                <Button variant="inline-link" onClick={() => onOpen(r.cfg_id)}>
+                  {r.artifact ?? r.cfg_id}
+                </Button>
+                {r.authority && <AuthorityPill value={r.authority} />}
+              </li>
+            ))}
+            {data.total > data.relations.length && (
+              <li>
+                <Box color="text-body-secondary">
+                  …and {data.total - data.relations.length} more, not shown.
+                </Box>
+              </li>
+            )}
+          </ul>
+        )}
+      </Container>
     </section>
   );
 }
@@ -137,29 +145,28 @@ export function ArtifactDetail({
   }, [cfgId, reloads]);
 
   return (
-    <div className="detail">
-      <button type="button" className="link back" onClick={onBack}>
-        ← Back to estate
-      </button>
+    <SpaceBetween size="l">
+      <Button variant="link" onClick={onBack} iconName="angle-left">
+        Back to estate
+      </Button>
 
       {problem && <ErrorState problem={problem} onRetry={retry} />}
 
       {loading && !problem && (
-        <div className="state" role="status" aria-busy="true">
+        <Box color="text-body-secondary" textAlign="center" padding="l">
           Loading artifact…
-        </div>
+        </Box>
       )}
 
       {artifact && (
-        <>
-          <header className="detail-head">
-            <h2>{artifact.artifact}</h2>
-            <AuthorityPill value={artifact.authority} />
-            <div className="actions">
-              {RATIFY.available(artifact) ? (
-                <button
-                  type="button"
-                  className="btn btn-primary"
+        <SpaceBetween size="l">
+          <Header
+            variant="h1"
+            description={`${artifact.cfg_id} · version ${artifact.version}`}
+            actions={
+              RATIFY.available(artifact) ? (
+                <Button
+                  variant="primary"
                   onClick={() => {
                     setOpProblem(null);
                     setOutcome(null);
@@ -167,57 +174,52 @@ export function ArtifactDetail({
                   }}
                 >
                   {RATIFY.label}
-                </button>
+                </Button>
               ) : (
-                <span className="unavailable" title={RATIFY.unavailableBecause(artifact)}>
+                <Box color="text-body-secondary" fontSize="body-s" nativeAttributes={{ title: RATIFY.unavailableBecause(artifact) }}>
                   {RATIFY.label} unavailable
-                </span>
-              )}
-            </div>
-          </header>
-          <p className="cfg-id">
-            {artifact.cfg_id} · version {artifact.version}
-          </p>
+                </Box>
+              )
+            }
+          >
+            <SpaceBetween direction="horizontal" size="s" alignItems="center">
+              <span>{artifact.artifact}</span>
+              <AuthorityPill value={artifact.authority} />
+            </SpaceBetween>
+          </Header>
 
           {outcome?.state && (
-            <div className="outcome" role="status">
-              <strong>Ratified.</strong> This artifact now governs — lifecycle{' '}
-              {outcome.state.lifecycle.replace(/_/g, ' ')}, authority{' '}
-              {outcome.state.authority.replace(/_/g, ' ')}, retention{' '}
-              {outcome.state.retention_class.replace(/_/g, ' ')}. Recorded in the audit
-              chain by {outcome.actor}.
+            <div role="status">
+              <Alert type="success" header="Ratified.">
+                This artifact now governs — lifecycle {outcome.state.lifecycle.replace(/_/g, ' ')},
+                authority {outcome.state.authority.replace(/_/g, ' ')}, retention{' '}
+                {outcome.state.retention_class.replace(/_/g, ' ')}. Recorded in the audit chain by{' '}
+                {outcome.actor}.
+              </Alert>
             </div>
           )}
 
-          <section className="panel">
-            <h3>Classification</h3>
-            <p className="panel-hint">
-              Four independent dimensions. Authority is computed from the dependency
-              graph; the others are asserted.
-            </p>
-            <dl className="dims">
-              <div>
-                <dt>Authority</dt>
-                <dd>
-                  <AuthorityPill value={artifact.authority} />
-                </dd>
-              </div>
-              <div>
-                <dt>Lifecycle</dt>
-                <dd>{humanise(artifact.lifecycle)}</dd>
-              </div>
-              <div>
-                <dt>Retention</dt>
-                <dd>{humanise(artifact.retention_class)}</dd>
-              </div>
-              <div>
-                <dt>Role</dt>
-                <dd>{humanise(artifact.role)}</dd>
-              </div>
-            </dl>
+          <section>
+            <Container
+              header={
+                <Header variant="h3" description="Four independent dimensions. Authority is computed from the dependency graph; the others are asserted.">
+                  Classification
+                </Header>
+              }
+            >
+              <KeyValuePairs
+                columns={4}
+                items={[
+                  { label: 'Authority', value: <AuthorityPill value={artifact.authority} /> },
+                  { label: 'Lifecycle', value: humanise(artifact.lifecycle) },
+                  { label: 'Retention', value: humanise(artifact.retention_class) },
+                  { label: 'Role', value: humanise(artifact.role) },
+                ]}
+              />
+            </Container>
           </section>
 
-          <div className="two-col">
+          <ColumnLayout columns={2}>
             <RelationList
               title="Depends on"
               hint="Artifacts this one relies upon."
@@ -230,58 +232,37 @@ export function ArtifactDetail({
               data={dependents}
               onOpen={onOpen}
             />
-          </div>
+          </ColumnLayout>
 
-          <AuditTimeline cfgId={artifact.cfg_id} refreshToken={reloads} />
-
-          <section className="panel">
-            <h3>Record</h3>
-            <dl className="dims">
-              {artifact.ratified_by && (
-                <div>
-                  <dt>Ratified by</dt>
-                  <dd>{artifact.ratified_by}</dd>
-                </div>
-              )}
-              {artifact.review_cycle && (
-                <div>
-                  <dt>Review cycle</dt>
-                  <dd>{artifact.review_cycle}</dd>
-                </div>
-              )}
-              {artifact.retention_policy && (
-                <div>
-                  <dt>Retention policy</dt>
-                  <dd>{artifact.retention_policy}</dd>
-                </div>
-              )}
-              <div>
-                <dt>Created</dt>
-                <dd>{when(artifact.created_at)}</dd>
-              </div>
-              <div>
-                <dt>Updated</dt>
-                <dd>{when(artifact.updated_at)}</dd>
-              </div>
-              <div>
-                <dt>Revision</dt>
-                <dd>{artifact.row_version}</dd>
-              </div>
-            </dl>
+          <section>
+            <Container>
+              <AuditTimeline cfgId={artifact.cfg_id} refreshToken={reloads} />
+            </Container>
           </section>
 
+          <Container header={<Header variant="h3">Record</Header>}>
+            <KeyValuePairs
+              columns={3}
+              items={[
+                ...(artifact.ratified_by ? [{ label: 'Ratified by', value: artifact.ratified_by }] : []),
+                ...(artifact.review_cycle ? [{ label: 'Review cycle', value: artifact.review_cycle }] : []),
+                ...(artifact.retention_policy
+                  ? [{ label: 'Retention policy', value: artifact.retention_policy }]
+                  : []),
+                { label: 'Created', value: when(artifact.created_at) },
+                { label: 'Updated', value: when(artifact.updated_at) },
+                { label: 'Revision', value: String(artifact.row_version) },
+              ]}
+            />
+          </Container>
+
           {artifact.metadata && Object.keys(artifact.metadata).length > 0 && (
-            <section className="panel">
-              <h3>Metadata</h3>
-              <dl className="dims">
-                {Object.entries(artifact.metadata).map(([k, v]) => (
-                  <div key={k}>
-                    <dt>{k}</dt>
-                    <dd>{v}</dd>
-                  </div>
-                ))}
-              </dl>
-            </section>
+            <Container header={<Header variant="h3">Metadata</Header>}>
+              <KeyValuePairs
+                columns={3}
+                items={Object.entries(artifact.metadata).map(([k, v]) => ({ label: k, value: v }))}
+              />
+            </Container>
           )}
 
           {confirming && (
@@ -297,8 +278,8 @@ export function ArtifactDetail({
               }}
             />
           )}
-        </>
+        </SpaceBetween>
       )}
-    </div>
+    </SpaceBetween>
   );
 }

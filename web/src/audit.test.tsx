@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { renderApp } from './test-render';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import App from './App';
 import { setToken } from './auth';
 import type { ConfigObject } from './api';
 
@@ -84,7 +84,7 @@ const timeline = async () =>
   (await screen.findByRole('heading', { name: /Audit record/ })).closest('section')!;
 
 beforeEach(() => {
-  window.history.replaceState(null, '', '/?artifact=ROOT');
+  window.history.replaceState(null, '', '/artifacts/ROOT');
   setToken(null);
 });
 afterEach(() => vi.unstubAllGlobals());
@@ -92,7 +92,7 @@ afterEach(() => vi.unstubAllGlobals());
 describe('audit timeline', () => {
   it('shows who did what, newest first', async () => {
     vi.stubGlobal('fetch', mock());
-    render(<App />);
+    renderApp();
     const panel = await timeline();
 
     const items = await within(panel).findAllByRole('listitem');
@@ -103,7 +103,7 @@ describe('audit timeline', () => {
 
   it('derives before → after from consecutive events', async () => {
     vi.stubGlobal('fetch', mock());
-    render(<App />);
+    renderApp();
     const panel = await timeline();
     const newest = (await within(panel).findAllByRole('listitem'))[0];
 
@@ -116,7 +116,7 @@ describe('audit timeline', () => {
 
   it('shows the chain-verified badge from the chain summary', async () => {
     vi.stubGlobal('fetch', mock());
-    render(<App />);
+    renderApp();
     expect(await screen.findByText('✓ Chain verified')).toBeInTheDocument();
   });
 
@@ -125,13 +125,13 @@ describe('audit timeline', () => {
       'fetch',
       mock({ chain: ok({ chain_id: 'ROOT', verified: false, checked: 2, head_seq: 2, break_reason: 'hash mismatch at seq 2' }) }),
     );
-    render(<App />);
+    renderApp();
     expect(await screen.findByText('⚠ Chain unverified')).toBeInTheDocument();
   });
 
   it('reveals the hash record on demand, not by default', async () => {
     vi.stubGlobal('fetch', mock());
-    render(<App />);
+    renderApp();
     const panel = await timeline();
 
     expect(within(panel).queryByText('bbb222')).not.toBeInTheDocument();
@@ -143,7 +143,7 @@ describe('audit timeline', () => {
 
   it('states plainly when nothing has happened yet', async () => {
     vi.stubGlobal('fetch', mock({ history: ok({ items: [] }) }));
-    render(<App />);
+    renderApp();
     const panel = await timeline();
     expect(
       within(panel).getByText(/No governance operation has been performed/),
@@ -152,7 +152,7 @@ describe('audit timeline', () => {
 
   it('still shows the governance record when hashes are unavailable', async () => {
     vi.stubGlobal('fetch', mock({ events: fail(500) }));
-    render(<App />);
+    renderApp();
     const panel = await timeline();
 
     expect(within(panel).getByText('Ratification')).toBeInTheDocument();
@@ -162,7 +162,7 @@ describe('audit timeline', () => {
   it('surfaces a failure of the record itself, and retries', async () => {
     const f = mock({ history: fail(500) });
     vi.stubGlobal('fetch', f);
-    render(<App />);
+    renderApp();
     const panel = await timeline();
 
     expect(within(panel).getByRole('alert')).toBeInTheDocument();
@@ -175,7 +175,7 @@ describe('audit timeline', () => {
 
   it('offers older pages only when the server returns a cursor', async () => {
     vi.stubGlobal('fetch', mock({ history: ok({ ...HISTORY_TWO, next_cursor: '1' }) }));
-    render(<App />);
+    renderApp();
     const panel = await timeline();
     expect(within(panel).getByRole('button', { name: 'Load older' })).toBeInTheDocument();
   });
@@ -183,7 +183,7 @@ describe('audit timeline', () => {
   it('refreshes after a ratification so the new event is visible', async () => {
     const f = mock();
     vi.stubGlobal('fetch', f);
-    render(<App />);
+    renderApp();
     await timeline();
 
     const before = f.mock.calls.map(String).filter((u) => u.includes('/history')).length;
