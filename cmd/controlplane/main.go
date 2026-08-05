@@ -702,6 +702,19 @@ func run(logger *slog.Logger) error {
 		membershipStore, userStore, notificationSvc, escalationMetrics, logger, escalation.WorkerConfig{})
 	workers = append(workers, escalationSeeder.Run, escalationWorker.Run)
 
+	// NOC operational-overview projection (E7.1): a read-only, computed
+	// aggregate over incident/alert-rule/asset/on-call/escalation-state — not
+	// a reified Dashboard/Report entity (docs/PLATFORM-BUILD-PLAN.md §4). Its
+	// incident/alert-rule/asset/on-call reads reuse the EXISTING tenant-scoped
+	// instances srv.SetIncidents/SetAlertRules/SetAssets/SetOnCallSchedules
+	// already wired above, unchanged. escalation_state's ONLY existing
+	// instance (escalationStateStore just above) is privileged, so this is a
+	// SECOND instance built over appPool instead — the identical dual-role
+	// split every other tenant-owned table's admin-CRUD/privileged-worker
+	// split already draws, applied here between a read-only projection and
+	// the privileged Seeder/Worker.
+	srv.SetNOCEscalations(postgres.NewEscalationStateStore(appPool))
+
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.
 	diagBuilder := buildDiagnostics(cfg, startedAt, pool, scheduler)

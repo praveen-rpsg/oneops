@@ -20,6 +20,8 @@ type fakeIncidents struct {
 	lastAssignee                                                   *string
 	lastListStatus                                                 domain.IncidentStatus
 	timelineItems                                                  []*domain.IncidentEvent
+	overviewCounts                                                 *domain.IncidentOverviewCounts
+	overviewErr                                                    error
 }
 
 func (f *fakeIncidents) Create(_ context.Context, inc *domain.Incident) (*domain.Incident, error) {
@@ -69,6 +71,18 @@ func (f *fakeIncidents) Timeline(context.Context, string, int, string) ([]*domai
 		return nil, f.timelineErr
 	}
 	return f.timelineItems, nil
+}
+func (f *fakeIncidents) OverviewCounts(context.Context) (*domain.IncidentOverviewCounts, error) {
+	if f.overviewErr != nil {
+		return nil, f.overviewErr
+	}
+	if f.overviewCounts != nil {
+		return f.overviewCounts, nil
+	}
+	return &domain.IncidentOverviewCounts{
+		ByStatus:   map[domain.IncidentStatus]int{},
+		BySeverity: map[domain.IncidentSeverity]int{},
+	}, nil
 }
 func (f *fakeIncidents) touched() int {
 	return f.creates + f.gets + f.lists + f.patches + f.transitions + f.assigns + f.timelines

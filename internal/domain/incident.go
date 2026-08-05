@@ -513,4 +513,41 @@ type IncidentRepository interface {
 	// returns a row this store, or any caller, can update or delete:
 	// incident_event is append-only at the schema level.
 	Timeline(ctx context.Context, incidentID string, limit int, after string) ([]*IncidentEvent, error)
+	// OverviewCounts returns the bounded incident aggregate the NOC overview
+	// projection needs (E7.1): open-class (open/acknowledged/investigating)
+	// counts by status and by severity, plus the root/collateral grouping
+	// summary derived from root_incident_id (E4.2). Two GROUP BY queries,
+	// never a List — see IncidentOverviewCounts' own doc comment for the
+	// grouping definitions.
+	OverviewCounts(ctx context.Context) (*IncidentOverviewCounts, error)
+}
+
+// IncidentOverviewCounts is the bounded aggregate behind the NOC overview
+// projection's "incidents" section (E7.1) — a computed read, never a stored
+// noun (docs/PLATFORM-BUILD-PLAN.md §4). Every field is scoped to
+// OPEN-CLASS incidents only (IncidentOpen, IncidentAcknowledged,
+// IncidentInvestigating): resolved/closed/reopened is history the loop has
+// already moved past and is deliberately excluded, unlike
+// IncidentRepository.List's own no-default-exclusion shape.
+type IncidentOverviewCounts struct {
+	// OpenTotal is the count of every open-class incident, regardless of
+	// severity — the sum of ByStatus's values.
+	OpenTotal int
+	// ByStatus breaks OpenTotal down by IncidentOpen/IncidentAcknowledged/
+	// IncidentInvestigating. A status with zero open-class incidents is
+	// simply absent, not a zero-valued entry.
+	ByStatus map[IncidentStatus]int
+	// BySeverity breaks OpenTotal down by severity across the same
+	// open-class set. Absent, not zero, for a severity with no matches.
+	BySeverity map[IncidentSeverity]int
+	// CollateralCount is the number of open-class incidents whose
+	// root_incident_id is non-NULL (E4.2): incidents the topology-aware
+	// grouping reconciler has attributed to another, deeper root.
+	CollateralCount int
+	// RootCount is the number of DISTINCT root_incident_id values named by
+	// CollateralCount's incidents — how many separate roots currently have
+	// at least one open collateral incident grouped under them. It is not
+	// "how many open incidents are themselves a root" (an incident can be a
+	// root of nothing, i.e. standalone, without appearing here at all).
+	RootCount int
 }

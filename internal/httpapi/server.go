@@ -146,6 +146,13 @@ type Server struct {
 	// that pages and advances tiers (E5.2b-2) is a later, separate story.
 	escalationPolicies domain.EscalationPolicyRepository
 
+	// NOC overview projection's escalation-state read (E7.1); nil until
+	// SetNOCEscalations. escalation_state is TENANT-OWNED, like on_call_schedule
+	// above, but its ONLY other instance in this codebase is privileged
+	// (internal/escalation's Seeder/Worker) — this is its first tenant-scoped
+	// read role. See nocEscalationReader's own doc comment.
+	nocEscalations nocEscalationReader
+
 	// Notification registry (read-only); nil until SetNotifications.
 	// notification is TENANT-OWNED, like team above, so nothing here needs an
 	// exemption from row-level security.
@@ -532,6 +539,15 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/incidents/{id}/transition", s.transitionIncident)
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/incidents/{id}/assign", s.assignIncident)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/incidents/{id}/timeline", s.getIncidentTimeline)
+
+		// NOC operational-overview projection (E7.1): a read-only, computed-
+		// at-request-time aggregate over incidents/alerts/assets/on-call/
+		// escalations — NOT a reified Dashboard/Report/Overview entity
+		// (docs/PLATFORM-BUILD-PLAN.md §4, Vol III §3.4), the same shape
+		// GET /admin/assets/health and GET .../on-call-schedules/{id}/on-call
+		// already establish. Every table it reads is TENANT-OWNED, so the
+		// permission tier is tenant administration, not requirePlatformAdmin.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/noc/overview", s.nocOverview)
 
 		// Notification administration (read-only). notification is TENANT-OWNED,
 		// exactly like team above, so the permission tier is tenant

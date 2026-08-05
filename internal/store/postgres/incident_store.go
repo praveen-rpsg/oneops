@@ -555,6 +555,65 @@ func (s *IncidentStore) Timeline(
 	return out, nil
 }
 
+// openClassIncidentStatuses is the status set every OverviewCounts query
+// scopes to (E7.1): the incidents the NOC loop still has open work against.
+const openClassIncidentStatuses = `('open', 'acknowledged', 'investigating')`
+
+// OverviewCounts implements domain.IncidentRepository (E7.1's NOC overview
+// projection): two bounded GROUP BY queries over open-class incidents,
+// never a List. Both are backed by ix_incident_tenant_status (tenant_id,
+// status) — row-level security supplies the tenant_id half of that index for
+// free on this tenant-scoped connection (ADR-TENANCY-002), and
+// `status IN (...)` is the index's own second column, so cost tracks the
+// caller's own open-incident count, not the whole table, regardless of how
+// much resolved/closed history has accumulated.
+func (s *IncidentStore) OverviewCounts(ctx context.Context) (*domain.IncidentOverviewCounts, error) {
+	out := &domain.IncidentOverviewCounts{
+		ByStatus:   map[domain.IncidentStatus]int{},
+		BySeverity: map[domain.IncidentSeverity]int{},
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT status, severity, COUNT(*)
+		  FROM incident
+		 WHERE status IN `+openClassIncidentStatuses+`
+		 GROUP BY status, severity`)
+	if err != nil {
+		return nil, fmt.Errorf("count incidents by status/severity: %w", err)
+	}
+	for rows.Next() {
+		var status, severity string
+		var n int
+		if err := rows.Scan(&status, &severity, &n); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan incident status/severity count: %w", err)
+		}
+		out.ByStatus[domain.IncidentStatus(status)] += n
+		out.BySeverity[domain.IncidentSeverity(severity)] += n
+		out.OpenTotal += n
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate incident status/severity counts: %w", err)
+	}
+	rows.Close()
+
+	// A second, separate query rather than folding into the one above: the
+	// GROUP BY above is keyed by (status, severity), which would fragment a
+	// single grouping count across every (status, severity) combination it
+	// appears under — this one needs its own scan of the same bounded
+	// open-class row set.
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FILTER (WHERE root_incident_id IS NOT NULL),
+		       COUNT(DISTINCT root_incident_id) FILTER (WHERE root_incident_id IS NOT NULL)
+		  FROM incident
+		 WHERE status IN `+openClassIncidentStatuses,
+	).Scan(&out.CollateralCount, &out.RootCount); err != nil {
+		return nil, fmt.Errorf("count incident grouping: %w", err)
+	}
+	return out, nil
+}
+
 // explainMissedUpdate distinguishes "gone" from "stale version" after an
 // UPDATE matched no row, so the caller gets 404 or 409 rather than one
 // ambiguous failure. Mirrors AssetStore.explainMissedUpdate.
