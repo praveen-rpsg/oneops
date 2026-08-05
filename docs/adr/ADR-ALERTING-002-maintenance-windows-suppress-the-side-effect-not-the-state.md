@@ -217,12 +217,15 @@ per asset today.
   cross-tenant isolation, E3.2 dwell composition, checker-error-does-not-
   persist). Mutation-verified by hand: short-circuiting the `if next ==
   domain.AlertRuleStateFiring { ... }` gate around
-  `Evaluator.maintenanceSuppressed` to never run flips 5 of these tests to
+  `Evaluator.maintenanceSuppressed` to never run flips 6 of these tests to
   FAIL (`TestEvaluator_ActiveMaintenanceWindowSuppressesFiringNoIncidentNoNotify`,
   `TestEvaluator_WindowBoundaryIsHalfOpen`,
   `TestEvaluator_EndOfWindowResumesPagingOnNextTick`,
   `TestEvaluator_MaintenanceWindowIsTenantIsolated`,
-  `TestEvaluator_SuppressedFiringDoesNotCorruptDwellPending`), then reverted.
+  `TestEvaluator_SuppressedFiringDoesNotCorruptDwellPending`,
+  `TestEvaluator_MaintenanceCheckErrorDoesNotPersistTransition` — the never-called
+  checker never returns its error), then reverted. (Count corrected 5→6 in the
+  E3.3a review.)
 - `internal/store/postgres/maintenance_window_store_integration_test.go` —
   CRUD against real PostgreSQL, the ADR-ASSET-001 §6 cross-tenant/nonexistent-
   asset defense, RLS isolation on the admin surface

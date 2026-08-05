@@ -62,8 +62,10 @@ type MaintenanceWindow struct {
 	// (docs/PLATFORM-BUILD-PLAN.md's success criterion for E3.3a). Both are
 	// set only by the evaluator's privileged background path
 	// (alerting.MaintenanceWindowChecker.Suppress), incremented once per
-	// evaluation tick that found this window active for a would-be firing,
-	// never through the caller-facing Create/Delete path.
+	// suppressed (rule, tick) event — i.e. three rules on the same asset
+	// suppressed in one tick add 3 — and, when windows overlap, credited to
+	// the lowest window_id only. Never written through the caller-facing
+	// Create/Delete path.
 	SuppressedCount  int64
 	LastSuppressedAt time.Time // zero means never suppressed
 	RowVersion       int64

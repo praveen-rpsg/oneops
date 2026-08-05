@@ -82,7 +82,7 @@ COMMENT ON COLUMN maintenance_window.ends_at IS
 COMMENT ON COLUMN maintenance_window.created_by IS
     'The authenticated actor who declared this window, set by the repository from ActorFrom(ctx) at Create time — never accepted from caller-supplied request data (mirrors IncidentStore.Create''s discipline for its own timeline actor).';
 COMMENT ON COLUMN maintenance_window.suppressed_count IS
-    'How many evaluation ticks found this window active for a would-be firing and suppressed its incident/notify side effect. Written only by the evaluator''s privileged background path, never through the caller-facing Create/Delete path. The visible, queryable record that a suppression happened.';
+    'How many suppressed (rule, tick) events this window absorbed: incremented once per would-be firing whose incident/notify side effect was suppressed (three rules on the same asset in one tick add 3), credited to the lowest window_id when windows overlap. Written only by the evaluator''s privileged background path, never through the caller-facing Create/Delete path. The visible, queryable record that a suppression happened.';
 COMMENT ON COLUMN maintenance_window.last_suppressed_at IS
     'When this window last suppressed a firing, or NULL if it never has.';
 
