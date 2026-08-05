@@ -137,7 +137,28 @@ proves the same fact at the storage level (a fresh `EnabledRules` read after
   config on the next tick. A rule is never held to a dwell target it can no
   longer see.
 - **Leader failover.** Covered by Decision 5: the dwell clock is data, not
-  process state.
+  process state. **Clock skew across leaders.** `PendingSince` is written with
+  one leader's wall clock and, after failover, compared against a *different*
+  leader's wall clock. Dwell precision is therefore bounded by inter-node clock
+  skew: a rule with `flap_dwell_seconds` near the skew magnitude may commit
+  slightly early or late across a failover. This is an accuracy bound, not a
+  correctness defect (no state is lost or double-committed); operators who need
+  tight dwell precision must keep cluster clocks synchronized (NTP/PTP), the
+  same assumption every wall-clock dwell carries.
+- **Operator PATCH on an actively-flapping rule.** Each dwell start/reset bumps
+  the rule's `row_version` (the CAS token). A rule that is flapping fast can
+  therefore repeatedly `409 Conflict` an operator's optimistic-locked PATCH
+  landing inside a tick window. This is a pre-existing property — `RecordTransition`
+  already bumped `row_version` — that this ADR only makes more frequent for
+  flapping rules; the operator simply re-reads and retries. Not a correctness
+  issue, recorded here for honesty.
+- **First deploy over pre-existing E3.1 rules.** The migration backfills
+  `flap_dwell_seconds = 60` on every existing row (a deliberate secure-default:
+  `0` would leave pre-existing rules unprotected). Consequence: on first deploy,
+  E3.1-era rules — including any with an in-flight recovery — gain up to a 60s
+  commit delay. Defensible and intended, but operators running live rules
+  should be told to expect it. Set a rule's dwell to `0` to restore exact
+  E3.1 immediacy.
 - **A rule whose dwell equals or exceeds its evaluation interval.** The
   commit can land up to one tick late relative to the exact dwell boundary
   (this package evaluates on a fixed `Interval`, default 30s — see
