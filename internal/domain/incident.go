@@ -225,10 +225,32 @@ type Incident struct {
 	AcknowledgedAt *time.Time
 	ResolvedAt     *time.Time
 	ClosedAt       *time.Time
+	// RootIncidentID is the topology-aware grouping LINK (E4.2,
+	// ADR-ALERTING-004): a column, not a reified Group/Correlation entity —
+	// the same reduced-concept treatment AlertRule.CurrentIncidentID gets
+	// (E4.1). NULL means this incident is itself a root or standalone; a
+	// non-NULL value names the OPEN, alert-sourced incident this one is
+	// grouped under because its own asset transitively depends
+	// (depends_on/runs_on only, cycle-safe) on the root's asset, which is
+	// itself "down" (has its own open, alert-sourced incident). Set/cleared
+	// EXCLUSIVELY by internal/grouping's leader-gated reconciliation pass —
+	// there is no HTTP write path, mirroring alert_rule.last_state's
+	// evaluator-only write discipline. An incident points to AT MOST ONE
+	// root; "the group" a caller sees is derived (every incident sharing a
+	// RootIncidentID, plus that root), never a stored membership row.
+	RootIncidentID *string
 }
 
 // Open reports whether the incident is still active work (not closed).
 func (i *Incident) Open() bool { return i.Status != IncidentClosed }
+
+// IsGroupRoot reports whether this incident anchors a topology-aware group
+// (E4.2): it has no root of its own, whether or not anything is currently
+// grouped under it — the same "NULL means unlinked" reading
+// AlertRule.CurrentIncidentID's own doc comment uses, applied here to the
+// inverse direction (a root names nothing; a collateral incident names its
+// root).
+func (i *Incident) IsGroupRoot() bool { return i.RootIncidentID == nil }
 
 // Validate enforces the invariants the database also enforces, so a bad
 // request fails with a field-level 422 rather than a constraint-violation 500.
