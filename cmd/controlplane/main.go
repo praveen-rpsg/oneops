@@ -609,6 +609,15 @@ func run(logger *slog.Logger) error {
 	// worker, when built, is what would need one).
 	srv.SetOnCallSchedules(postgres.NewOnCallScheduleStore(appPool))
 
+	// Escalation policy + tier administration (E5.2b-1): escalation_policy/
+	// escalation_tier are tenant-owned and under row-level security, exactly
+	// like on_call_schedule above, so the admin CRUD + tier ladder API is
+	// built from the tenant-scoped pool. CONFIG ONLY: there is no
+	// privileged-pool counterpart and no engine/worker wired here — the
+	// escalation engine that pages and advances tiers (E5.2b-2) is a later,
+	// separate story.
+	srv.SetEscalationPolicies(postgres.NewEscalationPolicyStore(appPool))
+
 	// Dependency-aware suppression (E3.3b, ADR-ALERTING-003): the down-check
 	// and the suppression record are privileged and cross-tenant (built over
 	// pool, same as maintenanceChecker above), but the dependency WALK itself

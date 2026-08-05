@@ -2189,6 +2189,195 @@ paths:
         '422': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/escalation-policies:
+    get:
+      summary: List the caller's tenant's escalation policies (E5.2b-1)
+      operationId: listEscalationPolicies
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last policy_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of escalation policies
+          content: { application/json: { schema: { $ref: '#/components/schemas/EscalationPolicyList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Declare a new escalation policy (E5.2b-1)
+      description: >-
+        CONFIG ONLY: this declares the policy's own record. Tiers are added
+        separately via POST .../tiers. No engine, worker or paging exists
+        behind this endpoint yet (E5.2b-2).
+      operationId: createEscalationPolicy
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateEscalationPolicyRequest' }
+      responses:
+        '201':
+          description: The declared policy
+          content: { application/json: { schema: { $ref: '#/components/schemas/EscalationPolicy' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/escalation-policies/{id}:
+    get:
+      summary: Get an escalation policy by identifier
+      operationId: getEscalationPolicy
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The escalation policy
+          content: { application/json: { schema: { $ref: '#/components/schemas/EscalationPolicy' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Change one or more fields of a policy under optimistic locking
+      operationId: patchEscalationPolicy
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchEscalationPolicyRequest' }
+      responses:
+        '200':
+          description: The updated policy
+          content: { application/json: { schema: { $ref: '#/components/schemas/EscalationPolicy' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    delete:
+      summary: Delete an escalation policy
+      description: ON DELETE CASCADE removes its tiers with it.
+      operationId: deleteEscalationPolicy
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/escalation-policies/{id}/tiers:
+    get:
+      summary: List a policy's ladder, in escalation order
+      operationId: listEscalationTiers
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last position of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of the policy's tiers, in escalation order
+          content: { application/json: { schema: { $ref: '#/components/schemas/EscalationTierList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Append a tier to a policy's escalation ladder
+      description: >-
+        on_call_schedule_id must already name a schedule belonging to the
+        caller's tenant, re-verified server-side (ADR-ASSET-001 §6) — a
+        cross-tenant or non-existent on_call_schedule_id is rejected with
+        404. Always appends at the end of the ladder; use the reorder
+        endpoint to change order.
+      operationId: addEscalationTier
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddEscalationTierRequest' }
+      responses:
+        '201':
+          description: The added tier
+          content: { application/json: { schema: { $ref: '#/components/schemas/EscalationTier' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/escalation-policies/{id}/tiers/{tierId}:
+    delete:
+      summary: Remove a tier from a policy's escalation ladder
+      description: Closes the resulting gap in position; positions stay contiguous 0..N-1.
+      operationId: removeEscalationTier
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: tierId, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Removed }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/escalation-policies/{id}/tiers/reorder:
+    post:
+      summary: Atomically replace a policy's escalation ladder order
+      description: >-
+        tier_ids must name exactly the policy's current tier set, in the
+        desired new order — no more, no fewer. Positions are rewritten to
+        their new 0-based rank and stay contiguous 0..N-1.
+      operationId: reorderEscalationTiers
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReorderEscalationTiersRequest' }
+      responses:
+        '200':
+          description: The policy's tiers, in the new escalation order
+          content: { application/json: { schema: { $ref: '#/components/schemas/EscalationTierList' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/incidents:
     get:
       summary: List the caller's tenant's incidents (E5.1)
@@ -3756,6 +3945,75 @@ components:
         desired new order — no more, no fewer.
       properties:
         participant_ids:
+          type: array
+          items: { type: string }
+    EscalationPolicy:
+      type: object
+      description: >-
+        A named, ordered chain of tiers (E5.2b-1). CONFIG ONLY: no engine,
+        worker, paging or incident/notification wiring exists yet (E5.2b-2).
+      properties:
+        policy_id: { type: string }
+        name: { type: string, maxLength: 200 }
+        status: { type: string, enum: [active, archived] }
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    EscalationPolicyList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/EscalationPolicy' }
+    CreateEscalationPolicyRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 200 }
+    PatchEscalationPolicyRequest:
+      type: object
+      required: [row_version]
+      description: Supply one or more of name or status.
+      properties:
+        row_version: { type: integer, format: int64 }
+        name: { type: string, maxLength: 200 }
+        status: { type: string, enum: [active, archived] }
+    EscalationTier:
+      type: object
+      description: >-
+        One rung in a policy's escalation ladder: page on_call_schedule_id's
+        current on-call user, wait wait_seconds for an acknowledgement, then
+        (E5.2b-2) advance to the next tier. Position is 0-based and
+        contiguous 0..N-1.
+      properties:
+        tier_id: { type: string }
+        policy_id: { type: string }
+        position: { type: integer, minimum: 0 }
+        on_call_schedule_id: { type: string }
+        wait_seconds: { type: integer, minimum: 1 }
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    EscalationTierList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/EscalationTier' }
+    AddEscalationTierRequest:
+      type: object
+      required: [on_call_schedule_id, wait_seconds]
+      properties:
+        on_call_schedule_id: { type: string }
+        wait_seconds: { type: integer, minimum: 1 }
+    ReorderEscalationTiersRequest:
+      type: object
+      required: [tier_ids]
+      description: >-
+        Must name exactly the policy's current tier set, in the desired new
+        order — no more, no fewer.
+      properties:
+        tier_ids:
           type: array
           items: { type: string }
     OnCallNow:
