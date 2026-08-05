@@ -451,6 +451,23 @@ func (f *fakeDependencyChecker) suppressions() int {
 	return f.suppressedCount
 }
 
+// setDown makes a (tenant, affected asset) report a down dependency on the
+// next Suppress call — the test-side equivalent of a root CI going down
+// between two evaluation ticks.
+func (f *fakeDependencyChecker) setDown(d fakeDownDependency) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.downs = append(f.downs, d)
+}
+
+// clearDowns makes every subsequent Suppress call report "nothing down" — the
+// test-side equivalent of every down dependency recovering.
+func (f *fakeDependencyChecker) clearDowns() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.downs = nil
+}
+
 func breachingSamples(from, to time.Time, step time.Duration, value float64) []domain.Sample {
 	var out []domain.Sample
 	for ts := from; !ts.After(to); ts = ts.Add(step) {
