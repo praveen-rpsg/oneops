@@ -3481,6 +3481,22 @@ components:
         acknowledged_at: { type: string, format: date-time, nullable: true }
         resolved_at: { type: string, format: date-time, nullable: true }
         closed_at: { type: string, format: date-time, nullable: true }
+        root_incident_id:
+          type: string
+          nullable: true
+          description: >-
+            Read-only (E4.2, ADR-ALERTING-004). Set/cleared exclusively by
+            internal/grouping's leader-gated reconciliation pass — there is no
+            write path for it through this API. Names the OPEN, alert-sourced
+            incident this one is grouped under because its own asset
+            transitively depends on the root's asset, which is itself "down".
+            Absent when this incident is itself a root or standalone.
+        is_root:
+          type: boolean
+          description: >-
+            Read-only (E4.2). true when root_incident_id is absent — this
+            incident anchors its own topology-aware group (or has none),
+            rather than being grouped under another incident.
     IncidentList:
       type: object
       properties:

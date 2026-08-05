@@ -24,6 +24,7 @@ import (
 	"github.com/rpsg/oneops/internal/diag"
 	"github.com/rpsg/oneops/internal/events"
 	"github.com/rpsg/oneops/internal/governance"
+	"github.com/rpsg/oneops/internal/grouping"
 	"github.com/rpsg/oneops/internal/httpapi"
 	"github.com/rpsg/oneops/internal/notification"
 	"github.com/rpsg/oneops/internal/observability"
@@ -619,6 +620,23 @@ func run(logger *slog.Logger) error {
 		alertRuleStore, postgres.NewTelemetryStore(pool), notificationSvc, incidentCorrelator,
 		maintenanceChecker, dependencyChecker, alertingMetrics, logger, alerting.Config{})
 	workers = append(workers, alertEvaluator.Run)
+
+	// Topology-aware incident grouping (E4.2, ADR-ALERTING-004): a SEPARATE
+	// leader-gated reconciliation pass, not a hook inside the evaluator's own
+	// correlate() — see internal/grouping's package doc comment for why. It
+	// reads/writes incident.root_incident_id, so it is the identical
+	// dual-role split incidentCorrelator above already draws: the store here
+	// is *postgres.IncidentGroupingStore built over the PRIVILEGED pool,
+	// while the admin CRUD API (srv.SetIncidents above) stays on the
+	// tenant-scoped one. Its dependency walk must stay RLS-scoped — the same
+	// reason dependencyChecker above is handed dependencyGraph (built over
+	// appPool) rather than a privileged-pool traversal — so it reuses that
+	// identical AssetGraphRepo construction over appPool, wired a third time
+	// for a different caller (see dependencyGraph's own comment).
+	groupingStore := postgres.NewIncidentGroupingStore(pool)
+	groupingMetrics := grouping.NewPromMetrics(metrics.Registry())
+	groupingReconciler := grouping.NewReconciler(groupingStore, dependencyGraph, groupingMetrics, logger, grouping.Config{})
+	workers = append(workers, groupingReconciler.Run)
 
 	// Operational diagnostics + administration APIs: both reuse one diagnostics
 	// builder; administration also reuses the verification scheduler.

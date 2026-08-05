@@ -16,7 +16,7 @@ import (
 const (
 	incidentColumns = `incident_id, tenant_id, title, description, severity, status, source,
 		asset_id, assignee_user_id, row_version, created_at, updated_at,
-		acknowledged_at, resolved_at, closed_at`
+		acknowledged_at, resolved_at, closed_at, root_incident_id`
 	incidentEventColumns = `event_id, tenant_id, incident_id, kind, field, old_value, new_value, actor, row_version, occurred_at`
 )
 
@@ -65,7 +65,7 @@ func scanIncident(s scanner) (*domain.Incident, error) {
 	if err := s.Scan(
 		&inc.IncidentID, &inc.TenantID, &inc.Title, &inc.Description, &severity, &status, &source,
 		&inc.AssetID, &inc.AssigneeUserID, &inc.RowVersion, &inc.CreatedAt, &inc.UpdatedAt,
-		&inc.AcknowledgedAt, &inc.ResolvedAt, &inc.ClosedAt,
+		&inc.AcknowledgedAt, &inc.ResolvedAt, &inc.ClosedAt, &inc.RootIncidentID,
 	); err != nil {
 		return nil, err
 	}

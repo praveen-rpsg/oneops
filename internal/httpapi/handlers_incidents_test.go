@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -328,3 +329,45 @@ func TestIncidents_ListRejectsInvalidStatus(t *testing.T) {
 		t.Error("an invalid status filter reached the store")
 	}
 }
+
+// TestToIncidentDTO_ProjectsGroupingReadOnly is E4.2's DTO projection: a root
+// or standalone incident (RootIncidentID nil) reports root_incident_id absent
+// (omitempty) and is_root true; a grouped incident reports root_incident_id
+// present and is_root false. There is no field anywhere on
+// createIncidentRequest/incidentPatchRequest for this — the only writer is
+// internal/grouping's reconciler, never this handler.
+func TestToIncidentDTO_ProjectsGroupingReadOnly(t *testing.T) {
+	root := &domain.Incident{
+		IncidentID: "i-root", Title: "t", Severity: domain.IncidentSeverityHigh,
+		Status: domain.IncidentOpen, Source: domain.IncidentSourceAlert,
+	}
+	dto := toIncidentDTO(root)
+	if dto.RootIncidentID != nil {
+		t.Errorf("root incident RootIncidentID = %v, want nil", *dto.RootIncidentID)
+	}
+	if !dto.IsRoot {
+		t.Error("root incident IsRoot = false, want true")
+	}
+	body, err := json.Marshal(dto)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(body), "root_incident_id") {
+		t.Errorf("root_incident_id present in JSON for a root incident (omitempty should drop it): %s", body)
+	}
+
+	grouped := &domain.Incident{
+		IncidentID: "i-child", Title: "t", Severity: domain.IncidentSeverityHigh,
+		Status: domain.IncidentOpen, Source: domain.IncidentSourceAlert,
+		RootIncidentID: strPtr("i-root"),
+	}
+	dto2 := toIncidentDTO(grouped)
+	if dto2.RootIncidentID == nil || *dto2.RootIncidentID != "i-root" {
+		t.Errorf("grouped incident RootIncidentID = %v, want i-root", dto2.RootIncidentID)
+	}
+	if dto2.IsRoot {
+		t.Error("grouped incident IsRoot = true, want false")
+	}
+}
+
+func strPtr(s string) *string { return &s }

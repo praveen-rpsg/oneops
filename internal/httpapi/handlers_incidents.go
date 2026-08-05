@@ -38,6 +38,18 @@ type incidentDTO struct {
 	AcknowledgedAt *time.Time `json:"acknowledged_at,omitempty"`
 	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
 	ClosedAt       *time.Time `json:"closed_at,omitempty"`
+	// RootIncidentID/IsRoot project E4.2's topology-aware grouping link
+	// (domain.Incident.RootIncidentID's own doc comment) — read-only, exactly
+	// like Source: there is no HTTP write path for this column at all, it is
+	// set/cleared exclusively by internal/grouping's reconciler. omitempty on
+	// RootIncidentID keeps a standalone/root incident's JSON identical to what
+	// it was before E4.2. IsRoot is included even when false so a caller can
+	// distinguish "grouped under another incident" (root_incident_id set,
+	// is_root false) from "this incident anchors its own group, or has no
+	// group at all" (root_incident_id absent, is_root true) without treating
+	// a merely-absent field as meaningful on its own.
+	RootIncidentID *string `json:"root_incident_id,omitempty"`
+	IsRoot         bool    `json:"is_root"`
 }
 
 // toIncidentDTO deliberately omits tenant_id — the same choice toAssetDTO/
@@ -49,6 +61,7 @@ func toIncidentDTO(inc *domain.Incident) incidentDTO {
 		AssetID: inc.AssetID, AssigneeUserID: inc.AssigneeUserID,
 		RowVersion: inc.RowVersion, CreatedAt: inc.CreatedAt, UpdatedAt: inc.UpdatedAt,
 		AcknowledgedAt: inc.AcknowledgedAt, ResolvedAt: inc.ResolvedAt, ClosedAt: inc.ClosedAt,
+		RootIncidentID: inc.RootIncidentID, IsRoot: inc.IsGroupRoot(),
 	}
 }
 
