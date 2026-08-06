@@ -23,6 +23,31 @@ export const SEVERITY_RANK: Record<IncidentSeverity, number> = {
   low: 3,
 };
 
+/**
+ * Fixed hex colors for the severity series in the dashboards incident-volume
+ * chart (E9.2). Cloudscape chart series take a literal `color` hex value,
+ * not a `StatusIndicator` `type` — there is no separately installed
+ * `@cloudscape-design/design-tokens` package to source themed custom
+ * properties from (the same constraint ADR-NOC-007 already states for the
+ * topology map), so this is a second fixed, hand-written palette rather than
+ * a token lookup. Kept mode-agnostic on purpose: AWS's own qualitative chart
+ * palettes are chosen to read on both a light and a dark chart background,
+ * unlike topologyPresentation's SVG fills which sit directly on the page.
+ * Carries forward the same red/red/amber/blue reading SEVERITY_TYPE already
+ * establishes, with "high" one step lighter than "critical" so the two are
+ * visually distinguishable in a chart legend (StatusIndicator has no such
+ * need since it also renders the text label).
+ */
+export const SEVERITY_CHART_COLOR: Record<IncidentSeverity, string> = {
+  critical: '#d13212',
+  high: '#eb5f07',
+  medium: '#8d6605',
+  low: '#0972d3',
+};
+
+/** The resolved-incidents line series' color — green, distinct from every severity color above. */
+export const RESOLVED_CHART_COLOR = '#037f51';
+
 export const STATUS_TYPE: Record<IncidentStatus, StatusIndicatorProps.Type> = {
   open: 'error',
   acknowledged: 'warning',
