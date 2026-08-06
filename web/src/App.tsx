@@ -5,6 +5,7 @@ import type { AuthConfig } from './auth';
 import { Shell } from './Shell';
 import { AlertsBoardPage } from './routes/AlertsBoardPage';
 import { ArtifactPage } from './routes/ArtifactPage';
+import { DashboardsPage } from './routes/DashboardsPage';
 import { EstatePage } from './routes/EstatePage';
 import { IncidentBoardPage } from './routes/IncidentBoardPage';
 import { NOCOverviewPage } from './routes/NOCOverviewPage';
@@ -102,6 +103,7 @@ export default function App() {
         <Route path="alerts" element={<AlertsBoardPage />} />
         <Route path="on-call" element={<OnCallBoardPage />} />
         <Route path="topology" element={<TopologyPage />} />
+        <Route path="dashboards" element={<DashboardsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
