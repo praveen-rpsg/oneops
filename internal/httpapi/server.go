@@ -581,6 +581,16 @@ func (s *Server) routesFor(root fs.FS, consoleBuilt bool) *chi.Mux {
 		// permission tier is tenant administration, not requirePlatformAdmin.
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/noc/overview", s.nocOverview)
 
+		// Incident-trends dashboards projection (E9.1, ADR-NOC-008): incident
+		// volume over time, bucketed by hour/day, split by severity and by
+		// source (the honest alert-volume proxy — there is no alert-firing
+		// log in this system). incident is TENANT-OWNED, exactly like above,
+		// so the permission tier is tenant administration, not
+		// requirePlatformAdmin. Read-only, computed-at-request-time — same
+		// projection shape as /admin/noc/overview, not a reified
+		// Dashboard/Report entity (docs/PLATFORM-BUILD-PLAN.md §4).
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/dashboards/incident-trends", s.incidentTrends)
+
 		// Notification administration (read-only). notification is TENANT-OWNED,
 		// exactly like team above, so the permission tier is tenant
 		// administration, not requirePlatformAdmin. There is no create/patch
