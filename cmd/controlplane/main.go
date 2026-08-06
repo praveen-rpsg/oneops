@@ -520,6 +520,12 @@ func run(logger *slog.Logger) error {
 	// reads it, for the page-time active-membership re-check.
 	membershipStore := postgres.NewMembershipStore(appPool)
 	srv.SetMemberships(membershipStore)
+	// E-ACT.0's tenant-scoped user directory reuses the SAME appPool-scoped
+	// instance rather than a second one: unlike E5.2b-2's escalation_state
+	// (privileged Seeder/Worker + a distinct tenant-scoped read instance),
+	// MembershipStore has no privileged role anywhere in this codebase — it
+	// is appPool-scoped by construction, so there is nothing to dual-role.
+	srv.SetTenantUserDirectory(membershipStore)
 	// Team is tenant-owned and under row-level security, exactly like
 	// membership above, so no exemption is needed here either.
 	srv.SetTeams(postgres.NewTeamStore(appPool))
