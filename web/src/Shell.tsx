@@ -1,15 +1,26 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import AppLayout from '@cloudscape-design/components/app-layout';
 import BreadcrumbGroup from '@cloudscape-design/components/breadcrumb-group';
+import Box from '@cloudscape-design/components/box';
 import SideNavigation from '@cloudscape-design/components/side-navigation';
 import type { SideNavigationProps } from '@cloudscape-design/components/side-navigation';
+import Spinner from '@cloudscape-design/components/spinner';
 import SplitPanel from '@cloudscape-design/components/split-panel';
 import TopNavigation from '@cloudscape-design/components/top-navigation';
 import { getSubject, signOut } from './auth';
 import { currentMode, toggleMode } from './theme';
 import { Mode } from '@cloudscape-design/global-styles';
+
+/** Matches App.tsx's "Signing in…" idiom; shown while a route's lazy chunk loads. */
+const ROUTE_LOADING_FALLBACK = (
+  <Box margin="xxl" textAlign="center" padding="xxl">
+    <div role="status" aria-busy="true">
+      <Spinner size="large" /> Loading…
+    </div>
+  </Box>
+);
 
 /**
  * The seam a routed page uses to drive the shell's shared `SplitPanel` (E7-UI.2's
@@ -161,7 +172,11 @@ export function Shell() {
           />
         }
         breadcrumbs={<BreadcrumbGroup items={breadcrumbs} onFollow={(e) => { e.preventDefault(); navigate(e.detail.href); }} />}
-        content={<Outlet context={splitPanelContext} />}
+        content={
+          <Suspense fallback={ROUTE_LOADING_FALLBACK}>
+            <Outlet context={splitPanelContext} />
+          </Suspense>
+        }
         splitPanelOpen={splitPanelOpen}
         onSplitPanelToggle={({ detail }) => setSplitPanelOpen(detail.open)}
         splitPanel={splitPanel ? <SplitPanel header={splitPanel.header}>{splitPanel.content}</SplitPanel> : undefined}

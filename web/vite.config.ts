@@ -5,7 +5,22 @@ import react from '@vitejs/plugin-react';
 // itself. Same-origin by construction, so no CORS layer is required.
 export default defineConfig({
   plugins: [react()],
-  build: { outDir: '../internal/httpapi/webdist', emptyOutDir: true },
+  build: {
+    outDir: '../internal/httpapi/webdist',
+    emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // Route pages are lazy-loaded (App.tsx), but every route shares
+        // Cloudscape's component library through the always-loaded Shell —
+        // without this, Rollup hoists it into the main entry chunk, which
+        // stays over the 500 kB warning even after route-splitting. Isolating
+        // it lets it cache independently of app code across deploys too.
+        manualChunks: {
+          cloudscape: ['@cloudscape-design/components', '@cloudscape-design/global-styles'],
+        },
+      },
+    },
+  },
   server: { proxy: { '/v1': 'http://localhost:8080' } },
   test: {
     environment: 'jsdom',

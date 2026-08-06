@@ -1,21 +1,33 @@
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, useCallback, useEffect, useState } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { completeSignIn, fetchAuthConfig, signIn } from './auth';
 import type { AuthConfig } from './auth';
 import { Shell } from './Shell';
-import { AlertsBoardPage } from './routes/AlertsBoardPage';
-import { ArtifactPage } from './routes/ArtifactPage';
-import { DashboardsPage } from './routes/DashboardsPage';
-import { EscalationBoardPage } from './routes/EscalationBoardPage';
-import { EstatePage } from './routes/EstatePage';
-import { IncidentBoardPage } from './routes/IncidentBoardPage';
-import { MaintenanceBoardPage } from './routes/MaintenanceBoardPage';
-import { NOCOverviewPage } from './routes/NOCOverviewPage';
-import { OnCallBoardPage } from './routes/OnCallBoardPage';
-import { TopologyPage } from './routes/TopologyPage';
 import { SignIn } from './components/SignIn';
 import Box from '@cloudscape-design/components/box';
 import Spinner from '@cloudscape-design/components/spinner';
+
+// Route pages are lazy-loaded so the initial bundle is the shell + landing
+// route only; each screen's code (and, for Dashboards/Topology, its heavier
+// chart/SVG dependencies) is fetched on navigation. Pages use named exports
+// (their own tests import them by name), so `React.lazy` — which requires a
+// default export — is adapted per import rather than changing the pages.
+const AlertsBoardPage = lazy(() => import('./routes/AlertsBoardPage').then((m) => ({ default: m.AlertsBoardPage })));
+const ArtifactPage = lazy(() => import('./routes/ArtifactPage').then((m) => ({ default: m.ArtifactPage })));
+const DashboardsPage = lazy(() => import('./routes/DashboardsPage').then((m) => ({ default: m.DashboardsPage })));
+const EscalationBoardPage = lazy(() =>
+  import('./routes/EscalationBoardPage').then((m) => ({ default: m.EscalationBoardPage })),
+);
+const EstatePage = lazy(() => import('./routes/EstatePage').then((m) => ({ default: m.EstatePage })));
+const IncidentBoardPage = lazy(() =>
+  import('./routes/IncidentBoardPage').then((m) => ({ default: m.IncidentBoardPage })),
+);
+const MaintenanceBoardPage = lazy(() =>
+  import('./routes/MaintenanceBoardPage').then((m) => ({ default: m.MaintenanceBoardPage })),
+);
+const NOCOverviewPage = lazy(() => import('./routes/NOCOverviewPage').then((m) => ({ default: m.NOCOverviewPage })));
+const OnCallBoardPage = lazy(() => import('./routes/OnCallBoardPage').then((m) => ({ default: m.OnCallBoardPage })));
+const TopologyPage = lazy(() => import('./routes/TopologyPage').then((m) => ({ default: m.TopologyPage })));
 
 type AuthState =
   | { phase: 'checking' }
