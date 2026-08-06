@@ -1,16 +1,26 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useOutletContext } from 'react-router-dom';
+import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
+import Button from '@cloudscape-design/components/button';
 import Cards from '@cloudscape-design/components/cards';
 import type { CardsProps } from '@cloudscape-design/components/cards';
+import Form from '@cloudscape-design/components/form';
 import Header from '@cloudscape-design/components/header';
+import Modal from '@cloudscape-design/components/modal';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import { ApiError } from '../api';
 import type { ProblemDetail } from '../api';
+import { OnCallScheduleDetailPanel } from '../components/OnCallScheduleDetail';
+import { OnCallScheduleFields, resolveHandoffIntervalSeconds } from '../components/OnCallScheduleForm';
+import type { OnCallScheduleFieldValues } from '../components/OnCallScheduleForm';
 import { humanise } from '../incidentPresentation';
+import { combineDateAndTime } from '../maintenanceWindows';
 import {
   ON_CALL_DETAIL_FETCH_CAP,
   ON_CALL_SCHEDULE_LIST_CAP,
+  createOnCallSchedule,
   getOnCallNow,
   listOnCallParticipants,
   listOnCallSchedules,
@@ -18,6 +28,7 @@ import {
 import type { OnCallNowDTO, OnCallParticipantDTO, OnCallScheduleDTO } from '../onCall';
 import { ON_CALL_STATUS_TYPE, formatDurationSeconds } from '../onCallPresentation';
 import { ErrorState } from '../components/States';
+import type { ShellSplitPanelContext } from '../Shell';
 
 /** Per-schedule supplementary fetch outcome — undefined means "not fetched yet or beyond the cap". */
 interface ScheduleDetail {
@@ -72,6 +83,98 @@ function ParticipantsList({ detail, fetched, onCallUserId }: { detail?: Schedule
   );
 }
 
+/**
+ * "Create schedule" (E-ACT.4): the same three fields the edit modal uses
+ * (components/OnCallScheduleDetail.tsx) — name, handoff interval (a friendly
+ * preset Select, falling back to raw seconds), rotation start (date+time,
+ * sent as RFC3339). Mirrors createOnCallScheduleRequest field-for-field;
+ * status is not collected — a freshly created schedule is always "active"
+ * server-side (domain.NewOnCallSchedule), there is no caller-chosen initial
+ * status to offer.
+ */
+function CreateOnCallScheduleModal({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (sch: OnCallScheduleDTO) => void;
+}) {
+  const [fields, setFields] = useState<OnCallScheduleFieldValues>({
+    name: '',
+    handoffPreset: '86400',
+    handoffCustomSeconds: '',
+    rotationStartDate: '',
+    rotationStartTime: '',
+  });
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<ProblemDetail | null>(null);
+
+  const trimmedName = fields.name.trim();
+  const handoffSeconds = resolveHandoffIntervalSeconds(fields);
+  const rotationStartAt = combineDateAndTime(fields.rotationStartDate, fields.rotationStartTime);
+  const canSubmit =
+    trimmedName.length > 0 &&
+    trimmedName.length <= 200 &&
+    handoffSeconds !== undefined &&
+    handoffSeconds >= 1 &&
+    Boolean(rotationStartAt) &&
+    !busy;
+
+  const submit = useCallback(async () => {
+    if (!canSubmit || handoffSeconds === undefined || !rotationStartAt) return;
+    setBusy(true);
+    setProblem(null);
+    try {
+      const created = await createOnCallSchedule({
+        name: trimmedName,
+        handoff_interval_seconds: handoffSeconds,
+        rotation_start_at: rotationStartAt.toISOString(),
+      });
+      onCreated(created);
+    } catch (err) {
+      setProblem(err instanceof ApiError ? err.problem : { title: 'Create failed', status: 0, detail: String(err) });
+    } finally {
+      setBusy(false);
+    }
+  }, [canSubmit, handoffSeconds, rotationStartAt, trimmedName, onCreated]);
+
+  return (
+    <Modal
+      visible
+      header="Create schedule"
+      onDismiss={() => {
+        if (!busy) onClose();
+      }}
+      closeAriaLabel="Dismiss"
+      footer={
+        <Box float="right">
+          <SpaceBetween direction="horizontal" size="xs">
+            <Button variant="link" onClick={onClose} disabled={busy}>
+              Cancel
+            </Button>
+            <Button variant="primary" loading={busy} disabled={!canSubmit} onClick={() => void submit()}>
+              Create
+            </Button>
+          </SpaceBetween>
+        </Box>
+      }
+    >
+      <Form>
+        <SpaceBetween size="m">
+          {problem && (
+            <div role="alert">
+              <Alert type="error" header="Could not create the schedule">
+                {problem.detail ?? `The server returned ${problem.status}.`}
+              </Alert>
+            </div>
+          )}
+          <OnCallScheduleFields values={fields} onChange={setFields} disabled={busy} />
+        </SpaceBetween>
+      </Form>
+    </Modal>
+  );
+}
+
 function OnCallEmpty({ hasAnySchedules }: { hasAnySchedules: boolean }) {
   return (
     <Box textAlign="center" color="inherit" padding="l">
@@ -97,12 +200,15 @@ function OnCallEmpty({ hasAnySchedules }: { hasAnySchedules: boolean }) {
  * blocking the schedule cards themselves from rendering.
  */
 export function OnCallBoardPage() {
+  const { openSplitPanel } = useOutletContext<ShellSplitPanelContext>();
+
   const [schedules, setSchedules] = useState<OnCallScheduleDTO[]>([]);
   const [details, setDetails] = useState<Record<string, ScheduleDetail>>({});
   const [fetchedIds, setFetchedIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [problem, setProblem] = useState<ProblemDetail | null>(null);
   const [reloads, setReloads] = useState(0);
+  const [createOpen, setCreateOpen] = useState(false);
 
   const load = useCallback((signal: AbortSignal) => {
     setLoading(true);
@@ -161,13 +267,31 @@ export function OnCallBoardPage() {
     return () => ctrl.abort();
   }, [reloads, load]);
 
-  const retry = () => setReloads((n) => n + 1);
   const activeSchedules = schedules.filter((s) => s.status === 'active');
+
+  /** Reruns the board's own fetch — shared by error-retry, a successful create, and any edit/roster mutation from the detail panel. */
+  const reload = useCallback(() => setReloads((n) => n + 1), []);
+
+  const openSchedule = useCallback(
+    (sch: OnCallScheduleDTO) => {
+      openSplitPanel(
+        sch.name,
+        <OnCallScheduleDetailPanel scheduleId={sch.schedule_id} onChanged={reload} />,
+      );
+    },
+    [openSplitPanel, reload],
+  );
 
   const cardDefinition: CardsProps.CardDefinition<OnCallScheduleDTO> = {
     header: (sch) => (
+      // Not wrapped in a heading-level Box: the SplitPanel this opens uses the
+      // same name as ITS OWN heading (Shell's `SplitPanel header={...}`), so a
+      // second `role="heading"` here would give the page two headings with the
+      // identical accessible name while the panel is open.
       <SpaceBetween direction="horizontal" size="xs" alignItems="center">
-        <Box variant="h3">{sch.name}</Box>
+        <Button variant="inline-link" onClick={() => openSchedule(sch)}>
+          {sch.name}
+        </Button>
         <StatusIndicator type={ON_CALL_STATUS_TYPE[sch.status]}>{humanise(sch.status)}</StatusIndicator>
       </SpaceBetween>
     ),
@@ -193,6 +317,12 @@ export function OnCallBoardPage() {
           />
         ),
       },
+      {
+        id: 'actions',
+        content: (sch) => (
+          <Button onClick={() => openSchedule(sch)}>Manage schedule</Button>
+        ),
+      },
     ],
   };
 
@@ -202,6 +332,7 @@ export function OnCallBoardPage() {
         variant="h1"
         description="Active on-call schedules, who is on call right now, and each rotation's roster."
         counter={`(${activeSchedules.length})`}
+        actions={<Button onClick={() => setCreateOpen(true)}>Create schedule</Button>}
       >
         On-call
       </Header>
@@ -218,7 +349,7 @@ export function OnCallBoardPage() {
         </Box>
       )}
 
-      {problem && <ErrorState problem={problem} onRetry={retry} />}
+      {problem && <ErrorState problem={problem} onRetry={reload} />}
 
       {!problem && (
         <Cards
@@ -230,6 +361,17 @@ export function OnCallBoardPage() {
           cardsPerRow={[{ cards: 1 }, { minWidth: 500, cards: 2 }, { minWidth: 900, cards: 3 }]}
           ariaLabels={{ itemSelectionLabel: () => '', selectionGroupLabel: 'On-call schedules' }}
           empty={<OnCallEmpty hasAnySchedules={schedules.length > 0} />}
+        />
+      )}
+
+      {createOpen && (
+        <CreateOnCallScheduleModal
+          onClose={() => setCreateOpen(false)}
+          onCreated={(created) => {
+            setCreateOpen(false);
+            reload();
+            openSchedule(created);
+          }}
         />
       )}
     </SpaceBetween>
