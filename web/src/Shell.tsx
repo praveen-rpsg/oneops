@@ -1,13 +1,26 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import AppLayout from '@cloudscape-design/components/app-layout';
 import BreadcrumbGroup from '@cloudscape-design/components/breadcrumb-group';
 import SideNavigation from '@cloudscape-design/components/side-navigation';
 import type { SideNavigationProps } from '@cloudscape-design/components/side-navigation';
+import SplitPanel from '@cloudscape-design/components/split-panel';
 import TopNavigation from '@cloudscape-design/components/top-navigation';
 import { getSubject, signOut } from './auth';
 import { currentMode, toggleMode } from './theme';
 import { Mode } from '@cloudscape-design/global-styles';
+
+/**
+ * The seam a routed page uses to drive the shell's shared `SplitPanel` (E7-UI.2's
+ * incident drill-down; any future screen can reuse it). `useOutletContext` is how
+ * a page reaches it — Shell owns the single `AppLayout` instance every route
+ * renders inside, so the split panel cannot be a per-page component.
+ */
+export interface ShellSplitPanelContext {
+  openSplitPanel: (header: string, content: ReactNode) => void;
+  closeSplitPanel: () => void;
+}
 
 const NAV_ITEMS: SideNavigationProps.Item[] = [
   { type: 'link', text: 'Estate / Governance', href: '/' },
@@ -50,9 +63,10 @@ function useBreadcrumbs() {
 
 /**
  * The reusable home for every section of the console: top navigation (identity,
- * session, theme), side navigation (Estate/Governance and NOC/Overview are live;
- * Incidents remains a placeholder until E7-UI.2 lands) and breadcrumbs. Routed
- * content renders in the `content` slot via `<Outlet/>`.
+ * session, theme), side navigation (Estate/Governance, NOC/Overview and
+ * Incidents are all live) and breadcrumbs. Routed content renders in the
+ * `content` slot via `<Outlet/>`; the incident board (E7-UI.2) drives the
+ * shared `SplitPanel` through `ShellSplitPanelContext`.
  */
 export function Shell() {
   const navigate = useNavigate();
@@ -60,6 +74,27 @@ export function Shell() {
   const breadcrumbs = useBreadcrumbs();
   const [mode, setMode] = useState<Mode>(currentMode());
   const subject = getSubject();
+
+  const [splitPanel, setSplitPanel] = useState<{ header: string; content: ReactNode } | null>(null);
+  const [splitPanelOpen, setSplitPanelOpen] = useState(false);
+
+  const openSplitPanel = useCallback((header: string, content: ReactNode) => {
+    setSplitPanel({ header, content });
+    setSplitPanelOpen(true);
+  }, []);
+  const closeSplitPanel = useCallback(() => setSplitPanelOpen(false), []);
+  const splitPanelContext = useMemo<ShellSplitPanelContext>(
+    () => ({ openSplitPanel, closeSplitPanel }),
+    [openSplitPanel, closeSplitPanel],
+  );
+
+  // A split panel belongs to the page that opened it — leaving that route
+  // (not merely closing the panel) clears its content so the next page never
+  // inherits a stale drill-down.
+  useEffect(() => {
+    setSplitPanel(null);
+    setSplitPanelOpen(false);
+  }, [location.pathname]);
 
   return (
     <>
@@ -97,7 +132,10 @@ export function Shell() {
           />
         }
         breadcrumbs={<BreadcrumbGroup items={breadcrumbs} onFollow={(e) => { e.preventDefault(); navigate(e.detail.href); }} />}
-        content={<Outlet />}
+        content={<Outlet context={splitPanelContext} />}
+        splitPanelOpen={splitPanelOpen}
+        onSplitPanelToggle={({ detail }) => setSplitPanelOpen(detail.open)}
+        splitPanel={splitPanel ? <SplitPanel header={splitPanel.header}>{splitPanel.content}</SplitPanel> : undefined}
       />
     </>
   );
