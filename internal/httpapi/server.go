@@ -461,6 +461,11 @@ func (s *Server) routesFor(root fs.FS, consoleBuilt bool) *chi.Mux {
 		// a read-only projection like duplicates above — same static-collection
 		// mount alongside /admin/assets/{id}.
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/health", s.assetHealth)
+		// Whole-tenant asset-graph projection (E7.3b-1, ADR-NOC-006): the data
+		// source the topology-map UI (E7.3b-2) needs in one bounded call
+		// instead of N+1 per-asset relationship queries — same read-only-
+		// projection, static-collection shape as health/duplicates above.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/graph", s.getAssetGraph)
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/assets/relationships", s.createAssetRelationship)
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/assets/relationships/{id}", s.deleteAssetRelationship)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/assets/{id}", s.getAsset)

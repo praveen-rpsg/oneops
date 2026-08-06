@@ -869,6 +869,78 @@ type assetHealthReportDTO struct {
 	Incomplete               assetHealthCategoryDTO `json:"incomplete"`
 }
 
+// assetGraphNodeDTO is one node of the whole-tenant CMDB asset-graph
+// projection (E7.3b-1) — deliberately narrower than assetDTO, see
+// domain.AssetGraphNode's own doc comment for why.
+type assetGraphNodeDTO struct {
+	AssetID     string `json:"asset_id"`
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Status      string `json:"status"`
+	Environment string `json:"environment"`
+	Criticality string `json:"criticality"`
+}
+
+func toAssetGraphNodeDTO(n domain.AssetGraphNode) assetGraphNodeDTO {
+	return assetGraphNodeDTO{
+		AssetID: n.AssetID, Name: n.Name, Type: n.Type,
+		Status: string(n.Status), Environment: string(n.Environment), Criticality: string(n.Criticality),
+	}
+}
+
+// assetGraphEdgeDTO is one edge of the whole-tenant CMDB asset-graph
+// projection.
+type assetGraphEdgeDTO struct {
+	FromAssetID string `json:"from_asset_id"`
+	ToAssetID   string `json:"to_asset_id"`
+	Type        string `json:"type"`
+}
+
+func toAssetGraphEdgeDTO(e domain.AssetGraphEdge) assetGraphEdgeDTO {
+	return assetGraphEdgeDTO{FromAssetID: e.FromAssetID, ToAssetID: e.ToAssetID, Type: string(e.Type)}
+}
+
+// assetGraphResponse is GET /admin/assets/graph's transient response
+// (E7.3b-1, ADR-NOC-006): the whole tenant's CMDB as nodes and edges in one
+// bounded call, for the topology-map UI (E7.3b-2) to render. Nothing here is
+// persisted; recomputed on every call, the same computed-projection shape
+// ADR-NOC-001 established for GET /admin/noc/overview. truncated is true
+// when either the node or the edge cap was reached (domain.AssetStore.Graph's
+// own doc comment names the exact caps) — a partial graph, never a 500.
+type assetGraphResponse struct {
+	Nodes     []assetGraphNodeDTO `json:"nodes"`
+	Edges     []assetGraphEdgeDTO `json:"edges"`
+	Truncated bool                `json:"truncated"`
+}
+
+// getAssetGraph serves GET /admin/assets/graph: the data source E7.3b-2's
+// topology-map UI needs — one bounded, tenant-scoped, read-only call
+// returning the whole tenant's asset graph, instead of the N+1 per-asset
+// relationship queries GET .../{id}/relationships would otherwise require.
+// Overlay data (incident/health state per asset) is composed in the UI from
+// the existing /admin/incidents and /admin/assets/health endpoints, NOT
+// merged into this response (ADR-NOC-006).
+func (s *Server) getAssetGraph(w http.ResponseWriter, r *http.Request) {
+	if s.assets == nil {
+		writeProblem(w, r, http.StatusNotImplemented, "not implemented", "asset administration is not configured")
+		return
+	}
+	graph, err := s.assets.Graph(r.Context(), 0, 0)
+	if err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+	nodes := make([]assetGraphNodeDTO, 0, len(graph.Nodes))
+	for _, n := range graph.Nodes {
+		nodes = append(nodes, toAssetGraphNodeDTO(n))
+	}
+	edges := make([]assetGraphEdgeDTO, 0, len(graph.Edges))
+	for _, e := range graph.Edges {
+		edges = append(edges, toAssetGraphEdgeDTO(e))
+	}
+	writeJSON(w, http.StatusOK, assetGraphResponse{Nodes: nodes, Edges: edges, Truncated: graph.Truncated})
+}
+
 // assetHealth serves GET /admin/assets/health: the CMDB data-quality/
 // freshness report (E1.5) — see domain.AssetHealthReport's doc comment for
 // exactly what each category means. Read-only: nothing here mutates
