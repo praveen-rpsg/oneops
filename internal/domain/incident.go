@@ -520,6 +520,20 @@ type IncidentRepository interface {
 	// never a List — see IncidentOverviewCounts' own doc comment for the
 	// grouping definitions.
 	OverviewCounts(ctx context.Context) (*IncidentOverviewCounts, error)
+	// Trends returns the RAW, ungrouped-by-bucket rows behind GET
+	// /admin/dashboards/incident-trends (E9.1, ADR-NOC-008): opened rows
+	// bucketed by (bucket, severity, source) over created_at, and resolved
+	// rows bucketed alone over resolved_at, both confined to
+	// [q.From, q.To) — half-open, so contiguous requests never double-count
+	// the boundary instant. Neither return is a contiguous, zero-filled
+	// series: a bucket with no matching incidents is simply absent from
+	// either slice. The caller (internal/httpapi's handler) assembles the
+	// contiguous series a client sees from IncidentTrendsQuery.BucketStarts,
+	// after q.Validate has already bounded the request. Bucket boundaries are
+	// computed by Postgres' own date_trunc forced to UTC
+	// (`date_trunc($bucket, ts AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`),
+	// which is exactly what BucketStarts reproduces on the Go side.
+	Trends(ctx context.Context, q IncidentTrendsQuery) ([]IncidentOpenedTrendPoint, []IncidentResolvedTrendPoint, error)
 }
 
 // IncidentOverviewCounts is the bounded aggregate behind the NOC overview
@@ -550,4 +564,147 @@ type IncidentOverviewCounts struct {
 	// "how many open incidents are themselves a root" (an incident can be a
 	// root of nothing, i.e. standalone, without appearing here at all).
 	RootCount int
+}
+
+// IncidentTrendBucket is the closed vocabulary of time-bucket granularities
+// GET /admin/dashboards/incident-trends accepts (E9.1, ADR-NOC-008). Closed,
+// not open text: bucket width is what MaxIncidentTrendBuckets bounds a
+// request by, and an arbitrary caller-chosen duration would make that bound
+// meaningless — the same "closed because a downstream decision keys off it"
+// reasoning IncidentSource's own doc comment gives.
+type IncidentTrendBucket string
+
+const (
+	IncidentTrendBucketHour IncidentTrendBucket = "hour"
+	IncidentTrendBucketDay  IncidentTrendBucket = "day"
+)
+
+// Valid reports whether b is a defined bucket granularity.
+func (b IncidentTrendBucket) Valid() bool {
+	switch b {
+	case IncidentTrendBucketHour, IncidentTrendBucketDay:
+		return true
+	default:
+		return false
+	}
+}
+
+// Duration is the wall-clock width of one bucket of this granularity. It is
+// the ONLY place that width is stated; IncidentTrendsQuery.BucketCount/
+// BucketStarts both call it rather than re-deriving it, and it is what the
+// Postgres store's date_trunc argument corresponds to.
+func (b IncidentTrendBucket) Duration() time.Duration {
+	switch b {
+	case IncidentTrendBucketHour:
+		return time.Hour
+	case IncidentTrendBucketDay:
+		return 24 * time.Hour
+	default:
+		return 0
+	}
+}
+
+// MaxIncidentTrendBuckets bounds how many contiguous buckets one request may
+// span — a month of hourly buckets (24*31), the same order-of-magnitude
+// honesty ADR-NOC-001 §5 records for its own v1 on-call cap. Enforced by
+// IncidentTrendsQuery.Validate BEFORE any query runs: a caller-chosen
+// combination of a fine bucket and a wide window is refused as a bounding
+// problem (422), never answered as an oversized response.
+const MaxIncidentTrendBuckets = 744
+
+// IncidentTrendsQuery is GET /admin/dashboards/incident-trends' validated,
+// bounded request (E9.1): a half-open [From, To) window at Bucket
+// granularity. Half-open so a caller paging contiguous windows back-to-back
+// (e.g. week by week) never double-counts the shared boundary instant.
+type IncidentTrendsQuery struct {
+	From   time.Time
+	To     time.Time
+	Bucket IncidentTrendBucket
+}
+
+// Validate enforces every invariant the store depends on already having been
+// checked — the same validate-before-store discipline AdminAuditFilter.
+// Validate establishes: a bad request is refused at the API's own edge
+// (422), not discovered by the store running an unboundedly wide GROUP BY.
+func (q *IncidentTrendsQuery) Validate() error {
+	if !q.Bucket.Valid() {
+		return NewValidationError("bucket", "must be one of: hour, day")
+	}
+	if q.From.IsZero() {
+		return NewValidationError("from", "is required")
+	}
+	if q.To.IsZero() {
+		return NewValidationError("to", "is required")
+	}
+	if !q.To.After(q.From) {
+		return NewValidationError("to", "must be after from")
+	}
+	if q.BucketCount() > MaxIncidentTrendBuckets {
+		return NewValidationError("to",
+			"the requested window is too wide for this bucket size — at most 744 buckets "+
+				"(a month of hourly buckets) are returned per request; narrow the window or choose a coarser bucket")
+	}
+	return nil
+}
+
+// BucketCount returns the number of contiguous buckets [From, To) produces at
+// Bucket granularity. The FIRST bucket is anchored to From's own truncated
+// boundary — the same truncation Postgres' own
+// `date_trunc(bucket, created_at AT TIME ZONE 'UTC')` performs — not to the
+// exact, possibly off-boundary, instant a caller supplied. Used both to
+// enforce MaxIncidentTrendBuckets before any query runs and to size the
+// zero-filled series BucketStarts produces. Zero for an invalid/zero-value
+// query (Bucket unset, or To not after From).
+func (q IncidentTrendsQuery) BucketCount() int {
+	step := q.Bucket.Duration()
+	if step <= 0 {
+		return 0
+	}
+	from := q.From.UTC().Truncate(step)
+	if !q.To.After(from) {
+		return 0
+	}
+	diff := q.To.UTC().Sub(from)
+	n := int(diff / step)
+	if diff%step != 0 {
+		n++
+	}
+	return n
+}
+
+// BucketStarts returns the contiguous, boundary-aligned bucket_start values
+// [From, To) produces, ascending — the "shape" of a zero-filled series before
+// any count is attached to it. nil when BucketCount is 0.
+func (q IncidentTrendsQuery) BucketStarts() []time.Time {
+	n := q.BucketCount()
+	if n == 0 {
+		return nil
+	}
+	step := q.Bucket.Duration()
+	start := q.From.UTC().Truncate(step)
+	out := make([]time.Time, n)
+	for i := range out {
+		out[i] = start.Add(time.Duration(i) * step)
+	}
+	return out
+}
+
+// IncidentOpenedTrendPoint is one (bucket, severity, source) row of the
+// opened series behind GET /admin/dashboards/incident-trends (E9.1) — the
+// store's raw, ungrouped-by-bucket output. BucketStart is already the
+// boundary-aligned value Postgres' date_trunc produced (UTC).
+type IncidentOpenedTrendPoint struct {
+	BucketStart time.Time
+	Severity    IncidentSeverity
+	Source      IncidentSource
+	Count       int
+}
+
+// IncidentResolvedTrendPoint is one bucket's resolved count (E9.1) — bucketed
+// over resolved_at alone, with no severity/source breakdown (the response DTO
+// mirrors this: resolved_total is a single number per bucket, see
+// docs/PLATFORM-BUILD-PLAN.md E9.1).
+type IncidentResolvedTrendPoint struct {
+	BucketStart time.Time
+	Count       int
 }

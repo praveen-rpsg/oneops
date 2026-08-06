@@ -2630,6 +2630,53 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/dashboards/incident-trends:
+    get:
+      summary: Incident-trends projection — volume over time (E9.1, read-only)
+      description: >-
+        Incident open/resolve volume bucketed at hour/day granularity over
+        [from, to), split by severity and by source — the data source E9.2's
+        dashboards screen renders. A transient, computed-at-request-time
+        projection, never a stored Dashboard/Report entity
+        (docs/PLATFORM-BUILD-PLAN.md §4), the same shape GET
+        /admin/noc/overview establishes. Tenant isolation is row-level
+        security alone: no explicit tenant predicate, no privileged pool
+        (ADR-NOC-008). The response is a CONTIGUOUS, zero-filled series: a
+        bucket with no matching incidents still appears, zeroed, so a line
+        chart has no gaps. Bounded: at most 744 contiguous buckets (a month
+        of hourly buckets) per request — a finer bucket over a wider window
+        is refused with 422, not answered as an oversized response.
+        opened_by_source.alert is the honest alert-VOLUME proxy: this system
+        has no alert-firing log (no alert_event table), so it counts
+        alert-*sourced incidents* (domain.Incident.Source, E4.1's
+        correlation pipeline), not raw firings.
+      operationId: incidentTrends
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Start of the half-open window (inclusive), RFC 3339.
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          description: End of the half-open window (exclusive), RFC 3339. Must be after from.
+          schema: { type: string, format: date-time }
+        - name: bucket
+          in: query
+          required: true
+          description: Bucket granularity.
+          schema: { type: string, enum: [hour, day] }
+      responses:
+        '200':
+          description: The incident-trends series
+          content: { application/json: { schema: { $ref: '#/components/schemas/IncidentTrends' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/notifications:
     get:
       summary: List the caller's tenant's notifications
@@ -4204,6 +4251,50 @@ components:
           items: { $ref: '#/components/schemas/NOCOnCallEntry' }
         escalations: { $ref: '#/components/schemas/NOCEscalationsOverview' }
         generated_at: { type: string, format: date-time }
+    IncidentTrendSeverityCounts:
+      type: object
+      description: One bucket's opened-incident breakdown by severity (E9.1).
+      properties:
+        critical: { type: integer }
+        high: { type: integer }
+        medium: { type: integer }
+        low: { type: integer }
+    IncidentTrendSourceCounts:
+      type: object
+      description: >-
+        One bucket's opened-incident breakdown by source. alert is the
+        honest alert-VOLUME proxy (ADR-NOC-008): this system has no
+        alert-firing log, so it counts alert-sourced incidents (E4.1), not
+        raw firings.
+      properties:
+        manual: { type: integer }
+        alert: { type: integer }
+    IncidentTrendPoint:
+      type: object
+      description: >-
+        One contiguous, boundary-aligned bucket. Present, and zeroed, even
+        when no incident matches it — the response is never sparse.
+      properties:
+        bucket_start: { type: string, format: date-time }
+        opened_total: { type: integer }
+        opened_by_severity: { $ref: '#/components/schemas/IncidentTrendSeverityCounts' }
+        opened_by_source: { $ref: '#/components/schemas/IncidentTrendSourceCounts' }
+        resolved_total: { type: integer }
+    IncidentTrends:
+      type: object
+      description: >-
+        Incident volume over time (E9.1) — a transient, computed-at-
+        request-time projection, never a stored Dashboard/Report entity
+        (docs/PLATFORM-BUILD-PLAN.md §4). from/to/bucket echo the validated,
+        normalised (UTC) request. points is bounded to at most 744
+        contiguous buckets (ADR-NOC-008).
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        bucket: { type: string, enum: [hour, day] }
+        points:
+          type: array
+          items: { $ref: '#/components/schemas/IncidentTrendPoint' }
     Incident:
       type: object
       description: >-

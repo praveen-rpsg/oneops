@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -612,6 +613,93 @@ func (s *IncidentStore) OverviewCounts(ctx context.Context) (*domain.IncidentOve
 		return nil, fmt.Errorf("count incident grouping: %w", err)
 	}
 	return out, nil
+}
+
+// Trends implements domain.IncidentRepository (E9.1's incident-trends
+// projection, ADR-NOC-008): two bounded, RLS-scoped GROUP BY queries over
+// [q.From, q.To), never a List. Both force UTC bucket boundaries via
+// `date_trunc($1, <column> AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'` regardless
+// of the connection's session TimeZone, so a bucket_start this store returns
+// always matches domain.IncidentTrendsQuery.BucketStarts' own UTC-anchored
+// computation on the Go side. Neither query is a full unbounded scan: RLS
+// confines every row to the caller's own tenant, and q.Validate (already run
+// by the handler before this is called) bounds [From, To) to at most
+// MaxIncidentTrendBuckets contiguous buckets.
+//
+// The opened series is backed by the new ix_incident_tenant_created_at
+// (tenant_id, created_at DESC) — RLS supplies the tenant_id half for free on
+// this tenant-scoped connection, and created_at >= $2 AND created_at < $3 is
+// the index's own leading range predicate. The resolved series has no
+// dedicated index on resolved_at: cost tracks the caller's own tenant's
+// incident volume (bounded by that tenant's own history, never by every
+// tenant's), the same honest bound ADR-NOC-001 §4 records for its own
+// on-call N+1 shape rather than inventing a second index ahead of evidence.
+func (s *IncidentStore) Trends(
+	ctx context.Context, q domain.IncidentTrendsQuery,
+) ([]domain.IncidentOpenedTrendPoint, []domain.IncidentResolvedTrendPoint, error) {
+	openedRows, err := s.pool.Query(ctx, `
+		SELECT date_trunc($1, created_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS bucket,
+		       severity, source, COUNT(*)
+		  FROM incident
+		 WHERE created_at >= $2 AND created_at < $3
+		 GROUP BY bucket, severity, source`,
+		string(q.Bucket), q.From, q.To)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query incident opened trends: %w", err)
+	}
+	var opened []domain.IncidentOpenedTrendPoint
+	for openedRows.Next() {
+		var (
+			bucket           time.Time
+			severity, source string
+			n                int
+		)
+		if err := openedRows.Scan(&bucket, &severity, &source, &n); err != nil {
+			openedRows.Close()
+			return nil, nil, fmt.Errorf("scan incident opened trend row: %w", err)
+		}
+		opened = append(opened, domain.IncidentOpenedTrendPoint{
+			BucketStart: bucket.UTC(),
+			Severity:    domain.IncidentSeverity(severity),
+			Source:      domain.IncidentSource(source),
+			Count:       n,
+		})
+	}
+	if err := openedRows.Err(); err != nil {
+		openedRows.Close()
+		return nil, nil, fmt.Errorf("iterate incident opened trend rows: %w", err)
+	}
+	openedRows.Close()
+
+	resolvedRows, err := s.pool.Query(ctx, `
+		SELECT date_trunc($1, resolved_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS bucket,
+		       COUNT(*)
+		  FROM incident
+		 WHERE resolved_at >= $2 AND resolved_at < $3
+		 GROUP BY bucket`,
+		string(q.Bucket), q.From, q.To)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query incident resolved trends: %w", err)
+	}
+	var resolved []domain.IncidentResolvedTrendPoint
+	for resolvedRows.Next() {
+		var (
+			bucket time.Time
+			n      int
+		)
+		if err := resolvedRows.Scan(&bucket, &n); err != nil {
+			resolvedRows.Close()
+			return nil, nil, fmt.Errorf("scan incident resolved trend row: %w", err)
+		}
+		resolved = append(resolved, domain.IncidentResolvedTrendPoint{BucketStart: bucket.UTC(), Count: n})
+	}
+	if err := resolvedRows.Err(); err != nil {
+		resolvedRows.Close()
+		return nil, nil, fmt.Errorf("iterate incident resolved trend rows: %w", err)
+	}
+	resolvedRows.Close()
+
+	return opened, resolved, nil
 }
 
 // explainMissedUpdate distinguishes "gone" from "stale version" after an
