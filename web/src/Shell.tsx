@@ -29,6 +29,7 @@ const NAV_ITEMS: SideNavigationProps.Item[] = [
   { type: 'link', text: 'Alerts', href: '/alerts' },
   { type: 'link', text: 'Maintenance', href: '/maintenance' },
   { type: 'link', text: 'On-call', href: '/on-call' },
+  { type: 'link', text: 'Escalation', href: '/escalation' },
   { type: 'link', text: 'Topology', href: '/topology' },
   { type: 'link', text: 'Dashboards', href: '/dashboards' },
 ];
@@ -41,6 +42,7 @@ function activeHrefFor(pathname: string): string {
   if (pathname.startsWith('/alerts')) return '/alerts';
   if (pathname.startsWith('/maintenance')) return '/maintenance';
   if (pathname.startsWith('/on-call')) return '/on-call';
+  if (pathname.startsWith('/escalation')) return '/escalation';
   if (pathname.startsWith('/topology')) return '/topology';
   if (pathname.startsWith('/dashboards')) return '/dashboards';
   return '/';
@@ -54,6 +56,7 @@ const CRUMB_LABEL: Record<string, string> = {
   alerts: 'Alerts',
   maintenance: 'Maintenance',
   'on-call': 'On-call',
+  escalation: 'Escalation',
   topology: 'Topology',
   dashboards: 'Dashboards',
 };
@@ -79,7 +82,7 @@ function useBreadcrumbs() {
 /**
  * The reusable home for every section of the console: top navigation (identity,
  * session, theme), side navigation (Estate/Governance, NOC/Overview, Incidents,
- * Alerts, Maintenance, On-call, Topology and Dashboards are all live) and breadcrumbs. Routed content renders in
+ * Alerts, Maintenance, On-call, Escalation, Topology and Dashboards are all live) and breadcrumbs. Routed content renders in
  * the `content` slot via `<Outlet/>`; the incident board (E7-UI.2) and the
  * alerts board (E7.3c) drive the shared `SplitPanel` through
  * `ShellSplitPanelContext`.
