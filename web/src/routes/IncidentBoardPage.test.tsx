@@ -161,7 +161,11 @@ describe('incident board', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Primary database down' }));
 
     await waitFor(() => expect(screen.getByText('Root cause: primary DB instance unreachable.')).toBeInTheDocument());
-    expect(screen.getByText('alert-correlator')).toBeInTheDocument();
+    // The timeline is a second, independent fetch chained after the incident
+    // detail one resolves (IncidentDetailPanel loads it once the detail is
+    // in) — it can still be in flight once the description above has
+    // rendered, so this needs its own poll rather than a bare `getByText`.
+    expect(await screen.findByText('alert-correlator')).toBeInTheDocument();
     expect(screen.queryByText('No timeline events yet.')).not.toBeInTheDocument();
   });
 

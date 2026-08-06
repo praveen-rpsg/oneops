@@ -99,9 +99,14 @@ describe('NOC overview page', () => {
     vi.stubGlobal('fetch', routedFetch({ '/v1/admin/noc/overview': EMPTY_OVERVIEW }));
     renderApp();
 
+    // "NOC / Overview" is the page's static h1 — it renders on first paint,
+    // before the mocked overview fetch has necessarily settled. The widgets
+    // below only exist once `overview` is set, so the first one asserted on
+    // must be polled for (`findBy*`); the rest are populated by that same
+    // state update and safe to read synchronously once it's found.
     await screen.findByRole('heading', { name: 'NOC / Overview' });
 
-    expect(screen.getByText('No active on-call schedules.')).toBeInTheDocument();
+    expect(await screen.findByText('No active on-call schedules.')).toBeInTheDocument();
     expect(screen.getByText('All clear')).toBeInTheDocument();
     expect(screen.queryByText('NaN')).not.toBeInTheDocument();
     expect(screen.queryByText('null')).not.toBeInTheDocument();
