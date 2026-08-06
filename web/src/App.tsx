@@ -4,8 +4,8 @@ import { completeSignIn, fetchAuthConfig, signIn } from './auth';
 import type { AuthConfig } from './auth';
 import { Shell } from './Shell';
 import { ArtifactPage } from './routes/ArtifactPage';
-import { ComingSoon } from './routes/ComingSoon';
 import { EstatePage } from './routes/EstatePage';
+import { IncidentBoardPage } from './routes/IncidentBoardPage';
 import { NOCOverviewPage } from './routes/NOCOverviewPage';
 import { SignIn } from './components/SignIn';
 import Box from '@cloudscape-design/components/box';
@@ -95,7 +95,7 @@ export default function App() {
         <Route index element={<EstatePage />} />
         <Route path="artifacts/:id" element={<ArtifactPage />} />
         <Route path="noc" element={<NOCOverviewPage />} />
-        <Route path="incidents" element={<ComingSoon title="Incidents" />} />
+        <Route path="incidents" element={<IncidentBoardPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
