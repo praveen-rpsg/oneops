@@ -180,6 +180,65 @@ export async function postJSON<T>(url: string, body: unknown, signal?: AbortSign
   return (await res.json()) as T;
 }
 
+/**
+ * PATCHes a JSON body and decodes a JSON response, throwing `ApiError` on any
+ * non-2xx status — the same contract `postJSON` follows (ADR-ACT-001/
+ * ADR-ACT-002), used by alert-rule edit/enable-disable. No `Idempotency-Key`,
+ * for the same reason `postJSON` sends none: `handlers_alert_rules.go`'s
+ * `patchAlertRule` does not read that header.
+ */
+export async function patchJSON<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  const headers: Record<string, string> = { Accept: 'application/json', 'Content-Type': 'application/json' };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(url, { method: 'PATCH', headers, body: JSON.stringify(body), signal });
+
+  if (!res.ok) {
+    let problem: ProblemDetail = {
+      title: 'Request failed',
+      status: res.status,
+      detail: `The server returned ${res.status}.`,
+    };
+    try {
+      problem = { ...problem, ...(await res.json()) };
+    } catch {
+      // Non-JSON error body; keep the fallback above.
+    }
+    throw new ApiError(problem);
+  }
+
+  return (await res.json()) as T;
+}
+
+/**
+ * DELETEs a resource, throwing `ApiError` on any non-2xx status. Resolves
+ * with no value: every DELETE this helper calls today
+ * (`deleteAlertRule` — ADR-ACT-002) returns `204 No Content`, so there is no
+ * body to decode.
+ */
+export async function deleteJSON(url: string, signal?: AbortSignal): Promise<void> {
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(url, { method: 'DELETE', headers, signal });
+
+  if (!res.ok) {
+    let problem: ProblemDetail = {
+      title: 'Request failed',
+      status: res.status,
+      detail: `The server returned ${res.status}.`,
+    };
+    try {
+      problem = { ...problem, ...(await res.json()) };
+    } catch {
+      // Non-JSON error body; keep the fallback above.
+    }
+    throw new ApiError(problem);
+  }
+}
+
 /** Result of a §8 governance operation. `state` is absent when the object was removed. */
 export interface GovernanceResult {
   operation: string;
