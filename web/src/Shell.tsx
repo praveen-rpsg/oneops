@@ -20,6 +20,16 @@ import { Mode } from '@cloudscape-design/global-styles';
 export interface ShellSplitPanelContext {
   openSplitPanel: (header: string, content: ReactNode) => void;
   closeSplitPanel: () => void;
+  /**
+   * Whether the panel is currently visible. Additive to the original
+   * open/close pair (ADR-HARD-002): a page whose split-panel content depends
+   * on data that keeps resolving after the panel opened (TopologyPage's
+   * incident/health overlay) needs this to decide whether to *refresh* an
+   * already-open panel without ever reopening one the user closed. Existing
+   * consumers that only destructure `openSplitPanel`/`closeSplitPanel` are
+   * unaffected.
+   */
+  isSplitPanelOpen: boolean;
 }
 
 const NAV_ITEMS: SideNavigationProps.Item[] = [
@@ -103,8 +113,8 @@ export function Shell() {
   }, []);
   const closeSplitPanel = useCallback(() => setSplitPanelOpen(false), []);
   const splitPanelContext = useMemo<ShellSplitPanelContext>(
-    () => ({ openSplitPanel, closeSplitPanel }),
-    [openSplitPanel, closeSplitPanel],
+    () => ({ openSplitPanel, closeSplitPanel, isSplitPanelOpen: splitPanelOpen }),
+    [openSplitPanel, closeSplitPanel, splitPanelOpen],
   );
 
   // A split panel belongs to the page that opened it — leaving that route

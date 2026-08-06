@@ -34,8 +34,26 @@ const ENVIRONMENT_TYPE: Record<AssetEnvironment, StatusIndicatorProps.Type> = {
  * response already carries every field shown here (E7.3b-1's
  * AssetGraphNode), and the incident/health overlay is composed client-side
  * (E7.3b-2, ADR-NOC-007).
+ *
+ * `overlayLoading` (ADR-HARD-002) is true while the page's overlay fetches
+ * (`listIncidents`/`getAssetHealth`) are still in flight. `overlay` itself
+ * defaults to "no incidents, no issues" before either resolves — rendering
+ * that as `None`/success would be indistinguishable from a confirmed-empty
+ * node, which is exactly the stale-looking state this story fixes. While
+ * `overlayLoading` is true the open-incidents field instead shows an
+ * explicit pending state, and the CMDB health section (which has the same
+ * "empty could mean not-loaded-yet" ambiguity) is withheld rather than
+ * rendered as if health data were confirmed absent.
  */
-export function TopologyNodeDetail({ node, overlay }: { node: AssetGraphNode; overlay: NodeOverlay }) {
+export function TopologyNodeDetail({
+  node,
+  overlay,
+  overlayLoading = false,
+}: {
+  node: AssetGraphNode;
+  overlay: NodeOverlay;
+  overlayLoading?: boolean;
+}) {
   return (
     <SpaceBetween size="l">
       <KeyValuePairs
@@ -54,18 +72,19 @@ export function TopologyNodeDetail({ node, overlay }: { node: AssetGraphNode; ov
           },
           {
             label: 'Open incidents',
-            value:
-              overlay.openIncidentCount > 0 ? (
-                <StatusIndicator type="error">
-                  {overlay.openIncidentCount} open incident{overlay.openIncidentCount === 1 ? '' : 's'}
-                </StatusIndicator>
-              ) : (
-                <StatusIndicator type="success">None</StatusIndicator>
-              ),
+            value: overlayLoading ? (
+              <StatusIndicator type="loading">Checking…</StatusIndicator>
+            ) : overlay.openIncidentCount > 0 ? (
+              <StatusIndicator type="error">
+                {overlay.openIncidentCount} open incident{overlay.openIncidentCount === 1 ? '' : 's'}
+              </StatusIndicator>
+            ) : (
+              <StatusIndicator type="success">None</StatusIndicator>
+            ),
           },
         ]}
       />
-      {overlay.healthIssues.length > 0 && (
+      {!overlayLoading && overlay.healthIssues.length > 0 && (
         <div>
           <Box variant="awsui-key-label">CMDB health</Box>
           <SpaceBetween size="xs">

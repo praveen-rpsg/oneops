@@ -179,4 +179,58 @@ describe('topology map', () => {
     expect(screen.getByText('api-gateway')).toBeInTheDocument();
     expect(screen.getByText('primary-db')).toBeInTheDocument();
   });
+
+  it('refreshes the split panel once the overlay resolves, for a node clicked before it does (ADR-HARD-002)', async () => {
+    const withIncident: IncidentDTO = {
+      incident_id: 'INC-1',
+      title: 'API errors',
+      description: 'desc',
+      severity: 'critical',
+      status: 'open',
+      source: 'alert',
+      asset_id: 'AST-API',
+      row_version: 1,
+      created_at: '2026-08-06T00:00:00Z',
+      updated_at: '2026-08-06T00:00:00Z',
+      is_root: true,
+    };
+
+    // The incidents fetch is held open under test control, so the click
+    // below is guaranteed to land before it resolves — no timing luck.
+    let resolveIncidents!: (body: unknown) => void;
+    const incidentsGate = new Promise<unknown>((resolve) => {
+      resolveIncidents = resolve;
+    });
+
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      const u = String(url);
+      const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+      if (u.includes('/auth/config')) return ok({ auth_enabled: false });
+      if (u.includes('/admin/assets/graph')) return ok(threeTierGraph);
+      if (u.includes('/admin/assets/health')) return ok(emptyHealth);
+      if (u.includes('/admin/incidents')) {
+        const body = await incidentsGate;
+        return ok(body);
+      }
+      return ok({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderApp();
+
+    // Click the node while the incidents fetch (which will report the open
+    // incident) is still in flight.
+    fireEvent.click(await screen.findByText('api-gateway'));
+
+    // Right after the click the overlay has not resolved yet: the panel must
+    // not claim there is no incident (that would be the stale/incomplete
+    // snapshot this story fixes) — it shows a neutral/loading state instead.
+    expect(screen.queryByText('1 open incident')).not.toBeInTheDocument();
+
+    // Now let the held-open incidents fetch resolve.
+    resolveIncidents({ items: [withIncident] });
+
+    // Without any re-click, the still-open panel for the still-selected node
+    // updates to the resolved overlay.
+    await waitFor(() => expect(screen.getByText('1 open incident')).toBeInTheDocument());
+  });
 });

@@ -41,7 +41,7 @@ function TopologyEmpty() {
  * existing incident and asset-health endpoints (ADR-NOC-007).
  */
 export function TopologyPage() {
-  const { openSplitPanel } = useOutletContext<ShellSplitPanelContext>();
+  const { openSplitPanel, isSplitPanelOpen } = useOutletContext<ShellSplitPanelContext>();
   const mode = useTopologyMode();
   const palette = useMemo(() => topologyPalette(mode), [mode]);
 
@@ -49,6 +49,11 @@ export function TopologyPage() {
   const [incidents, setIncidents] = useState<IncidentDTO[]>([]);
   const [health, setHealth] = useState<AssetHealthReport | null>(null);
   const [loading, setLoading] = useState(true);
+  // True until BOTH overlay sources have settled (success or failure) for the
+  // current load cycle — distinct from `incidents`/`health` themselves
+  // defaulting to "empty", which would otherwise be indistinguishable from a
+  // confirmed-empty overlay (ADR-HARD-002).
+  const [overlayLoading, setOverlayLoading] = useState(true);
   const [problem, setProblem] = useState<ProblemDetail | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | undefined>(undefined);
   const [reloads, setReloads] = useState(0);
@@ -57,6 +62,7 @@ export function TopologyPage() {
     const ctrl = new AbortController();
     setLoading(true);
     setProblem(null);
+    setOverlayLoading(true);
 
     getAssetGraph(ctrl.signal)
       .then((g) => setGraph(g))
@@ -76,7 +82,7 @@ export function TopologyPage() {
     // Overlay sources are supplementary: a failure here degrades to "no
     // overlay for that source" rather than blocking the graph itself (the
     // on-call board's degrade-without-blanking precedent, E7.3c).
-    listIncidents({}, ctrl.signal)
+    const incidentsDone = listIncidents({}, ctrl.signal)
       .then((page) => {
         if (!ctrl.signal.aborted) setIncidents(page.items ?? []);
       })
@@ -84,13 +90,19 @@ export function TopologyPage() {
         if (!ctrl.signal.aborted) setIncidents([]);
       });
 
-    getAssetHealth(ctrl.signal)
+    const healthDone = getAssetHealth(ctrl.signal)
       .then((h) => {
         if (!ctrl.signal.aborted) setHealth(h);
       })
       .catch(() => {
         if (!ctrl.signal.aborted) setHealth(null);
       });
+
+    // Both overlay fetches resolve independently (see above); overlayLoading
+    // only clears once neither can still change `incidents`/`health` again.
+    Promise.allSettled([incidentsDone, healthDone]).then(() => {
+      if (!ctrl.signal.aborted) setOverlayLoading(false);
+    });
 
     return () => ctrl.abort();
   }, [reloads]);
@@ -102,8 +114,32 @@ export function TopologyPage() {
 
   const selectNode = (node: AssetGraphNode) => {
     setSelectedAssetId(node.asset_id);
-    openSplitPanel(node.name, <TopologyNodeDetail node={node} overlay={overlayFor(overlay, node.asset_id)} />);
+    openSplitPanel(
+      node.name,
+      <TopologyNodeDetail node={node} overlay={overlayFor(overlay, node.asset_id)} overlayLoading={overlayLoading} />,
+    );
   };
+
+  // Refreshes the still-open panel's content once the overlay changes (most
+  // importantly, once it finishes resolving) after a node was already
+  // selected (ADR-HARD-002) — `selectNode` above materializes a snapshot at
+  // click time, which never refreshes on its own if `overlay`/`overlayLoading`
+  // change afterward. Deliberately keyed only on the overlay's own
+  // resolution, not on `selectedAssetId`/`isSplitPanelOpen`/`graph`
+  // (`selectNode` already opens the panel synchronously on click; this
+  // effect exists solely to re-render that same content when new overlay
+  // data arrives) — and it never opens a panel on its own: `isSplitPanelOpen`
+  // guards it, so a panel the user closed stays closed.
+  useEffect(() => {
+    if (!selectedAssetId || !isSplitPanelOpen) return;
+    const node = graph?.nodes.find((n) => n.asset_id === selectedAssetId);
+    if (!node) return;
+    openSplitPanel(
+      node.name,
+      <TopologyNodeDetail node={node} overlay={overlayFor(overlay, node.asset_id)} overlayLoading={overlayLoading} />,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overlay, overlayLoading]);
 
   return (
     <SpaceBetween size="l">
