@@ -9,6 +9,7 @@ import Header from '@cloudscape-design/components/header';
 import Input from '@cloudscape-design/components/input';
 import Modal from '@cloudscape-design/components/modal';
 import SpaceBetween from '@cloudscape-design/components/space-between';
+import Spinner from '@cloudscape-design/components/spinner';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import type { StatusIndicatorProps } from '@cloudscape-design/components/status-indicator';
 import Table from '@cloudscape-design/components/table';
@@ -16,19 +17,29 @@ import type { TableProps } from '@cloudscape-design/components/table';
 import { ApiError } from '../api';
 import type { ProblemDetail } from '../api';
 import { ErrorState } from '../components/States';
-import { MEMBERSHIP_LIST_CAP, grantMembership, listMemberships, revokeMembership } from '../memberships';
-import type { MembershipDTO } from '../memberships';
+import {
+  MEMBERSHIP_LIST_CAP,
+  getTenantOrg,
+  grantMembership,
+  listMemberships,
+  revokeMembership,
+} from '../memberships';
+import type { MembershipDTO, OrganizationDTO } from '../memberships';
 import { listTenantUsers } from '../users';
 import type { TenantUserDTO } from '../users';
 
 /**
- * Remembers the organisation the caller is administering, for this TAB's
- * session only — `sessionStorage`, not `localStorage`, matching the
+ * Remembers a MANUALLY ENTERED organisation id, for this TAB's session
+ * only — `sessionStorage`, not `localStorage`, matching the
  * no-persistent-client-state posture `theme.ts`/`auth.ts` already establish
  * for this console (the access token itself is memory-only; the theme
- * override is `sessionStorage`). See the doc comment on the input field
- * below for why this exists instead of resolving org_id automatically
- * (ADR-IAC-002).
+ * override is `sessionStorage`).
+ *
+ * FALLBACK ONLY (E-ID.2a): `GET /v1/admin/tenant-org` now resolves the
+ * caller's own org_id automatically — see `MembersPage`'s own doc comment.
+ * This manual path only runs when that call fails for a reason other than
+ * "not an admin" (network/server error), so the screen still works rather
+ * than hard-blocking on the resolver being unavailable.
  */
 const ORG_ID_STORAGE_KEY = 'oneops.membership.org_id';
 
@@ -198,31 +209,42 @@ function GrantMembershipModal({
 }
 
 /**
- * Members (E-ID.2, ADR-IAC-001 extension + ADR-IAC-002): a tenant admin's
- * view of who belongs to their organisation, over the three membership
+ * Members (E-ID.2/E-ID.2a, ADR-IAC-001 extension + ADR-IAC-002): a tenant
+ * admin's view of who belongs to their organisation, over the membership
  * endpoints that already exist — list, grant, revoke — following the
  * write-action pattern ADR-ACT-001 established (confirm-before-revoke,
  * disable-while-pending, refetch-after, inline RFC 7807 errors) and the
  * accept-no-row_version-on-delete decision ADR-HARD-003 made for exactly
  * this shape of endpoint.
  *
- * ORGANIZATION ID: GET/POST /admin/memberships require an explicit org_id
- * (handlers_memberships.go:58-63, :100-108) that nothing reachable from the
- * console's own session can resolve — it is not a JWT claim, and the one
- * endpoint that could answer "which organisation is my tenant's" has no
- * route reachable below requirePlatformAdmin (see memberships.ts's doc
- * comment for the full trace). Rather than block this screen on a new Go
- * endpoint out of scope for a frontend-only story, it asks for the
- * Organization ID directly and remembers it for the tab's session
- * (`sessionStorage`, ADR-IAC-002 — the same no-persistent-client-state
- * posture `theme.ts`/`auth.ts` already use) — a tenant only has one
- * (org:tenant is 1:1, ADR-IDENTITY-001 §4), so this is a one-time-per-tab
- * setup step, not a per-screen one. A platform administrator (who can reach
- * `GET /admin/organizations`) is the realistic source of this value today.
+ * ORGANIZATION ID (E-ID.2a — auto-resolved, previously manual): GET/POST
+ * /admin/memberships require an explicit org_id (handlers_memberships.go:
+ * 58-63, :100-108). This screen resolves it AUTOMATICALLY on mount via
+ * `GET /v1/admin/tenant-org` (`getTenantOrg`, `handlers_organizations.go:186`)
+ * — the caller's own organisation, from the authenticated context, no input
+ * needed — and shows it as read-only context ("Organization: {name}"), never
+ * an editable field. Manual entry (`sessionStorage`-remembered, ADR-IAC-002)
+ * is kept ONLY as a fallback for when that call fails for a reason other
+ * than "the caller isn't an admin": a 403 from `tenant-org` means exactly
+ * what a 403 from the membership endpoints would mean (not a tenant admin),
+ * so it goes straight to `PermissionNeeded` rather than offering an input
+ * that would 403 anyway; any OTHER failure (network, 5xx) falls back to the
+ * manual path so the screen still works rather than hard-failing on the
+ * resolver being unavailable.
  */
 export function MembersPage() {
-  const [orgIdInput, setOrgIdInput] = useState(() => readStoredOrgId());
-  const [orgId, setOrgId] = useState(() => readStoredOrgId());
+  const [orgResolution, setOrgResolution] = useState<
+    | { kind: 'resolving' }
+    | { kind: 'resolved'; org: OrganizationDTO }
+    | { kind: 'forbidden' }
+    | { kind: 'manual' }
+  >({ kind: 'resolving' });
+
+  // Manual-entry fallback state only — see the doc comment above and on
+  // ORG_ID_STORAGE_KEY. Untouched on the happy (resolved) path.
+  const [manualOrgIdInput, setManualOrgIdInput] = useState(() => readStoredOrgId());
+  const [manualOrgId, setManualOrgId] = useState(() => readStoredOrgId());
+
   const [items, setItems] = useState<MembershipDTO[]>([]);
   const [userDirectory, setUserDirectory] = useState<Record<string, TenantUserDTO>>({});
   const [loading, setLoading] = useState(false);
@@ -236,14 +258,40 @@ export function MembersPage() {
 
   const reload = useCallback(() => setReloads((n) => n + 1), []);
 
-  const commitOrgId = useCallback(() => {
-    const trimmed = orgIdInput.trim();
+  // Resolve the caller's own organisation once, on mount. A 403 means "not
+  // an admin" (the same refusal the membership endpoints themselves would
+  // give) — surfaced as the permission-needed state, not the manual
+  // fallback, since typing an id would not help. Any other failure falls
+  // back to manual entry.
+  useEffect(() => {
+    const ctrl = new AbortController();
+    getTenantOrg(ctrl.signal)
+      .then((org) => {
+        if (ctrl.signal.aborted) return;
+        setOrgResolution({ kind: 'resolved', org });
+      })
+      .catch((err: unknown) => {
+        if (ctrl.signal.aborted) return;
+        if (err instanceof ApiError && err.problem.status === 403) {
+          setOrgResolution({ kind: 'forbidden' });
+        } else {
+          setOrgResolution({ kind: 'manual' });
+        }
+      });
+    return () => ctrl.abort();
+  }, []);
+
+  const orgId =
+    orgResolution.kind === 'resolved' ? orgResolution.org.org_id : orgResolution.kind === 'manual' ? manualOrgId : '';
+
+  const commitManualOrgId = useCallback(() => {
+    const trimmed = manualOrgIdInput.trim();
     if (!trimmed) return;
     storeOrgId(trimmed);
-    setOrgId(trimmed);
-    setOrgIdInput(trimmed);
+    setManualOrgId(trimmed);
+    setManualOrgIdInput(trimmed);
     reload();
-  }, [orgIdInput, reload]);
+  }, [manualOrgIdInput, reload]);
 
   const load = useCallback(
     (signal: AbortSignal) => {
@@ -365,7 +413,11 @@ export function MembersPage() {
     [busy, memberLabel, userDirectory],
   );
 
-  const forbidden = problem !== null && isForbidden(problem);
+  // A 403 can come from either the resolver or (defensively — both use the
+  // same PermAdmin tier, so this should not diverge in practice) the
+  // membership list call itself.
+  const forbidden = orgResolution.kind === 'forbidden' || (problem !== null && isForbidden(problem));
+  const resolving = orgResolution.kind === 'resolving';
 
   return (
     <SpaceBetween size="l">
@@ -374,7 +426,7 @@ export function MembersPage() {
         description="Who belongs to your organisation. Roles are assigned by your identity provider, not here (see Identity & roles) — this screen only grants or revokes tenant membership."
         counter={orgId ? `(${items.length})` : undefined}
         actions={
-          <Button onClick={() => setGrantOpen(true)} disabled={!orgId || forbidden}>
+          <Button onClick={() => setGrantOpen(true)} disabled={!orgId || forbidden || resolving}>
             Grant membership
           </Button>
         }
@@ -390,22 +442,39 @@ export function MembersPage() {
         </div>
       )}
 
+      {resolving && (
+        <Box textAlign="center" color="inherit" padding="l">
+          <div role="status" aria-busy="true">
+            <Spinner size="normal" /> Resolving your organization…
+          </div>
+        </Box>
+      )}
+
       {forbidden && <PermissionNeeded />}
 
-      {!forbidden && (
+      {!resolving && !forbidden && orgResolution.kind === 'resolved' && (
+        <Container header={<Header variant="h2">Organization</Header>}>
+          <Box fontWeight="bold">{orgResolution.org.name}</Box>
+          <Box fontSize="body-s" color="text-body-secondary">
+            {orgResolution.org.org_id}
+          </Box>
+        </Container>
+      )}
+
+      {!resolving && !forbidden && orgResolution.kind === 'manual' && (
         <Container header={<Header variant="h2">Organization</Header>}>
           <FormField
             label="Organization ID"
-            description="OneOps has no endpoint yet for discovering this from your session — enter it directly (a platform administrator can look it up). Remembered for this browser tab only."
+            description="Automatic organization lookup failed — enter it directly (a platform administrator can look it up). Remembered for this browser tab only."
           >
             <SpaceBetween direction="horizontal" size="xs">
               <Input
-                value={orgIdInput}
-                onChange={({ detail }) => setOrgIdInput(detail.value)}
+                value={manualOrgIdInput}
+                onChange={({ detail }) => setManualOrgIdInput(detail.value)}
                 ariaLabel="Organization ID"
                 placeholder="Required"
               />
-              <Button onClick={commitOrgId} disabled={!orgIdInput.trim()}>
+              <Button onClick={commitManualOrgId} disabled={!manualOrgIdInput.trim()}>
                 Load members
               </Button>
             </SpaceBetween>
@@ -413,9 +482,9 @@ export function MembersPage() {
         </Container>
       )}
 
-      {!forbidden && problem && <ErrorState problem={problem} onRetry={reload} />}
+      {!resolving && !forbidden && problem && <ErrorState problem={problem} onRetry={reload} />}
 
-      {!forbidden && !problem && orgId && (
+      {!resolving && !forbidden && !problem && orgId && (
         <Table
           items={items}
           columnDefinitions={columns}
@@ -428,7 +497,7 @@ export function MembersPage() {
         />
       )}
 
-      {!forbidden && !problem && !orgId && (
+      {!resolving && !forbidden && !problem && orgResolution.kind === 'manual' && !orgId && (
         <Box textAlign="center" color="inherit" padding="l">
           Enter an Organization ID above to load its members.
         </Box>

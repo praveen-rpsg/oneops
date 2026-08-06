@@ -36,18 +36,49 @@ import { deleteJSON, getJSON, postJSON } from './api';
 //   already revoked, but a race is still possible and surfaces like any
 //   other action error.
 //
-// ORG ID SOURCING GAP (recorded, not invented around): neither of these
-// endpoints' org_id can be discovered from anywhere else the console reaches
-// today. It is not a JWT claim (web/src/auth.ts decodes sub/roles only), and
-// the one endpoint that could resolve it — organisation lookup by tenant
-// (domain.OrganizationRepository.GetByTenant) — has no HTTP route at all;
-// every /admin/organizations/* route is requirePlatformAdmin
+// ORG ID SOURCING (was a gap, now CLOSED, E-ID.2a): these endpoints' org_id
+// used to be undiscoverable from anywhere the console reaches — it is not a
+// JWT claim (web/src/auth.ts decodes sub/roles only), and every
+// /admin/organizations/* route is requirePlatformAdmin
 // (internal/httpapi/server.go:415-418), a strictly more privileged,
-// cross-tenant gate than the PermAdmin tier these membership endpoints use
-// (ADR-ACT-001 §2 already named exactly this shape of gap for a different
-// endpoint). See routes/MembersPage.tsx's own doc comment for the resulting
-// UX choice (a persisted, manually-entered Organization ID) and
-// ADR-IAC-002 for the decision record.
+// cross-tenant gate than the PermAdmin tier these membership endpoints use.
+// `GET /v1/admin/tenant-org` (getTenantOrganization,
+// handlers_organizations.go:186) closes it: it resolves the CALLER'S OWN
+// tenant's organisation from the authenticated context alone (no input),
+// under the same PermAdmin tier, so a tenant administrator can now get their
+// own org_id without an out-of-band ULID handoff. `getTenantOrg` below is
+// the client for it; MembersPage.tsx calls it automatically on mount and
+// only falls back to manual entry if it fails for a reason other than "not
+// an admin" (see MembersPage.tsx's own doc comment and ADR-IAC-002, amended
+// E-ID.2a).
+
+/**
+ * Typed contract for GET /v1/admin/tenant-org — organizationDTO,
+ * `internal/httpapi/handlers_organizations.go:21`, field-for-field (this
+ * screen only displays `name`/`org_id`, but the shape is typed faithfully
+ * rather than narrowed, matching this file's other DTOs).
+ */
+export interface OrganizationDTO {
+  org_id: string;
+  tenant_id: string;
+  slug: string;
+  name: string;
+  status: 'active' | 'suspended';
+  row_version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * GET /v1/admin/tenant-org (getTenantOrganization,
+ * handlers_organizations.go:186) — the CALLER'S OWN organisation, resolved
+ * from the authenticated context, no input. `403` if the caller lacks
+ * PermAdmin; `404` in the (currently unreachable given `uq_org_tenant`'s
+ * 1:1) case of no organisation realising this tenant.
+ */
+export function getTenantOrg(signal?: AbortSignal): Promise<OrganizationDTO> {
+  return getJSON<OrganizationDTO>('/v1/admin/tenant-org', signal);
+}
 
 export interface MembershipDTO {
   membership_id: string;

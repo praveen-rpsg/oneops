@@ -1,15 +1,27 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { renderApp } from '../test-render';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { MembershipDTO } from '../memberships';
+import type { MembershipDTO, OrganizationDTO } from '../memberships';
 import type { TenantUserDTO } from '../users';
 
-// Exercises E-ID.2/ADR-IAC-002's Members screen: list (joined with
+// Exercises E-ID.2/E-ID.2a's Members screen: automatic org_id resolution via
+// GET /admin/tenant-org (ADR-IAC-002, amended), list (joined with
 // tenant-users for names, degrading to the raw id), grant, revoke (confirm
-// -then-delete-then-refetch, ADR-HARD-003's no-row_version delete), and the
-// 403-graceful permission-needed state.
+// -then-delete-then-refetch, ADR-HARD-003's no-row_version delete), the
+// 403-graceful permission-needed state, and the manual-entry fallback for a
+// non-403 tenant-org failure.
 
-const ORG_ID_KEY = 'oneops.membership.org_id';
+const org = (over: Partial<OrganizationDTO> = {}): OrganizationDTO => ({
+  org_id: 'ORG-1',
+  tenant_id: 'TEN-1',
+  slug: 'acme',
+  name: 'Acme Corp',
+  status: 'active',
+  row_version: 1,
+  created_at: '2026-08-01T00:00:00Z',
+  updated_at: '2026-08-01T00:00:00Z',
+  ...over,
+});
 
 const membership = (over: Partial<MembershipDTO> = {}): MembershipDTO => ({
   membership_id: 'MSHIP-1',
@@ -35,8 +47,11 @@ const tenantUser = (over: Partial<TenantUserDTO> = {}): TenantUserDTO => ({
 interface Fixture {
   memberships?: MembershipDTO[];
   tenantUsers?: TenantUserDTO[];
-  /** Both GET endpoints answer 403, mimicking a caller without PermAdmin. */
-  forbidden?: boolean;
+  tenantOrg?: OrganizationDTO;
+  /** GET /admin/tenant-org answers 403 — "not an admin", the permission state. */
+  tenantOrgForbidden?: boolean;
+  /** GET /admin/tenant-org answers 500 — falls back to manual entry. */
+  tenantOrgError?: boolean;
   /** 'ERROR' makes POST /v1/admin/memberships fail 422. */
   grant?: 'ERROR';
   /** 'ERROR' makes DELETE /v1/admin/memberships/{id} fail 409. */
@@ -46,6 +61,7 @@ interface Fixture {
 function routedFetch(fx: Fixture = {}) {
   const items = [...(fx.memberships ?? [membership(), unresolved, revoked])];
   const users = [...(fx.tenantUsers ?? [tenantUser()])];
+  const theOrg = fx.tenantOrg ?? org();
 
   return vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
     const u = String(url);
@@ -58,6 +74,12 @@ function routedFetch(fx: Fixture = {}) {
     });
 
     if (u.includes('/auth/config')) return ok({ auth_enabled: false });
+
+    if (u.includes('/admin/tenant-org')) {
+      if (fx.tenantOrgForbidden) return fail(403, { title: 'forbidden', detail: 'missing permission: artifacts:admin' });
+      if (fx.tenantOrgError) return fail(500, { title: 'internal error', detail: 'boom' });
+      return ok(theOrg);
+    }
 
     if (method === 'POST' && /\/admin\/memberships$/.test(u)) {
       if (fx.grant === 'ERROR') {
@@ -80,12 +102,10 @@ function routedFetch(fx: Fixture = {}) {
     }
 
     if (u.includes('/admin/tenant-users')) {
-      if (fx.forbidden) return fail(403, { title: 'forbidden', detail: 'missing permission: artifacts:admin' });
       return ok({ items: users });
     }
 
     if (u.includes('/admin/memberships')) {
-      if (fx.forbidden) return fail(403, { title: 'forbidden', detail: 'missing permission: artifacts:admin' });
       return ok({ items });
     }
 
@@ -102,13 +122,51 @@ afterEach(() => {
   window.sessionStorage.clear();
 });
 
-describe('members list', () => {
-  it('joins names from tenant-users and degrades to the raw id when unresolved, showing status per row', async () => {
-    window.sessionStorage.setItem(ORG_ID_KEY, 'ORG-1');
+describe('organization auto-resolution', () => {
+  it('resolves org_id from GET /admin/tenant-org and loads members with no manual entry', async () => {
     vi.stubGlobal('fetch', routedFetch());
     renderApp();
 
     expect(await screen.findByRole('heading', { name: /^Members/ })).toBeInTheDocument();
+    expect(await screen.findByText('Acme Corp')).toBeInTheDocument();
+    expect(screen.getByText('ORG-1')).toBeInTheDocument();
+    expect(await screen.findByText('Alice (alice@example.com)')).toBeInTheDocument();
+
+    // The happy path never shows the manual Organization ID input.
+    expect(screen.queryByLabelText('Organization ID')).not.toBeInTheDocument();
+  });
+
+  it('renders the clean permission-needed state on a 403 from tenant-org, not the manual fallback', async () => {
+    vi.stubGlobal('fetch', routedFetch({ tenantOrgForbidden: true }));
+    renderApp();
+
+    expect(
+      await screen.findByText('You need tenant-admin permission to manage members.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText('Organization ID')).not.toBeInTheDocument();
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  });
+
+  it('falls back to manual Organization ID entry on a non-403 tenant-org failure', async () => {
+    vi.stubGlobal('fetch', routedFetch({ tenantOrgError: true }));
+    renderApp();
+
+    const input = await screen.findByLabelText('Organization ID');
+    expect(screen.getByText(/Automatic organization lookup failed/)).toBeInTheDocument();
+    expect(screen.queryByText('You need tenant-admin permission to manage members.')).not.toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: 'ORG-1' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Load members' }));
+
+    expect(await screen.findByText('Alice (alice@example.com)')).toBeInTheDocument();
+  });
+});
+
+describe('members list', () => {
+  it('joins names from tenant-users and degrades to the raw id when unresolved, showing status per row', async () => {
+    vi.stubGlobal('fetch', routedFetch());
+    renderApp();
+
     expect(await screen.findByText('Alice (alice@example.com)')).toBeInTheDocument();
     // USR-2 has no tenant-users entry — the row degrades to the bare id.
     expect(screen.getByText('USR-2')).toBeInTheDocument();
@@ -120,23 +178,10 @@ describe('members list', () => {
     // Revoke is only offered on active rows.
     expect(screen.getAllByRole('button', { name: 'Revoke' }).length).toBe(2);
   });
-
-  it('prompts for an Organization ID when none is remembered, and loads once one is entered', async () => {
-    vi.stubGlobal('fetch', routedFetch());
-    renderApp();
-
-    expect(await screen.findByText('Enter an Organization ID above to load its members.')).toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText('Organization ID'), { target: { value: 'ORG-1' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Load members' }));
-
-    expect(await screen.findByText('Alice (alice@example.com)')).toBeInTheDocument();
-  });
 });
 
 describe('grant membership', () => {
   it('posts the exact {org_id, user_id} body and refetches the list', async () => {
-    window.sessionStorage.setItem(ORG_ID_KEY, 'ORG-1');
     const f = routedFetch();
     vi.stubGlobal('fetch', f);
     renderApp();
@@ -165,7 +210,6 @@ describe('grant membership', () => {
   });
 
   it('surfaces a grant validation error and keeps the dialog open', async () => {
-    window.sessionStorage.setItem(ORG_ID_KEY, 'ORG-1');
     vi.stubGlobal('fetch', routedFetch({ grant: 'ERROR' }));
     renderApp();
 
@@ -182,7 +226,6 @@ describe('grant membership', () => {
 
 describe('revoke membership', () => {
   it('confirms, then deletes with no row_version, then refetches the list', async () => {
-    window.sessionStorage.setItem(ORG_ID_KEY, 'ORG-1');
     const f = routedFetch();
     vi.stubGlobal('fetch', f);
     renderApp();
@@ -213,7 +256,6 @@ describe('revoke membership', () => {
   });
 
   it('surfaces a revoke error inline rather than failing silently', async () => {
-    window.sessionStorage.setItem(ORG_ID_KEY, 'ORG-1');
     vi.stubGlobal('fetch', routedFetch({ revoke: 'ERROR' }));
     renderApp();
 
@@ -227,19 +269,5 @@ describe('revoke membership', () => {
     // Still shown as active — no silent removal/status flip on a failed revoke.
     const statuses = await screen.findAllByText('Active');
     expect(statuses.length).toBe(2);
-  });
-});
-
-describe('403 — missing tenant-admin permission', () => {
-  it('renders a clean permission-needed state instead of crashing or dumping the raw error', async () => {
-    window.sessionStorage.setItem(ORG_ID_KEY, 'ORG-1');
-    vi.stubGlobal('fetch', routedFetch({ forbidden: true }));
-    renderApp();
-
-    expect(
-      await screen.findByText('You need tenant-admin permission to manage members.'),
-    ).toBeInTheDocument();
-    expect(screen.queryByLabelText('Organization ID')).not.toBeInTheDocument();
-    expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });
 });
