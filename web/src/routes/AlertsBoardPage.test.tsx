@@ -3,6 +3,7 @@ import { renderApp } from '../test-render';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import createWrapper from '@cloudscape-design/components/test-utils/dom';
 import type { AlertRuleDTO } from '../alertRules';
+import type { IncidentDTO } from '../incidents';
 
 const rule = (over: Partial<AlertRuleDTO> = {}): AlertRuleDTO => ({
   rule_id: 'RULE-CPU',
@@ -32,11 +33,27 @@ const firing = rule({
   symptom_class: 'availability',
   last_state: 'firing',
   last_transition_at: '2026-08-06T09:00:00Z',
+  current_incident_id: 'INC-LINKED',
 });
+
+const linkedIncident: IncidentDTO = {
+  incident_id: 'INC-LINKED',
+  title: 'Disk exhaustion on AST-DB-1',
+  description: 'disk_free_bytes breached threshold.',
+  severity: 'critical',
+  status: 'open',
+  source: 'alert',
+  asset_id: 'AST-DB-1',
+  row_version: 1,
+  created_at: '2026-08-06T09:00:00Z',
+  updated_at: '2026-08-06T09:00:00Z',
+  is_root: true,
+};
 
 interface Fixture {
   list?: unknown;
   detail?: Record<string, AlertRuleDTO>;
+  incidentDetail?: Record<string, IncidentDTO>;
   /** 'ERROR' makes POST /v1/admin/alert-rules fail 422, as a bad enum/out-of-range value would. */
   create?: 'ERROR';
 }
@@ -79,6 +96,18 @@ function routedFetch(fx: Fixture = {}) {
     if (detailMatch) {
       const id = detailMatch[1];
       const body = fx.detail?.[id] ?? created[id];
+      if (!body) return { ok: false, status: 404, json: async () => ({ title: 'not found', status: 404 }) };
+      return ok(body);
+    }
+
+    if (u.includes('/incidents/') && u.includes('/timeline')) {
+      return ok({ items: [] });
+    }
+
+    const incidentDetailMatch = u.match(/admin\/incidents\/([^/?]+)/);
+    if (incidentDetailMatch) {
+      const id = incidentDetailMatch[1];
+      const body = fx.incidentDetail?.[id];
       if (!body) return { ok: false, status: 404, json: async () => ({ title: 'not found', status: 404 }) };
       return ok(body);
     }
@@ -140,6 +169,34 @@ describe('alerts board', () => {
 
     await waitFor(() => expect(screen.getByText('< 1000000')).toBeInTheDocument());
     expect(screen.getAllByText('Availability').length).toBeGreaterThan(0);
+  });
+
+  it('renders a linked-incident link when current_incident_id is set, and an em dash otherwise', async () => {
+    vi.stubGlobal('fetch', routedFetch({ list: { items: [rule(), firing] } }));
+    renderApp();
+
+    await screen.findByRole('button', { name: /AST-WEB-1 · cpu_utilization/ });
+
+    const unlinkedRow = screen.getByRole('row', { name: /AST-WEB-1 · cpu_utilization/ });
+    expect(within(unlinkedRow).getByText('—')).toBeInTheDocument();
+    expect(within(unlinkedRow).queryByRole('button', { name: /INC-/ })).not.toBeInTheDocument();
+
+    const linkedRow = screen.getByRole('row', { name: /AST-DB-1 · disk_free_bytes/ });
+    expect(within(linkedRow).getByRole('button', { name: 'INC-LINKED' })).toBeInTheDocument();
+  });
+
+  it('opens the linked incident in the split panel when its link is clicked', async () => {
+    vi.stubGlobal(
+      'fetch',
+      routedFetch({ list: { items: [firing] }, incidentDetail: { 'INC-LINKED': linkedIncident } }),
+    );
+    renderApp();
+
+    const linkedRow = await screen.findByRole('row', { name: /AST-DB-1 · disk_free_bytes/ });
+    fireEvent.click(within(linkedRow).getByRole('button', { name: 'INC-LINKED' }));
+
+    expect(await screen.findByRole('heading', { name: 'Incident INC-LINKED' })).toBeInTheDocument();
+    expect(await screen.findByText('disk_free_bytes breached threshold.')).toBeInTheDocument();
   });
 
   it('shows an explicit empty state with no rules', async () => {

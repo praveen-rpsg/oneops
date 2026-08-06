@@ -18,21 +18,22 @@ import (
 func (s *Server) SetAlertRules(repo domain.AlertRuleRepository) { s.alertRules = repo }
 
 type alertRuleDTO struct {
-	RuleID           string     `json:"rule_id"`
-	AssetID          string     `json:"asset_id"`
-	Metric           string     `json:"metric"`
-	Comparator       string     `json:"comparator"`
-	Threshold        float64    `json:"threshold"`
-	ForDurationSecs  int        `json:"for_duration_seconds"`
-	Severity         string     `json:"severity"`
-	SymptomClass     string     `json:"symptom_class"`
-	Enabled          bool       `json:"enabled"`
-	LastState        string     `json:"last_state"`
-	LastTransitionAt *time.Time `json:"last_transition_at,omitempty"`
-	FlapDwellSecs    int        `json:"flap_dwell_seconds"`
-	RowVersion       int64      `json:"row_version"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	RuleID            string     `json:"rule_id"`
+	AssetID           string     `json:"asset_id"`
+	Metric            string     `json:"metric"`
+	Comparator        string     `json:"comparator"`
+	Threshold         float64    `json:"threshold"`
+	ForDurationSecs   int        `json:"for_duration_seconds"`
+	Severity          string     `json:"severity"`
+	SymptomClass      string     `json:"symptom_class"`
+	Enabled           bool       `json:"enabled"`
+	LastState         string     `json:"last_state"`
+	LastTransitionAt  *time.Time `json:"last_transition_at,omitempty"`
+	FlapDwellSecs     int        `json:"flap_dwell_seconds"`
+	CurrentIncidentID *string    `json:"current_incident_id,omitempty"`
+	RowVersion        int64      `json:"row_version"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 // toAlertRuleDTO deliberately omits tenant_id, the same choice
@@ -42,15 +43,20 @@ type alertRuleDTO struct {
 // operator administers or needs to see; flap_dwell_seconds (the config knob)
 // is the only part of E3.2 that is part of this contract. symptom_class
 // (E3.4) is always present, never omitted — every rule has one, defaulting
-// to "unspecified".
+// to "unspecified". current_incident_id (E4.1) is passed straight through
+// with `omitempty`: it is nil for the common "ok" rule, and is not itself
+// evaluator-vs-admin state a caller can write (see AlertRule's doc comment)
+// — this is a read-only surface of an existing link, not a new contract
+// concept (ADR-NOC-005 recorded the prior gap; this closes it additively).
 func toAlertRuleDTO(r *domain.AlertRule) alertRuleDTO {
 	dto := alertRuleDTO{
 		RuleID: r.RuleID, AssetID: r.AssetID, Metric: r.Metric,
 		Comparator: string(r.Comparator), Threshold: r.Threshold, ForDurationSecs: r.ForDuration,
 		Severity: string(r.Severity), SymptomClass: string(r.SymptomClass),
 		Enabled: r.Enabled, LastState: string(r.LastState),
-		FlapDwellSecs: r.FlapDwellSeconds,
-		RowVersion:    r.RowVersion, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+		FlapDwellSecs:     r.FlapDwellSeconds,
+		CurrentIncidentID: r.CurrentIncidentID,
+		RowVersion:        r.RowVersion, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
 	if !r.LastTransitionAt.IsZero() {
 		t := r.LastTransitionAt

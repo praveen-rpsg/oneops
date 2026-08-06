@@ -35,6 +35,7 @@ import type { ProblemDetail } from '../api';
 import { AlertRuleDetailPanel } from '../components/AlertRuleDetail';
 import { AlertRuleConfigFields } from '../components/AlertRuleForm';
 import type { AlertRuleConfigValues } from '../components/AlertRuleForm';
+import { IncidentDetailPanel } from '../components/IncidentDetail';
 import { ErrorState } from '../components/States';
 import { humanise } from '../incidentPresentation';
 
@@ -204,11 +205,13 @@ function CreateAlertRuleModal({
  * The alerts board: every alert rule for the caller's tenant (bounded at
  * ALERT_RULE_LIST_CAP), filterable by state and severity, sortable, and
  * drilling into a rule's own detail through the shell's `SplitPanel` — the
- * same pattern the incident board (ADR-NOC-004) established. No "linked
- * incident" column: current_incident_id is not part of the existing
- * alert-rule HTTP contract (see ADR-NOC-005). New in E-ACT.2 (ADR-ACT-002):
- * "Create rule" from this board, and edit/enable-disable/delete from the
- * detail panel it opens.
+ * same pattern the incident board (ADR-NOC-004) established. New in E-ACT.2
+ * (ADR-ACT-002): "Create rule" from this board, and edit/enable-disable/
+ * delete from the detail panel it opens. "Linked incident" (E-HARD.3, closing
+ * the gap ADR-NOC-005 recorded) reuses the exact same drill-down idiom the
+ * incident board itself uses to open one (`IncidentBoardPage`'s `openIncident`):
+ * `openSplitPanel` with `IncidentDetailPanel`, not a new route — a rule with
+ * no `current_incident_id` renders an em dash instead of a link.
  */
 export function AlertsBoardPage() {
   const { openSplitPanel, closeSplitPanel } = useOutletContext<ShellSplitPanelContext>();
@@ -242,6 +245,14 @@ export function AlertsBoardPage() {
     [openSplitPanel, closeSplitPanel, reload],
   );
 
+  /** Same idiom `IncidentBoardPage`'s own `openIncident` uses — a `SplitPanel` over `IncidentDetailPanel`, not a new route. */
+  const openIncident = useCallback(
+    (incidentId: string) => {
+      openSplitPanel(`Incident ${incidentId}`, <IncidentDetailPanel incidentId={incidentId} />);
+    },
+    [openSplitPanel],
+  );
+
   const columns = useMemo<TableProps.ColumnDefinition<AlertRuleDTO>[]>(
     () => [
       {
@@ -273,6 +284,19 @@ export function AlertsBoardPage() {
         cell: (rule) => <StatusIndicator type={ALERT_STATE_TYPE[rule.last_state]}>{humanise(rule.last_state)}</StatusIndicator>,
       },
       {
+        id: 'current_incident_id',
+        header: 'Linked incident',
+        sortingComparator: (a, b) => (a.current_incident_id ?? '').localeCompare(b.current_incident_id ?? ''),
+        cell: (rule) =>
+          rule.current_incident_id ? (
+            <Button variant="inline-link" onClick={() => openIncident(rule.current_incident_id!)}>
+              {rule.current_incident_id}
+            </Button>
+          ) : (
+            <Box color="text-body-secondary">—</Box>
+          ),
+      },
+      {
         id: 'symptom_class',
         header: 'Symptom class',
         sortingComparator: (a, b) => a.symptom_class.localeCompare(b.symptom_class),
@@ -295,7 +319,7 @@ export function AlertsBoardPage() {
         ),
       },
     ],
-    [openRule],
+    [openRule, openIncident],
   );
 
   const [sortState, setSortState] = useState<{ column: TableProps.ColumnDefinition<AlertRuleDTO>; descending: boolean }>(

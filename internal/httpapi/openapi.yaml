@@ -3942,6 +3942,15 @@ components:
             How long a candidate transition must be observed continuously
             before it is committed and notified (E3.2). 0 disables the dwell
             for this rule, reproducing immediate-transition behaviour.
+        current_incident_id:
+          type: string
+          nullable: true
+          description: >-
+            The open, alert-sourced Incident this rule's firing is currently
+            linked to (E4.1). Absent/null means the rule is ok, or is firing
+            but not yet correlated to an incident. Set only by the evaluator,
+            never through PATCH; cleared on the matching firing->ok
+            transition (the linked incident itself is not auto-resolved).
         row_version: { type: integer, format: int64 }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }

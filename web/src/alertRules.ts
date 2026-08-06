@@ -5,12 +5,11 @@ import { deleteJSON, getJSON, patchJSON, postJSON } from './api';
 // field names and shape, not a paraphrase. Kept hand-written, like
 // incidents.ts/noc.ts, until a second consumer of the generated spec appears.
 //
-// current_incident_id is deliberately NOT part of this contract:
-// domain.AlertRule carries it (internal/domain/alertrule.go), but
-// toAlertRuleDTO does not serialize it — the field is not part of the
-// existing HTTP surface this story reuses unchanged. There is therefore no
-// "linked incident" column on the alerts board; see ADR-NOC-005's "what this
-// story does not do" for the honest account of that gap.
+// current_incident_id (E4.1) is now part of this contract: toAlertRuleDTO
+// serializes domain.AlertRule.CurrentIncidentID straight through with
+// `omitempty`, closing the additive gap ADR-NOC-005 recorded. Absent means
+// the rule is ok, or firing but not yet correlated to an incident — never
+// assume absence means "never fired".
 
 export const ALERT_SEVERITIES = ['critical', 'warning', 'info'] as const;
 export type AlertSeverity = (typeof ALERT_SEVERITIES)[number];
@@ -37,6 +36,7 @@ export interface AlertRuleDTO {
   last_state: AlertRuleState;
   last_transition_at?: string;
   flap_dwell_seconds: number;
+  current_incident_id?: string;
   row_version: number;
   created_at: string;
   updated_at: string;

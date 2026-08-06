@@ -316,8 +316,9 @@ export function AlertRuleDetailPanel({
         ]}
       />
       <Box color="text-body-secondary" fontSize="body-s">
-        This rule's linked incident (if any) is not part of the current alert-rule
-        contract — see ADR-NOC-005.
+        A rule's linked incident (current_incident_id, E4.1) is shown as the
+        alerts board's "Linked incident" column; a dedicated row here is a
+        separable follow-up.
       </Box>
 
       {editOpen && (
