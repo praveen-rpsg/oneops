@@ -74,7 +74,12 @@ describe('NOC overview page', () => {
 
     expect(await screen.findByRole('heading', { name: 'NOC / Overview' })).toBeInTheDocument();
 
-    expect(screen.getByRole('heading', { name: 'Incidents' })).toBeInTheDocument();
+    // The h1 above renders unconditionally on first paint, before the mocked
+    // fetch's promise chain has necessarily settled — awaiting it is not
+    // sufficient to guarantee the data-dependent widgets below have rendered
+    // yet under load. `findByRole` (polling) rather than a bare `getByRole`
+    // is required here for the same reason line 75 needs `await`.
+    expect(await screen.findByRole('heading', { name: 'Incidents' })).toBeInTheDocument();
     expect(screen.getByText('Open total')).toBeInTheDocument();
     // open_total = 3 is the only field equal to 3 in this fixture.
     expect(screen.getByText('3')).toBeInTheDocument();
