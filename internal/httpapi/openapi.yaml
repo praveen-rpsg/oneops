@@ -1384,6 +1384,32 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/assets/graph:
+    get:
+      summary: Whole-tenant CMDB asset-graph projection (read-only)
+      description: >-
+        Every asset as a node and every relationship as an edge, in one
+        bounded call — the data source the topology-map UI (E7.3b-2) needs
+        instead of N+1 per-asset relationship queries (E7.3b-1). Tenant
+        isolation is enforced by row-level security alone, exactly like
+        GET /admin/noc/overview (ADR-NOC-001): no explicit tenant predicate.
+        Bounded: at most 2000 nodes and 5000 edges, each ordered by its own
+        primary key (asset_id / relationship_id) so a truncated page is the
+        same first-N rows on a repeated call; truncated is true when either
+        cap was reached. Not soft-retire-filtered, unlike GET /admin/assets —
+        a topology map renders a retired CI's position rather than hiding it.
+        Nodes and edges are not joined server-side; a caller reconciles them
+        by asset_id, and composes incident/health overlay client-side from
+        the existing incidents/health endpoints (ADR-NOC-006).
+      operationId: assetGraph
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: The tenant's asset graph
+          content: { application/json: { schema: { $ref: '#/components/schemas/AssetGraph' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
   /v1/admin/assets/relationships:
     post:
       summary: Create a CMDB relationship between two assets
@@ -3604,6 +3630,40 @@ components:
         orphaned_assets: { $ref: '#/components/schemas/AssetHealthCategory' }
         orphaned_business_services: { $ref: '#/components/schemas/AssetHealthCategory' }
         incomplete: { $ref: '#/components/schemas/AssetHealthCategory' }
+    AssetGraphNode:
+      type: object
+      description: >-
+        One node of the whole-tenant CMDB asset-graph projection (E7.3b-1) —
+        deliberately narrower than Asset: attributes, ownership, source and
+        timestamps are not topology-rendering fields.
+      properties:
+        asset_id: { type: string }
+        name: { type: string }
+        type: { type: string }
+        status: { type: string, enum: [planned, active, maintenance, retired] }
+        environment: { type: string, enum: [production, staging, development, unknown] }
+        criticality: { type: string, enum: [critical, high, medium, low, unknown] }
+    AssetGraphEdge:
+      type: object
+      description: One edge of the whole-tenant CMDB asset-graph projection.
+      properties:
+        from_asset_id: { type: string }
+        to_asset_id: { type: string }
+        type: { type: string, enum: [depends_on, runs_on, connected_to, member_of] }
+    AssetGraph:
+      type: object
+      description: >-
+        The whole tenant's CMDB asset graph (E7.3b-1, ADR-NOC-006), bounded
+        to at most 2000 nodes and 5000 edges. truncated is true when either
+        cap was reached.
+      properties:
+        nodes:
+          type: array
+          items: { $ref: '#/components/schemas/AssetGraphNode' }
+        edges:
+          type: array
+          items: { $ref: '#/components/schemas/AssetGraphEdge' }
+        truncated: { type: boolean }
     IngestSample:
       type: object
       required: [asset_id, metric, value, timestamp]

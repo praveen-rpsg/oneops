@@ -725,6 +725,45 @@ type AssetHealthReport struct {
 	Incomplete AssetHealthCategory
 }
 
+// AssetGraphNode is one node of the whole-tenant CMDB asset-graph projection
+// (E7.3b-1, ADR-NOC-006) — enough for a topology-map UI to render a node
+// without a second round-trip per asset. Deliberately narrower than the
+// assetDTO GET /admin/assets/{id} returns: attributes, ownership, source/
+// provenance and timestamps are not topology-rendering fields, so they are
+// left off this projection rather than reproduced here.
+type AssetGraphNode struct {
+	AssetID     string
+	Name        string
+	Type        string
+	Status      AssetStatus
+	Environment AssetEnvironment
+	Criticality AssetCriticality
+}
+
+// AssetGraphEdge is one edge of the whole-tenant CMDB asset-graph projection.
+type AssetGraphEdge struct {
+	FromAssetID string
+	ToAssetID   string
+	Type        RelationshipType
+}
+
+// AssetGraph is the whole tenant's CMDB asset-graph projection (E7.3b-1,
+// ADR-NOC-006): every asset as a node and every relationship as an edge, in
+// one bounded call — the data source a topology-map UI needs instead of N+1
+// per-asset relationship queries. Nothing here is persisted; recomputed on
+// every call, the same computed-projection shape ADR-NOC-001 established for
+// GET /admin/noc/overview.
+type AssetGraph struct {
+	Nodes []AssetGraphNode
+	Edges []AssetGraphEdge
+	// Truncated is true when EITHER Nodes or Edges hit its own cap
+	// (AssetRepository.Graph's nodeCap/edgeCap) — the caller got a partial
+	// graph, not an error. A bounded projection that reports its own
+	// boundary is better UX than a 500 or an unbounded scan
+	// (docs/PLATFORM-BUILD-PLAN.md §3).
+	Truncated bool
+}
+
 // AssetRepository administers the CMDB: assets, the relationships between
 // them, and each asset's append-only change history.
 //
@@ -860,4 +899,20 @@ type AssetRepository interface {
 	RelationshipsFrom(ctx context.Context, assetID string) ([]*AssetRelationship, error)
 	// RelationshipsTo returns the direct in-edges of assetID.
 	RelationshipsTo(ctx context.Context, assetID string) ([]*AssetRelationship, error)
+
+	// Graph returns the whole tenant's CMDB asset-graph projection (E7.3b-1,
+	// ADR-NOC-006): every asset as a node, every relationship as an edge —
+	// the one bounded call a topology-map UI needs instead of N+1 per-asset
+	// relationship queries. Read-only: it mutates nothing, and is
+	// deliberately NOT soft-retire-filtered (unlike List) — a topology map
+	// renders a retired CI's position in the graph rather than hiding it,
+	// the same choice Export makes for the same reason.
+	//
+	// nodeCap/edgeCap bound Nodes/Edges independently via LIMIT; a
+	// non-positive value is replaced by the implementation's own default
+	// cap. Both lists are ordered deterministically by their own primary
+	// key (asset_id / relationship_id) so a truncated page is always the
+	// same first-N rows on a repeated call, never an arbitrary sample.
+	// AssetGraph.Truncated is set when either cap is reached.
+	Graph(ctx context.Context, nodeCap, edgeCap int) (*AssetGraph, error)
 }

@@ -1256,3 +1256,113 @@ func (s *AssetStore) queryRelationships(ctx context.Context, sql, arg string) ([
 	}
 	return out, nil
 }
+
+// maxAssetGraphNodes/maxAssetGraphEdges are Graph's default caps (E7.3b-1):
+// a topology-map UI's one-call read of the whole tenant's CMDB must never
+// become an unbounded scan/result (docs/PLATFORM-BUILD-PLAN.md §3). A tenant
+// past either cap gets the first N by primary-key order plus
+// domain.AssetGraph.Truncated=true, never a 500.
+const (
+	maxAssetGraphNodes = 2000
+	maxAssetGraphEdges = 5000
+)
+
+// assetGraphNodeColumns/assetGraphEdgeColumns are the narrow projections
+// Graph selects — enough for a topology-map UI to render a node/edge without
+// a second round-trip, deliberately narrower than assetColumns/
+// assetRelColumns (see domain.AssetGraphNode/AssetGraphEdge's own doc
+// comments for why).
+const (
+	assetGraphNodeColumns = `asset_id, name, type, status, environment, criticality`
+	assetGraphEdgeColumns = `from_asset_id, to_asset_id, type`
+)
+
+// Graph returns the whole tenant's CMDB asset-graph projection (E7.3b-1,
+// ADR-NOC-006): two simple, single-table, index-backed reads on this store's
+// own tenant-scoped connection — no explicit tenant predicate, RLS on
+// `asset` and `asset_relationship` supplies the isolation the same way every
+// other read in this store relies on it (ADR-ASSET-001 §4). Neither query
+// joins the other: a topology-map UI reconciles nodes and edges by
+// asset_id client-side, exactly as GET .../dependencies already returns bare
+// ids for the caller to resolve.
+//
+// Each query fetches its own cap+1 rows rather than issuing a second COUNT:
+// if more than cap rows come back, the (cap+1)-th is dropped and Truncated
+// is set — the same "ask for one more than you need" bound
+// ConfigObjectRepo.List already uses for keyset paging. Both lists are
+// ordered by their own primary key, so a truncated page is always the same
+// first-N rows on a repeated call, never an arbitrary sample.
+func (s *AssetStore) Graph(ctx context.Context, nodeCap, edgeCap int) (*domain.AssetGraph, error) {
+	if nodeCap <= 0 {
+		nodeCap = maxAssetGraphNodes
+	}
+	if edgeCap <= 0 {
+		edgeCap = maxAssetGraphEdges
+	}
+
+	nodes, nodesTruncated, err := s.assetGraphNodes(ctx, nodeCap)
+	if err != nil {
+		return nil, err
+	}
+	edges, edgesTruncated, err := s.assetGraphEdges(ctx, edgeCap)
+	if err != nil {
+		return nil, err
+	}
+	return &domain.AssetGraph{Nodes: nodes, Edges: edges, Truncated: nodesTruncated || edgesTruncated}, nil
+}
+
+func (s *AssetStore) assetGraphNodes(ctx context.Context, limit int) ([]domain.AssetGraphNode, bool, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+assetGraphNodeColumns+` FROM asset ORDER BY asset_id LIMIT $1`, limit+1)
+	if err != nil {
+		return nil, false, fmt.Errorf("query asset graph nodes: %w", err)
+	}
+	defer rows.Close()
+
+	nodes := make([]domain.AssetGraphNode, 0, limit)
+	for rows.Next() {
+		var n domain.AssetGraphNode
+		var status, env, crit string
+		if err := rows.Scan(&n.AssetID, &n.Name, &n.Type, &status, &env, &crit); err != nil {
+			return nil, false, fmt.Errorf("scan asset graph node: %w", err)
+		}
+		n.Status = domain.AssetStatus(status)
+		n.Environment = domain.AssetEnvironment(env)
+		n.Criticality = domain.AssetCriticality(crit)
+		nodes = append(nodes, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate asset graph nodes: %w", err)
+	}
+	if len(nodes) > limit {
+		return nodes[:limit], true, nil
+	}
+	return nodes, false, nil
+}
+
+func (s *AssetStore) assetGraphEdges(ctx context.Context, limit int) ([]domain.AssetGraphEdge, bool, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+assetGraphEdgeColumns+` FROM asset_relationship ORDER BY relationship_id LIMIT $1`, limit+1)
+	if err != nil {
+		return nil, false, fmt.Errorf("query asset graph edges: %w", err)
+	}
+	defer rows.Close()
+
+	edges := make([]domain.AssetGraphEdge, 0, limit)
+	for rows.Next() {
+		var e domain.AssetGraphEdge
+		var typ string
+		if err := rows.Scan(&e.FromAssetID, &e.ToAssetID, &typ); err != nil {
+			return nil, false, fmt.Errorf("scan asset graph edge: %w", err)
+		}
+		e.Type = domain.RelationshipType(typ)
+		edges = append(edges, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate asset graph edges: %w", err)
+	}
+	if len(edges) > limit {
+		return edges[:limit], true, nil
+	}
+	return edges, false, nil
+}

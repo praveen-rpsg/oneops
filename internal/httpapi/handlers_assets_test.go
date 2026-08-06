@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,6 +40,9 @@ type fakeAssets struct {
 	duplicateGroups                                                []*domain.AssetDuplicateGroup
 	healthReport                                                   *domain.AssetHealthReport
 	lastStaleAfter                                                 time.Duration
+	graphs                                                         int
+	graphErr                                                       error
+	graphResult                                                    *domain.AssetGraph
 }
 
 func (f *fakeAssets) Create(_ context.Context, a *domain.Asset) (*domain.Asset, error) {
@@ -153,9 +157,19 @@ func (f *fakeAssets) Health(_ context.Context, staleAfter time.Duration) (*domai
 	}
 	return &domain.AssetHealthReport{StaleAfter: staleAfter}, nil
 }
+func (f *fakeAssets) Graph(_ context.Context, _, _ int) (*domain.AssetGraph, error) {
+	f.graphs++
+	if f.graphErr != nil {
+		return nil, f.graphErr
+	}
+	if f.graphResult != nil {
+		return f.graphResult, nil
+	}
+	return &domain.AssetGraph{}, nil
+}
 func (f *fakeAssets) touched() int {
 	return f.creates + f.gets + f.lists + f.patches + f.deletes + f.setStatuses + f.histories +
-		f.relCreates + f.relDeletes + f.relFroms + f.relTos + f.upserts + f.exports + f.duplicates + f.healths
+		f.relCreates + f.relDeletes + f.relFroms + f.relTos + f.upserts + f.exports + f.duplicates + f.healths + f.graphs
 }
 
 // Asset is tenant-owned, so the authorization tier is tenant administration —
@@ -1141,5 +1155,152 @@ func TestAssetHealth_NotConfiguredReturns501(t *testing.T) {
 
 	if rec.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAssetGraph_AssemblesDTO proves every response field traces back to a
+// specific domain.AssetGraph value the store returned — a DTO-assembly bug
+// (e.g. swapping status/environment) fails this without touching Postgres.
+func TestAssetGraph_AssemblesDTO(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{graphResult: &domain.AssetGraph{
+		Nodes: []domain.AssetGraphNode{
+			{AssetID: "a1", Name: "db-primary", Type: "server",
+				Status: domain.AssetActive, Environment: domain.AssetEnvironmentProduction, Criticality: domain.AssetCriticalityHigh},
+			{AssetID: "a2", Name: "standalone", Type: "server",
+				Status: domain.AssetPlanned, Environment: domain.AssetEnvironmentUnknown, Criticality: domain.AssetCriticalityUnknown},
+		},
+		Edges: []domain.AssetGraphEdge{
+			{FromAssetID: "a1", ToAssetID: "a2", Type: domain.RelationshipDependsOn},
+		},
+		Truncated: false,
+	}}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/graph", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if spy.graphs != 1 {
+		t.Fatalf("store reached %d time(s), want 1", spy.graphs)
+	}
+	var body assetGraphResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Nodes) != 2 || len(body.Edges) != 1 {
+		t.Fatalf("unexpected shape: %+v", body)
+	}
+	if body.Nodes[0] != (assetGraphNodeDTO{
+		AssetID: "a1", Name: "db-primary", Type: "server",
+		Status: "active", Environment: "production", Criticality: "high",
+	}) {
+		t.Errorf("node[0] = %+v", body.Nodes[0])
+	}
+	if body.Nodes[1] != (assetGraphNodeDTO{
+		AssetID: "a2", Name: "standalone", Type: "server",
+		Status: "planned", Environment: "unknown", Criticality: "unknown",
+	}) {
+		t.Errorf("node[1] (standalone, no edges) = %+v", body.Nodes[1])
+	}
+	if body.Edges[0] != (assetGraphEdgeDTO{FromAssetID: "a1", ToAssetID: "a2", Type: "depends_on"}) {
+		t.Errorf("edge[0] = %+v", body.Edges[0])
+	}
+	if body.Truncated {
+		t.Error("truncated = true, want false")
+	}
+}
+
+// TestAssetGraph_ReportsTruncation proves the truncated flag is passed
+// through, not silently dropped by DTO assembly.
+func TestAssetGraph_ReportsTruncation(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{graphResult: &domain.AssetGraph{Truncated: true}}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/graph", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var body assetGraphResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.Truncated {
+		t.Error("truncated = false, want true")
+	}
+	if body.Nodes == nil || body.Edges == nil {
+		t.Errorf("nodes/edges should be empty arrays, not null: %+v", body)
+	}
+}
+
+// TestAssetGraph_EmptyTenantReturnsCleanEmptyArrays proves the empty-tenant
+// bound: a brand-new tenant with no assets/relationships at all gets 200
+// with empty (never null) arrays and truncated:false.
+func TestAssetGraph_EmptyTenantReturnsCleanEmptyArrays(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/graph", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"nodes":[]`) || !strings.Contains(body, `"edges":[]`) {
+		t.Errorf("empty tenant body = %s, want nodes/edges rendered as empty arrays, not null", body)
+	}
+	if !strings.Contains(body, `"truncated":false`) {
+		t.Errorf("empty tenant body = %s, want truncated:false", body)
+	}
+}
+
+func TestAssetGraph_NotConfiguredReturns501(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/graph", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAssetGraph_StoreErrorMapsToProblem proves a store failure is mapped
+// through s.mapError (RFC 7807), not leaked as a raw 500 with no problem body.
+func TestAssetGraph_StoreErrorMapsToProblem(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeAssets{graphErr: errors.New("boom")}
+	srv.SetAssets(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/assets/graph", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/problem+json" {
+		t.Errorf("content-type = %q, want application/problem+json", ct)
 	}
 }
