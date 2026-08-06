@@ -4,6 +4,7 @@ package httpapi
 
 import (
 	"context"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"time"
@@ -248,11 +249,25 @@ func (s *Server) Router() http.Handler {
 	return otelhttp.NewHandler(s.routes(), "oneops-controlplane")
 }
 
-// routes builds the mux Router serves. It is separate from Router only so the
-// route table stays reachable as a chi.Routes: the OpenAPI contract guard walks
-// it to derive its subject set, and the alternative — restating the routes in a
-// test — is a second list that drifts from this one silently.
+// routes builds the mux Router serves, against the real embedded console
+// asset root. It is separate from Router only so the route table stays
+// reachable as a chi.Routes: the OpenAPI contract guard walks it to derive
+// its subject set, and the alternative — restating the routes in a test — is
+// a second list that drifts from this one silently.
 func (s *Server) routes() *chi.Mux {
+	root, ok := webFS()
+	return s.routesFor(root, ok)
+}
+
+// routesFor builds the mux with an explicit console asset root, so tests can
+// exercise the SPA-fallback wiring (below) deterministically without
+// depending on `make web` having been run first: the unit-test job in
+// .github/workflows/ci.yml runs `go test ./...` on its own, never `pnpm
+// --dir web build` (that is the separate frontend job), so `webdist/`
+// usually holds nothing but its tracked `.gitkeep` when this package's tests
+// run. Production always goes through routes(), which resolves the real
+// embedded assets.
+func (s *Server) routesFor(root fs.FS, consoleBuilt bool) *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(s.recoverer, s.requestID, s.logging, s.metrics.Middleware)
 
@@ -273,9 +288,12 @@ func (s *Server) routes() *chi.Mux {
 	// The console, when built, is served from this origin so the browser and the
 	// API share it — no CORS layer required. Falls back to the JSON service
 	// descriptor when the console has not been built.
-	if root, ok := webFS(); ok {
-		r.Get("/", serveConsoleIndex(root))
+	var spaFallback http.HandlerFunc
+	if consoleBuilt {
+		index := serveConsoleIndex(root)
+		r.Get("/", index)
 		r.Handle("/assets/*", serveConsoleAssets(root))
+		spaFallback = index
 	} else {
 		r.Get("/", s.serveRoot)
 	}
@@ -303,6 +321,15 @@ func (s *Server) routes() *chi.Mux {
 		// throttled without being able to starve any other tenant's share of
 		// this instance's capacity.
 		rt.Use(s.rateLimit)
+
+		// An unmatched /v1 path is a genuine API 404, never the SPA fallback
+		// below: this scoped NotFoundHandler (wrapped by this group's own
+		// invariantGate/authenticate/rateLimit middleware, like every route
+		// above it) takes precedence over the top-level one, so a client
+		// error path never resolves as HTML.
+		rt.NotFound(func(w http.ResponseWriter, r *http.Request) {
+			writeProblem(w, r, http.StatusNotFound, "not found", "no such resource")
+		})
 		rt.With(s.requirePermission(auth.PermRead)).Get("/artifacts", s.listArtifacts)
 		rt.With(s.requirePermission(auth.PermRead)).Get("/artifacts/{id}", s.getArtifact)
 		rt.With(s.requirePermission(auth.PermWrite)).Post("/artifacts", s.createArtifact)
@@ -608,6 +635,26 @@ func (s *Server) routes() *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/compliance/{governanceID}", s.getComplianceSummary)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/compliance/{governanceID}/evidence", s.getComplianceEvidence)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/compliance/{governanceID}/checks", s.getComplianceChecks)
+	})
+
+	// SPA fallback: react-router owns client-side routes (/noc, /artifacts/:id,
+	// /incidents — ADR-UI-001) that this Go router never registers. Without
+	// this, a deep link or a browser refresh on any of them hits this 404
+	// handler and gets a bare 404 instead of the console shell, which then
+	// takes over client-side — exactly what "/" already gets on first load.
+	// It never intercepts /v1: that group has its own NotFoundHandler above,
+	// which chi matches first for any path under the /v1 mount, and a
+	// request that legitimately doesn't match anything else here (a typo'd
+	// /assets/ file, /docs, pprof, etc.) is not a react-router concern either
+	// — this only ever fires for a path this router owns nothing of at all.
+	// Only GET/HEAD get the HTML shell; any other method on an unmatched path
+	// is a genuine client error, so it stays the ordinary JSON problem.
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		if spaFallback != nil && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			spaFallback(w, r)
+			return
+		}
+		writeProblem(w, r, http.StatusNotFound, "not found", "no such resource")
 	})
 
 	return r

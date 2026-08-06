@@ -101,9 +101,60 @@ active on-call schedules'" — carried forward, not reinvented.
 serveNOCPage)` registration in `internal/httpapi/server.go` is removed;
 `contract_test.go`'s scope comment no longer lists `/noc` among the
 non-`/v1` operational surfaces, and instead notes this story retired it. No
-replacement Go route is added — `/noc` now 404s; the equivalent screen lives
-at the console's `/noc` client-side route (a different origin path
-under the same server, served by the SPA's catch-all, not a new Go handler).
+replacement Go route is added for `/noc` specifically — it is now one of the
+paths the SPA fallback below resolves, like every other client-side route.
+
+### 7. A deep link or refresh on `/noc` (or any client-side route) must resolve — the SPA-fallback gap this retirement exposed
+
+Removing the real `r.Get("/noc", serveNOCPage)` route surfaced a latent gap
+from ADR-UI-001 (E7-UI.0): that story gave the console real client-side
+routes (`/noc`, `/artifacts/:id`, `/incidents`, react-router) but the Go
+server still only ever matched `/` — there was no server-side fallback, so a
+direct load or a browser refresh of any non-`/` console route 404'd at the
+Go router before react-router ever ran. `/noc` had been masked by its own
+now-deleted real route; every other client-side route was already broken
+the same way, invisibly.
+
+Fixed with the conventional SPA-hosting pattern: `internal/httpapi/server.go`
+now registers a router-wide `NotFound` handler that serves the same
+`index.html` `"/"` already does, for any unmatched request whose method is
+`GET`/`HEAD` and console assets are built — the same shell a first `"/"`
+load gets, so react-router mounts and resolves the deep-linked route
+client-side (or renders its own not-found fallback for a genuinely bogus
+path — a server can't tell "/noc" from "/typo-nonsense" any better than
+`nginx try_files` can; that decision belongs to react-router, not this
+router). Two things are load-bearing about where this handler sits:
+
+- **It never shadows `/v1`.** The `/v1` route group gets its **own**
+  `rt.NotFound`, registered inside `r.Route("/v1", ...)` where it inherits
+  that group's `invariantGate`/`authenticate`/`rateLimit` middleware exactly
+  like every route above it — chi resolves an unmatched path under a mounted
+  group through the group's own `NotFoundHandler`, never the parent's, so an
+  unknown `/v1` path (or one blocked by auth first) keeps answering with the
+  ordinary RFC 7807 JSON problem it always has, never the HTML shell.
+- **It degrades safely when the console isn't built.** `routes()` was split
+  into `routes()` (resolves the real embedded `webdist/` via `webFS()`) and a
+  new `routesFor(root fs.FS, consoleBuilt bool)` that everything else calls —
+  so a non-GET method, or any request when `consoleBuilt` is false, still
+  gets the ordinary JSON 404, matching the pre-existing "console not built"
+  posture `serveRoot` already had for `"/"`.
+
+This split also fixed a reproducible **test-suite hazard exposed while
+implementing it**: three pre-existing tests
+(`TestInfraEndpoints`/`TestPProf_DisabledByDefault`/
+`TestDiagnostics_NotMountedUntilSet`) asserted a plain 404 on an arbitrary
+unmatched path by calling `Server.Router()`, which resolves `webFS()`
+against whatever happens to be sitting in `internal/httpapi/webdist/` at
+`go test` compile time. `.github/workflows/ci.yml` never builds the console
+before its Go unit-test job (that is a separate `frontend` job), so this is
+invisible in CI either way — but a developer who runs `make web` and then
+`make test` locally, in that order, would see these three tests fail
+nondeterministically depending on a leftover build artifact, which is
+precisely the sequence this story's own evidence-gathering calls for. Both
+harnesses (`newTestAPI` in `handlers_test.go`, `opsServer` in
+`ops_wiring_test.go`) now call `s.routesFor(nil, false)` explicitly, pinning
+"console not built" so their outcome no longer depends on ambient
+filesystem state.
 
 ## What this story explicitly does not do
 
@@ -163,19 +214,54 @@ summary (ADR-NOC-001's own deferral, unchanged), no per-domain drill-down
   `internal/httpapi/noc_page_test.go`; `internal/httpapi/server.go`'s `/noc`
   route registration removed; `internal/httpapi/contract_test.go`'s scope
   comment updated.
-- `go build ./...` and `make test` (full suite, `-race`) — green after the
-  deletion, including `internal/httpapi` and `internal/arch`.
+- `internal/httpapi/server.go` — `routes()`/`routesFor` split, the `/v1`
+  group's own `rt.NotFound`, and the router-wide SPA-fallback `r.NotFound`.
+  `internal/httpapi/web.go` — `serveConsoleIndex`'s doc comment updated to
+  describe its dual role (first load and fallback body).
+- `internal/httpapi/spa_fallback_test.go` (new) — `GET /noc` and
+  `GET /artifacts/<anything>` serve the console shell (200, `text/html`);
+  `GET /v1/definitely-not-a-route` (authenticated) stays a `404`
+  `application/problem+json`, never the shell; a non-GET on an unmatched
+  path stays JSON; the console-unbuilt case degrades to JSON 404 rather than
+  panicking. Uses `routesFor` with a synthetic `fstest.MapFS` root, not
+  `routes()`/`Router()`, so the assertions do not depend on `make web`
+  having been run.
+- `internal/httpapi/handlers_test.go` (`newTestAPI`) and
+  `internal/httpapi/ops_wiring_test.go` (`opsServer`) — switched from
+  `Router()` to `routesFor(nil, false)` so `TestInfraEndpoints`,
+  `TestPProf_DisabledByDefault` and `TestDiagnostics_NotMountedUntilSet`
+  (which all assert a plain 404 on an unmatched path) no longer depend on
+  whether `internal/httpapi/webdist/` happens to hold a built console —
+  verified failing before this change (when run right after `make web`) and
+  passing after, in both the "console built" and "console not built" states.
+- Live proof (`ONEOPS_AUTH_ENABLED=false`, server built and run against
+  local Postgres): `curl -s -o /dev/null -w '%{http_code} %{content_type}'
+  http://localhost:8080/noc` → `200 text/html; charset=utf-8`;
+  `.../artifacts/anything` → same; `curl ... /v1/nope` → `404
+  application/problem+json` with body
+  `{"type":"about:blank","title":"not found","status":404,...}`; `/` → `200`
+  unchanged; `/assets/nope.js` → `404` (the asset file-server's own 404, not
+  swallowed into the shell — it matches the `/assets/*` route, so it never
+  reaches this fallback).
+- `go build ./...` and `make test` (full suite, `-race`) — green both with
+  and without `webdist/` built, including `internal/httpapi` and
+  `internal/arch`.
 - `go test ./internal/httpapi/... -run TestOpenAPIContract -v` —
   `TestOpenAPIContract_CoversEveryServedRoute` and
-  `..._PromisesNothingItDoesNotServe` both pass without `/noc`.
+  `..._PromisesNothingItDoesNotServe` both pass without `/noc`, unaffected by
+  the SPA fallback (it is entirely outside `/v1`).
 - `make contract-breaking BASE_REF=master` — no breaking diff (this story
   makes no OpenAPI change).
+- `make lint` — 0 issues.
 
 ## Enforcement
 
 - `web/src/routes/NOCOverviewPage.test.tsx` under `make web-test` — this
   ADR's own claims about widget rendering, empty states, error handling, and
   non-overlapping poll/refresh, checked on every build.
+- `internal/httpapi/spa_fallback_test.go` — pins that every client-side
+  console route stays deep-linkable and that `/v1` never resolves as HTML,
+  the two properties this ADR's SPA-fallback section claims.
 - `httpapi.TestOpenAPIContract_CoversEveryServedRoute` /
   `..._PromisesNothingItDoesNotServe` — unchanged in intent, now passing
   without `/noc`, confirming its removal introduced no `/v1` drift.

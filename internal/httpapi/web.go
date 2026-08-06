@@ -25,12 +25,12 @@ func webFS() (fs.FS, bool) {
 	return sub, true
 }
 
-// serveConsoleIndex serves the console shell at "/".
-//
-// There is deliberately no catch-all fallback: the console is a single screen
-// today, so an unknown path is a genuine 404 and must stay JSON for API clients
-// and probes. A fallback is added when client-side routing arrives, scoped to
-// the prefixes the router actually owns.
+// serveConsoleIndex serves the console shell at "/", and — since E7-UI.0
+// introduced client-side routing (react-router) — doubles as the SPA
+// fallback body for any client-side route (server.go's routesFor wires it
+// as both). A deep link or refresh on /noc, /artifacts/:id, etc. must
+// resolve to this same shell so react-router can take over; /v1 and every
+// other operational path is unaffected (see routesFor's own comment).
 func serveConsoleIndex(root fs.FS) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		index, err := fs.ReadFile(root, "index.html")
