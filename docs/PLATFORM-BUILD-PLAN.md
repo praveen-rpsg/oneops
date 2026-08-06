@@ -231,6 +231,7 @@ Stateful work items on the workflow + state-machine primitives.
 - [ ] E-HARD.4 **Bundle code-splitting** (frontend) — route-based lazy-loading so chunks fall under Vite's 500KB warning (~369KB gzip today, one chunk).
 - [ ] E-HARD.5 **Delete-without-row_version** (Go, larger — do only if worth it) — thread an optional `row_version` through the Delete paths (alert-rule, maintenance-window, on-call-participant, escalation-tier) for optimistic-lock symmetry; OR consciously accept + document the asymmetry as fine for these low-contention deletes.
 - [ ] E-HARD.6 **Frontend gate in CI** — wire `make web-test` (+ a self-contained-bundle check) into the main test/CI flow so a UI regression fails the build, not just the Go suite.
+- [ ] E-HARD.7 **TopologyPage split-panel staleness** (frontend, REAL bug found by E-HARD.1/ADR-HARD-001) — `web/src/routes/TopologyPage.tsx` `selectNode` materializes the incident/health overlay into an opaque `ReactNode` at CLICK time and hands it to `Shell.openSplitPanel`; if the two overlay fetches (`listIncidents`/`getAssetHealth`) resolve AFTER the click, the node detail shows stale/incomplete overlay and never refreshes without a re-click. Make the split-panel content reactive (subscribe to the overlay state / re-render on data arrival) rather than a captured snapshot. Add a test that a click before overlay-resolve still shows the resolved overlay.
 
 ### E8 — SOC / Security Platform  `[ ]`
 - [ ] E8.1 Security event ingestion + SIEM correlation (reuses E2/E4 patterns, security-scoped)
