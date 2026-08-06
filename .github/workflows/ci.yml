@@ -191,6 +191,22 @@ jobs:
         run: pnpm --dir web exec vitest run
       - name: build bundle
         run: pnpm --dir web build
+      - name: self-contained bundle (no runtime CDN)
+        # The console ships embedded in the Go binary via go:embed (ADR-UI-001);
+        # a runtime CDN reference would break offline/air-gapped deploys and the
+        # security posture. Fail if the built assets reference any external host
+        # beyond the documented-inert set (namespace URIs, framework error-decoder
+        # doc links, and a bundled-font license comment — none are fetched at runtime).
+        run: |
+          hits=$(grep -rEoh 'https?://[a-zA-Z0-9.-]+' internal/httpapi/webdist/assets/ 2>/dev/null \
+            | sed -E 's#^https?://##' | sort -u \
+            | grep -vE '^(www\.)?(w3\.org|reactjs\.org|react\.dev|fonts\.google\.com|github\.com)$' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Built console bundle references external host(s) — a runtime CDN is not allowed under go:embed (ADR-UI-001):"
+            echo "$hits"
+            exit 1
+          fi
+          echo "console bundle is self-contained (no external host beyond the documented-inert allowlist)"
 
   docker:
     runs-on: ubuntu-latest
