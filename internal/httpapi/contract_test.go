@@ -28,8 +28,10 @@ import (
 // updated — the sweep cannot go stale by someone forgetting to extend a list.
 //
 // Scope is /v1 only. /healthz, /readyz, /metrics, /openapi.yaml, /docs, /,
-// /noc, /auth/config, /internal/diagnostics and /debug/pprof are operational
+// /auth/config, /internal/diagnostics and /debug/pprof are operational
 // or discovery surfaces, deliberately outside the versioned API contract.
+// (/noc, the vanilla NOC stopgap, was retired in E7-UI.1 — ADR-NOC-003 — once
+// the Cloudscape NOC screen at web/src/routes/NOCOverviewPage.tsx replaced it.)
 
 // routesFromRouter walks the fully-wired router and returns "METHOD /v1/path"
 // for every versioned operation it serves.

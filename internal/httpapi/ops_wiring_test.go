@@ -25,7 +25,14 @@ func opsServer(t *testing.T, pprofEnabled bool, diag http.Handler) http.Handler 
 	if diag != nil {
 		s.SetDiagnostics(diag)
 	}
-	return s.Router()
+	// routesFor(nil, false), not Router(): these tests assert 404 on paths this
+	// story's SPA fallback (server.go) would otherwise answer for whenever the
+	// console happens to be built on disk (`internal/httpapi/webdist/`) — which
+	// `go test` alone never guarantees either way, since building the console is
+	// a separate job from the unit tests (.github/workflows/ci.yml). Pinning
+	// "console not built" keeps this pprof/diagnostics wiring test deterministic
+	// regardless of whether `make web` was run first in this checkout.
+	return s.routesFor(nil, false)
 }
 
 func TestPProf_DisabledByDefault(t *testing.T) {

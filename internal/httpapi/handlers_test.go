@@ -218,7 +218,14 @@ func newTestServer(authEnabled bool) (*Server, *fakeRepo) {
 
 func newTestAPI(authEnabled bool) (http.Handler, *fakeRepo) {
 	s, repo := newTestServer(authEnabled)
-	return s.Router(), repo
+	// routesFor(nil, false), not Router(): TestInfraEndpoints asserts a plain
+	// 404 for an arbitrary unknown path, which the SPA fallback (server.go)
+	// would otherwise answer for whenever the console happens to be built on
+	// disk (`internal/httpapi/webdist/`) — build state `go test` alone never
+	// controls, since building the console is a separate job
+	// (.github/workflows/ci.yml). Pinning "console not built" keeps this
+	// deterministic regardless of whether `make web` was run first.
+	return s.routesFor(nil, false), repo
 }
 
 func do(h http.Handler, method, path string, body any, headers map[string]string) *httptest.ResponseRecorder {
