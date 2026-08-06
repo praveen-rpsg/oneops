@@ -3,7 +3,7 @@ import { renderApp } from './test-render';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import createWrapper from '@cloudscape-design/components/test-utils/dom';
 import type { IncidentDTO, IncidentEventDTO } from './incidents';
-import type { UserDTO } from './users';
+import type { TenantUserDTO } from './users';
 
 // Exercises the write-action pattern E-ACT.1/ADR-ACT-001 establishes
 // (optimistic-lock row_version round-trip, legal-transition gating,
@@ -30,20 +30,16 @@ const rootTimeline: IncidentEventDTO[] = [
   { event_id: 'EV-1', incident_id: 'INC-1', kind: 'created', actor: 'operator', row_version: 1, occurred_at: '2026-08-06T08:00:00Z' },
 ];
 
-const alice: UserDTO = {
+const alice: TenantUserDTO = {
   user_id: 'U-ALICE',
   email: 'alice@example.com',
   display_name: 'Alice',
-  status: 'active',
-  row_version: 1,
-  created_at: '2026-08-06T00:00:00Z',
-  updated_at: '2026-08-06T00:00:00Z',
 };
 
 interface Fixture {
   list?: unknown;
   initial: IncidentDTO;
-  users?: UserDTO[] | 'ERROR';
+  users?: TenantUserDTO[] | 'ERROR';
   /** 'OK' (default) applies the requested change; 'CONFLICT'/'ERROR' short-circuit every transition/assign call. */
   transitionResult?: 'OK' | 'CONFLICT' | 'ERROR';
   assignResult?: 'OK' | 'CONFLICT' | 'ERROR';
@@ -70,8 +66,8 @@ function routedFetch(fx: Fixture) {
 
     if (u.includes('/auth/config')) return ok({ auth_enabled: false });
 
-    if (u.includes('/admin/users')) {
-      if (fx.users === 'ERROR') return fail(403, { title: 'forbidden', detail: 'missing permission: platform:admin' });
+    if (u.includes('/admin/tenant-users')) {
+      if (fx.users === 'ERROR') return fail(403, { title: 'forbidden', detail: 'missing permission: admin' });
       return ok({ items: fx.users ?? [] });
     }
 

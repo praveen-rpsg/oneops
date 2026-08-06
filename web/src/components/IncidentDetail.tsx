@@ -21,8 +21,8 @@ import {
 } from '../incidents';
 import type { IncidentDTO, IncidentEventDTO, IncidentStatus } from '../incidents';
 import { humanise, SEVERITY_TYPE, STATUS_TYPE } from '../incidentPresentation';
-import { listUsers } from '../users';
-import type { UserDTO } from '../users';
+import { listTenantUsers } from '../users';
+import type { TenantUserDTO } from '../users';
 import { ErrorState } from './States';
 
 /** Absolute time is the evidence; relative time is the convenience — mirrors AuditTimeline's own `when()`. */
@@ -96,11 +96,11 @@ const CONSEQUENTIAL: Partial<Record<IncidentStatus, string>> = {
 const UNASSIGNED_OPTION: SelectProps.Option = { value: '', label: 'Unassigned' };
 
 /**
- * The assignee control (ADR-ACT-001 §2). Tries the platform user directory
- * for a proper `Select`; on ANY load failure (403 is the expected one for a
- * tenant-scoped operator — see users.ts's doc comment on the confirmed
- * `requirePlatformAdmin` gap) degrades to a free-text user-id `Input` so
- * assignment still works, honestly labelled rather than silently broken.
+ * The assignee control (ADR-ACT-001 §2, rewired onto the tenant-scoped
+ * directory in E-ACT.4/ADR-ACT-003). Tries `GET /v1/admin/tenant-users` for a
+ * proper `Select`; on ANY load failure degrades to a free-text user-id
+ * `Input` so assignment still works, honestly labelled rather than silently
+ * broken.
  */
 function AssigneeControl({
   incident,
@@ -111,7 +111,7 @@ function AssigneeControl({
   busy: boolean;
   onAssign: (assigneeUserId: string | null) => void;
 }) {
-  const [users, setUsers] = useState<UserDTO[] | null>(null);
+  const [users, setUsers] = useState<TenantUserDTO[] | null>(null);
   const [directoryFailed, setDirectoryFailed] = useState(false);
   const [selected, setSelected] = useState(incident.assignee_user_id ?? '');
 
@@ -121,7 +121,7 @@ function AssigneeControl({
 
   useEffect(() => {
     const ctrl = new AbortController();
-    listUsers(200, ctrl.signal)
+    listTenantUsers(200, ctrl.signal)
       .then((page) => setUsers(page.items ?? []))
       .catch(() => {
         if (!ctrl.signal.aborted) setDirectoryFailed(true);

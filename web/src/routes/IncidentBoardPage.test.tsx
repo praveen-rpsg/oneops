@@ -72,7 +72,7 @@ function routedFetch(fx: Fixture = {}) {
 
     if (u.includes('/auth/config')) return ok({ auth_enabled: false });
 
-    if (u.includes('/admin/users')) return ok({ items: [] });
+    if (u.includes('/admin/tenant-users')) return ok({ items: [] });
 
     if (method === 'POST' && /\/admin\/incidents$/.test(u)) {
       if (fx.create === 'ERROR') {
