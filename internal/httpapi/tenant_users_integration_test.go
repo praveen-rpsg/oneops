@@ -226,6 +226,60 @@ func (h *tenantUsersHarness) get(t *testing.T, tn *domain.Tenant, query string) 
 	return tenantUsersGet(t, h.router, tn, query)
 }
 
+// maxTenantUsersPagesToWalk bounds tenantUsersFindAcrossAllPages's loop. At
+// maxMembershipPageSize (500) rows per page this tolerates a 500,000-row
+// accumulated directory before treating a still-unexhausted walk as a bug in
+// the paging loop itself rather than legitimate data — comfortably above
+// anything this suite's own fixtures could ever produce.
+const maxTenantUsersPagesToWalk = 1000
+
+// tenantUsersFindAcrossAllPages walks EVERY page of GET /admin/tenant-users
+// (as tn's admin, against router r) via the keyset `after` cursor, and
+// reports whether wantUserID appears anywhere in the whole collection —
+// not just the first page.
+//
+// This is the fix for a test-robustness defect (not a production one): the
+// mutation canary below runs against a PRIVILEGED, unscoped MembershipStore
+// on purpose, so it correctly returns EVERY tenant's active members ever
+// created against this suite's persistent dev database, not just this run's
+// fixture. user_id is a ULID, so a freshly-created leaked row sorts near the
+// END of that accumulated set once the database holds more than one page's
+// worth of history — a first-page-only presence check is therefore only
+// reliable against a database freshly reset for this test, which this
+// harness's shared, non-truncating schema deliberately is not (the same
+// class of non-idempotency TestIncidentTrendsAPI_TenantIsolation_BitesWhenLoosened's
+// own presence-based, not exact-count, check exists to tolerate). Walking
+// every page finds the target wherever it landed, regardless of how much
+// prior run history the database has accumulated.
+func tenantUsersFindAcrossAllPages(t *testing.T, r http.Handler, tn *domain.Tenant, wantUserID string) (found bool, pagesWalked int) {
+	t.Helper()
+	after := ""
+	for pagesWalked = 0; pagesWalked < maxTenantUsersPagesToWalk; pagesWalked++ {
+		q := "limit=500"
+		if after != "" {
+			q += "&after=" + after
+		}
+		rec, items := tenantUsersGet(t, r, tn, q)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("page %d: status = %d, want 200: %s", pagesWalked, rec.Code, rec.Body.String())
+		}
+		for _, it := range items {
+			if it.UserID == wantUserID {
+				return true, pagesWalked + 1
+			}
+		}
+		if len(items) < 500 {
+			// A short page is the last one: the collection is exhausted.
+			return false, pagesWalked + 1
+		}
+		after = items[len(items)-1].UserID
+	}
+	t.Fatalf("walked %d pages without exhausting the collection or finding %q — "+
+		"either the paging loop is not advancing, or the accumulated fixture data has grown "+
+		"implausibly large", maxTenantUsersPagesToWalk, wantUserID)
+	return false, pagesWalked
+}
+
 func userIDs(items []tenantUserDTO) []string {
 	out := make([]string, 0, len(items))
 	for _, it := range items {
@@ -411,17 +465,16 @@ func TestTenantUsersAPI_TenantIsolation_BitesWhenLoosened(t *testing.T) {
 	loose.SetTenantUserDirectory(postgres.NewMembershipStore(loosePool))
 	looseRouter := loose.Router()
 
-	_, gotA := tenantUsersGet(t, looseRouter, tnA, "")
-	leaked := false
-	for _, it := range gotA {
-		if it.UserID == bB.UserID {
-			leaked = true
-		}
-	}
+	// Walk EVERY page, not just the first: the loosened router returns every
+	// tenant's active members ever created against this suite's persistent
+	// dev database, and bB's freshly-minted ULID can sort well past page one
+	// once that accumulated history exceeds it — see
+	// tenantUsersFindAcrossAllPages's own doc comment.
+	leaked, pagesWalked := tenantUsersFindAcrossAllPages(t, looseRouter, tnA, bB.UserID)
 	if !leaked {
-		t.Fatal("expected the LOOSENED router (privileged pool, no tenant scoping) to leak tenant B's " +
-			"member into tenant A's directory; it did not, which means this canary no longer proves the " +
-			"real harness's isolation is load-bearing")
+		t.Fatalf("expected the LOOSENED router (privileged pool, no tenant scoping) to leak tenant B's "+
+			"member into tenant A's directory across %d page(s); it did not, which means this canary no "+
+			"longer proves the real harness's isolation is load-bearing", pagesWalked)
 	}
 }
 
