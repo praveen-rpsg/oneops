@@ -1,4 +1,4 @@
-import { getJSON } from './api';
+import { getJSON, postJSON } from './api';
 
 // Typed contract for GET /v1/admin/incidents{,/{id},/{id}/timeline}.
 // Mirrors internal/httpapi/handlers_incidents.go's incidentDTO/incidentEventDTO
@@ -92,6 +92,90 @@ export function getIncidentTimeline(
 ): Promise<{ items: IncidentEventDTO[] }> {
   return getJSON<{ items: IncidentEventDTO[] }>(
     `/v1/admin/incidents/${encodeURIComponent(incidentId)}/timeline`,
+    signal,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Write actions (E-ACT.1, ADR-ACT-001). Every mutation below sends the
+// `row_version` the caller last read back to the server (optimistic locking)
+// and returns the server's own post-mutation incidentDTO — the caller is
+// expected to treat that response, or a fresh GET, as the new truth rather
+// than assuming its own request succeeded exactly as sent.
+
+/**
+ * The whole lifecycle, as data — a client-side mirror of
+ * `domain.incidentTransitions` (internal/domain/incident.go). Kept in
+ * lock-step with the Go table deliberately: this is the ONLY thing that gates
+ * which transition buttons the console offers, so an entry here that drifts
+ * from the server's own `CanTransitionTo` would either offer an illegal move
+ * (caught late, as a 409) or hide a legal one. There is no runtime way to
+ * derive this from the server today (no "legal next states" field on
+ * incidentDTO), so it is restated here rather than fetched.
+ */
+export const INCIDENT_TRANSITIONS: Record<IncidentStatus, IncidentStatus[]> = {
+  open: ['acknowledged'],
+  acknowledged: ['investigating'],
+  investigating: ['resolved'],
+  resolved: ['closed', 'reopened'],
+  reopened: ['investigating'],
+  closed: [],
+};
+
+/** The legal next statuses from `status` — never anything `INCIDENT_TRANSITIONS` doesn't list. */
+export function legalTransitions(status: IncidentStatus): IncidentStatus[] {
+  return INCIDENT_TRANSITIONS[status];
+}
+
+export interface CreateIncidentInput {
+  title: string;
+  description?: string;
+  severity: IncidentSeverity;
+  asset_id?: string;
+  assignee_user_id?: string;
+}
+
+/** POST /v1/admin/incidents — createIncidentRequest (handlers_incidents.go); always opens IncidentOpen. */
+export function createIncident(input: CreateIncidentInput, signal?: AbortSignal): Promise<IncidentDTO> {
+  return postJSON<IncidentDTO>('/v1/admin/incidents', input, signal);
+}
+
+/**
+ * POST /v1/admin/incidents/{id}/transition — transitionIncidentRequest.
+ * `rowVersion` MUST be the value last read for this incident; a stale one
+ * returns 409 (handlers_incidents.go maps both `ErrVersionMismatch` and
+ * `ErrInvalidTransition` to 409 for this endpoint specifically — unlike the
+ * governance surface's 412 — so callers treat "someone else changed it" and
+ * "this move is no longer legal" identically: refetch, never blind-retry).
+ */
+export function transitionIncident(
+  incidentId: string,
+  status: IncidentStatus,
+  rowVersion: number,
+  signal?: AbortSignal,
+): Promise<IncidentDTO> {
+  return postJSON<IncidentDTO>(
+    `/v1/admin/incidents/${encodeURIComponent(incidentId)}/transition`,
+    { row_version: rowVersion, status },
+    signal,
+  );
+}
+
+/**
+ * POST /v1/admin/incidents/{id}/assign — assignIncidentRequest. `assigneeUserId`
+ * null clears the assignment (the server distinguishes "clear" from "leave
+ * unchanged" — there is no "leave unchanged" option on this endpoint at all,
+ * see assignIncidentRequest's own doc comment).
+ */
+export function assignIncident(
+  incidentId: string,
+  assigneeUserId: string | null,
+  rowVersion: number,
+  signal?: AbortSignal,
+): Promise<IncidentDTO> {
+  return postJSON<IncidentDTO>(
+    `/v1/admin/incidents/${encodeURIComponent(incidentId)}/assign`,
+    { row_version: rowVersion, assignee_user_id: assigneeUserId },
     signal,
   );
 }

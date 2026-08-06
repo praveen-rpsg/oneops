@@ -1,6 +1,7 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { renderApp } from '../test-render';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import createWrapper from '@cloudscape-design/components/test-utils/dom';
 import type { IncidentDTO, IncidentEventDTO } from '../incidents';
 
 const incident = (over: Partial<IncidentDTO> = {}): IncidentDTO => ({
@@ -58,14 +59,37 @@ interface Fixture {
   list?: unknown;
   detail?: Record<string, IncidentDTO>;
   timeline?: Record<string, { items: IncidentEventDTO[] }>;
+  /** 'ERROR' makes POST /v1/admin/incidents fail 422, as a bad severity/empty title would. */
+  create?: 'ERROR';
 }
 
 function routedFetch(fx: Fixture = {}) {
-  return vi.fn().mockImplementation(async (url: string) => {
+  const created: Record<string, IncidentDTO> = {};
+  return vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
     const u = String(url);
-    const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+    const method = init?.method ?? 'GET';
+    const ok = (body: unknown, status = 200) => ({ ok: true, status, json: async () => body });
 
     if (u.includes('/auth/config')) return ok({ auth_enabled: false });
+
+    if (u.includes('/admin/users')) return ok({ items: [] });
+
+    if (method === 'POST' && /\/admin\/incidents$/.test(u)) {
+      if (fx.create === 'ERROR') {
+        return { ok: false, status: 422, json: async () => ({ title: 'validation failed', status: 422, detail: 'title must not be empty' }) };
+      }
+      const body = JSON.parse(String(init?.body)) as { title: string; description?: string; severity: string; asset_id?: string };
+      const inc = incident({
+        incident_id: 'INC-NEW',
+        title: body.title,
+        description: body.description ?? '',
+        severity: body.severity as IncidentDTO['severity'],
+        asset_id: body.asset_id,
+        row_version: 1,
+      });
+      created[inc.incident_id] = inc;
+      return ok(inc, 201);
+    }
 
     const timelineMatch = u.match(/incidents\/([^/?]+)\/timeline/);
     if (timelineMatch) {
@@ -74,7 +98,8 @@ function routedFetch(fx: Fixture = {}) {
 
     const detailMatch = u.match(/admin\/incidents\/([^/?]+)/);
     if (detailMatch) {
-      const body = fx.detail?.[detailMatch[1]];
+      const id = detailMatch[1];
+      const body = fx.detail?.[id] ?? created[id];
       if (!body) return { ok: false, status: 404, json: async () => ({ title: 'not found', status: 404 }) };
       return ok(body);
     }
@@ -161,5 +186,74 @@ describe('incident board', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
 
     await vi.waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBefore));
+  });
+});
+
+// E-ACT.1 / ADR-ACT-001: "Create incident" — the fourth write action this
+// story adds. Title required, everything else optional; posts to
+// createIncident and, on success, refetches the board and opens the new
+// incident's detail rather than leaving the operator to find it themselves.
+describe('create incident', () => {
+  it('is disabled until a title is entered', async () => {
+    vi.stubGlobal('fetch', routedFetch({ list: { items: [standalone] } }));
+    renderApp();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create incident' }));
+    const dialog = await screen.findByRole('dialog');
+
+    expect(within(dialog).getByRole('button', { name: 'Create' })).toBeDisabled();
+  });
+
+  it('posts the form and opens the new incident', async () => {
+    const f = routedFetch({ list: { items: [standalone] } });
+    vi.stubGlobal('fetch', f);
+    renderApp();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create incident' }));
+    const dialog = await screen.findByRole('dialog');
+
+    fireEvent.change(within(dialog).getByLabelText('Title'), { target: { value: 'New API outage' } });
+
+    const severitySelect = createWrapper(dialog).findAllSelects()[0];
+    act(() => severitySelect.openDropdown());
+    act(() => severitySelect.selectOptionByValue('critical'));
+
+    const listCallsBefore = f.mock.calls.filter(([u]) => String(u).includes('/admin/incidents?')).length;
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    const createCall = f.mock.calls.find(
+      ([u, init]) => String(u).endsWith('/admin/incidents') && (init as RequestInit | undefined)?.method === 'POST',
+    )!;
+    expect(JSON.parse(String((createCall[1] as RequestInit).body))).toEqual({
+      title: 'New API outage',
+      description: undefined,
+      severity: 'critical',
+      asset_id: undefined,
+    });
+
+    // The board reloaded its list...
+    await waitFor(() =>
+      expect(f.mock.calls.filter(([u]) => String(u).includes('/admin/incidents?')).length).toBeGreaterThan(
+        listCallsBefore,
+      ),
+    );
+    // ...and the new incident's own detail opened in the split panel.
+    expect(await screen.findByRole('heading', { name: 'New API outage' })).toBeInTheDocument();
+  });
+
+  it('surfaces a validation error instead of closing the dialog', async () => {
+    vi.stubGlobal('fetch', routedFetch({ list: { items: [standalone] }, create: 'ERROR' }));
+    renderApp();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create incident' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('Title'), { target: { value: 'x' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('title must not be empty');
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 });

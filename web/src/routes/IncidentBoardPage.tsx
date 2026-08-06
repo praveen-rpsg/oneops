@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
+import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
+import Form from '@cloudscape-design/components/form';
+import FormField from '@cloudscape-design/components/form-field';
 import Header from '@cloudscape-design/components/header';
+import Input from '@cloudscape-design/components/input';
+import Modal from '@cloudscape-design/components/modal';
 import Pagination from '@cloudscape-design/components/pagination';
 import Select from '@cloudscape-design/components/select';
 import type { SelectProps } from '@cloudscape-design/components/select';
@@ -10,6 +15,7 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Table from '@cloudscape-design/components/table';
 import type { TableProps } from '@cloudscape-design/components/table';
+import Textarea from '@cloudscape-design/components/textarea';
 import type { ShellSplitPanelContext } from '../Shell';
 import { ApiError } from '../api';
 import type { ProblemDetail } from '../api';
@@ -18,8 +24,14 @@ import { ErrorState } from '../components/States';
 import type { GroupedIncident } from '../incidentGrouping';
 import { groupIncidents } from '../incidentGrouping';
 import { ageLabel, humanise, SEVERITY_RANK, SEVERITY_TYPE, STATUS_RANK, STATUS_TYPE } from '../incidentPresentation';
-import { INCIDENT_LIST_CAP, INCIDENT_STATUSES, listIncidents } from '../incidents';
-import type { IncidentDTO, IncidentStatus } from '../incidents';
+import {
+  createIncident,
+  INCIDENT_LIST_CAP,
+  INCIDENT_SEVERITIES,
+  INCIDENT_STATUSES,
+  listIncidents,
+} from '../incidents';
+import type { IncidentDTO, IncidentSeverity, IncidentStatus } from '../incidents';
 
 /** Client-side page size over the already-fetched, already-grouped set (see incidents.ts' INCIDENT_LIST_CAP). */
 const PAGE_SIZE = 20;
@@ -54,11 +66,123 @@ function IncidentsEmpty({ status, onShowAll }: { status: IncidentStatus | ''; on
   );
 }
 
+const SEVERITY_OPTIONS: SelectProps.Option[] = INCIDENT_SEVERITIES.map((s) => ({ value: s, label: humanise(s) }));
+
+/**
+ * "Create incident" (ADR-ACT-001 §4): title required, everything else
+ * optional, POSTs to `createIncident` and hands the server's own created
+ * record back to the caller — the board reloads and, if the caller asks,
+ * opens the new incident's detail immediately.
+ */
+function CreateIncidentModal({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (inc: IncidentDTO) => void;
+}) {
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [severity, setSeverity] = useState<IncidentSeverity>('medium');
+  const [assetId, setAssetId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<ProblemDetail | null>(null);
+
+  const trimmedTitle = title.trim();
+  const canSubmit = trimmedTitle.length > 0 && !busy;
+
+  const submit = useCallback(async () => {
+    if (!canSubmit) return;
+    setBusy(true);
+    setProblem(null);
+    try {
+      const created = await createIncident({
+        title: trimmedTitle,
+        description: description.trim() || undefined,
+        severity,
+        asset_id: assetId.trim() || undefined,
+      });
+      onCreated(created);
+    } catch (err) {
+      setProblem(
+        err instanceof ApiError ? err.problem : { title: 'Create failed', status: 0, detail: String(err) },
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, [canSubmit, trimmedTitle, description, severity, assetId, onCreated]);
+
+  return (
+    <Modal
+      visible
+      header="Create incident"
+      onDismiss={() => {
+        if (!busy) onClose();
+      }}
+      closeAriaLabel="Dismiss"
+      footer={
+        <Box float="right">
+          <SpaceBetween direction="horizontal" size="xs">
+            <Button variant="link" onClick={onClose} disabled={busy}>
+              Cancel
+            </Button>
+            <Button variant="primary" loading={busy} disabled={!canSubmit} onClick={() => void submit()}>
+              Create
+            </Button>
+          </SpaceBetween>
+        </Box>
+      }
+    >
+      <Form>
+        <SpaceBetween size="m">
+          {problem && (
+            <div role="alert">
+              <Alert type="error" header="Could not create the incident">
+                {problem.detail ?? `The server returned ${problem.status}.`}
+              </Alert>
+            </div>
+          )}
+          <FormField label="Title" errorText={title.length > 0 && trimmedTitle.length === 0 ? 'Title is required.' : undefined}>
+            <Input value={title} onChange={({ detail }) => setTitle(detail.value)} disabled={busy} ariaLabel="Title" placeholder="Required" />
+          </FormField>
+          <FormField label="Description" description="Optional">
+            <Textarea
+              value={description}
+              onChange={({ detail }) => setDescription(detail.value)}
+              disabled={busy}
+              ariaLabel="Description"
+            />
+          </FormField>
+          <FormField label="Severity">
+            <Select
+              selectedOption={SEVERITY_OPTIONS.find((o) => o.value === severity) ?? SEVERITY_OPTIONS[0]}
+              onChange={({ detail }) => setSeverity((detail.selectedOption.value ?? 'medium') as IncidentSeverity)}
+              options={SEVERITY_OPTIONS}
+              disabled={busy}
+              ariaLabel="Severity"
+            />
+          </FormField>
+          <FormField label="Asset ID" description="Optional — links this incident to a Configuration Item">
+            <Input
+              value={assetId}
+              onChange={({ detail }) => setAssetId(detail.value)}
+              disabled={busy}
+              ariaLabel="Asset ID"
+            />
+          </FormField>
+        </SpaceBetween>
+      </Form>
+    </Modal>
+  );
+}
+
 /**
  * The incident board: every open-class incident (default) or every incident
  * (status cleared) for the caller's tenant, root incidents with their
  * collateral nested underneath via `Table`'s `expandableRows`, drilling into
- * detail + timeline through the shell's `SplitPanel` (ADR-NOC-004).
+ * detail + timeline through the shell's `SplitPanel` (ADR-NOC-004), and — new
+ * in E-ACT.1 — acknowledging/transitioning/assigning from that same panel
+ * plus creating new incidents from this board (ADR-ACT-001).
  */
 export function IncidentBoardPage() {
   const { openSplitPanel } = useOutletContext<ShellSplitPanelContext>();
@@ -70,12 +194,16 @@ export function IncidentBoardPage() {
   const [reloads, setReloads] = useState(0);
   const [expandedItems, setExpandedItems] = useState<GroupedIncident[]>([]);
   const [currentPageIndex, setCurrentPageIndex] = useState(1);
+  const [createOpen, setCreateOpen] = useState(false);
+
+  /** Reruns the board's own fetch — shared by the error-retry button, "action changed something" callbacks from the detail panel, and a successful create. */
+  const reload = useCallback(() => setReloads((n) => n + 1), []);
 
   const openIncident = useCallback(
     (inc: IncidentDTO) => {
-      openSplitPanel(inc.title, <IncidentDetailPanel incidentId={inc.incident_id} />);
+      openSplitPanel(inc.title, <IncidentDetailPanel incidentId={inc.incident_id} onChanged={reload} />);
     },
-    [openSplitPanel],
+    [openSplitPanel, reload],
   );
 
   // Stable column identities across renders (openIncident is itself stable) so
@@ -180,7 +308,6 @@ export function IncidentBoardPage() {
   const pagesCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
   const pageItems = sorted.slice((currentPageIndex - 1) * PAGE_SIZE, currentPageIndex * PAGE_SIZE);
 
-  const retry = () => setReloads((n) => n + 1);
   const selectedOption = STATUS_OPTIONS.find((o) => o.value === statusFilter) ?? STATUS_OPTIONS[0];
 
   return (
@@ -189,6 +316,7 @@ export function IncidentBoardPage() {
         variant="h1"
         description="Open incidents, grouped root-cause to collateral. Click a title for detail and timeline."
         counter={`(${rawItems.length})`}
+        actions={<Button onClick={() => setCreateOpen(true)}>Create incident</Button>}
       >
         Incidents
       </Header>
@@ -212,7 +340,7 @@ export function IncidentBoardPage() {
         </Box>
       )}
 
-      {problem && <ErrorState problem={problem} onRetry={retry} />}
+      {problem && <ErrorState problem={problem} onRetry={reload} />}
 
       {!problem && (
         <Table
@@ -251,6 +379,17 @@ export function IncidentBoardPage() {
               onChange={({ detail }) => setCurrentPageIndex(detail.currentPageIndex)}
             />
           }
+        />
+      )}
+
+      {createOpen && (
+        <CreateIncidentModal
+          onClose={() => setCreateOpen(false)}
+          onCreated={(created) => {
+            setCreateOpen(false);
+            reload();
+            openIncident(created);
+          }}
         />
       )}
     </SpaceBetween>

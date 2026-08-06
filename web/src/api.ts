@@ -147,6 +147,39 @@ export async function getJSON<T>(url: string, signal?: AbortSignal): Promise<T> 
   return (await res.json()) as T;
 }
 
+/**
+ * POSTs a JSON body and decodes a JSON response, throwing `ApiError` on any
+ * non-2xx status (ADR-ACT-001's write-action contract). No `Idempotency-Key`:
+ * unlike `/v1/governance/*` (`executeGovernance`), none of the endpoints this
+ * helper calls check for one (verified against `handlers_incidents.go` — only
+ * `handlers_configobject.go`/`handlers_governance.go` read that header), so
+ * adding one here would be a header nobody reads rather than a real retry-
+ * safety mechanism.
+ */
+export async function postJSON<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  const headers: Record<string, string> = { Accept: 'application/json', 'Content-Type': 'application/json' };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+
+  if (!res.ok) {
+    let problem: ProblemDetail = {
+      title: 'Request failed',
+      status: res.status,
+      detail: `The server returned ${res.status}.`,
+    };
+    try {
+      problem = { ...problem, ...(await res.json()) };
+    } catch {
+      // Non-JSON error body; keep the fallback above.
+    }
+    throw new ApiError(problem);
+  }
+
+  return (await res.json()) as T;
+}
+
 /** Result of a §8 governance operation. `state` is absent when the object was removed. */
 export interface GovernanceResult {
   operation: string;
