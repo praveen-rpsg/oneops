@@ -135,7 +135,11 @@ describe('audit timeline', () => {
     const panel = await timeline();
 
     expect(within(panel).queryByText('bbb222')).not.toBeInTheDocument();
-    fireEvent.click(within(panel).getAllByRole('button', { name: /Show chain record/ })[0]);
+    // The "Show chain record" buttons render only once the entries themselves
+    // have painted — a second, later-resolving fetch than the one `timeline()`
+    // awaited (the heading is static; the entry list is not) — so this must
+    // poll rather than assume the click target already exists.
+    fireEvent.click((await within(panel).findAllByRole('button', { name: /Show chain record/ }))[0]);
 
     expect(await within(panel).findByText('bbb222')).toBeInTheDocument();
     expect(within(panel).getByText('aaa111')).toBeInTheDocument(); // prev_hash links the chain
@@ -145,8 +149,10 @@ describe('audit timeline', () => {
     vi.stubGlobal('fetch', mock({ history: ok({ items: [] }) }));
     renderApp();
     const panel = await timeline();
+    // The empty state only replaces "Loading…" once the (empty) history fetch
+    // settles — a later tick than the static heading `timeline()` awaited.
     expect(
-      within(panel).getByText(/No governance operation has been performed/),
+      await within(panel).findByText(/No governance operation has been performed/),
     ).toBeInTheDocument();
   });
 
@@ -155,7 +161,7 @@ describe('audit timeline', () => {
     renderApp();
     const panel = await timeline();
 
-    expect(within(panel).getByText('Ratification')).toBeInTheDocument();
+    expect(await within(panel).findByText('Ratification')).toBeInTheDocument();
     expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
   });
 
@@ -165,7 +171,7 @@ describe('audit timeline', () => {
     renderApp();
     const panel = await timeline();
 
-    expect(within(panel).getByRole('alert')).toBeInTheDocument();
+    expect(await within(panel).findByRole('alert')).toBeInTheDocument();
     fireEvent.click(within(panel).getByRole('button', { name: 'Try again' }));
 
     await waitFor(() =>
@@ -177,7 +183,7 @@ describe('audit timeline', () => {
     vi.stubGlobal('fetch', mock({ history: ok({ ...HISTORY_TWO, next_cursor: '1' }) }));
     renderApp();
     const panel = await timeline();
-    expect(within(panel).getByRole('button', { name: 'Load older' })).toBeInTheDocument();
+    expect(await within(panel).findByRole('button', { name: 'Load older' })).toBeInTheDocument();
   });
 
   it('refreshes after a ratification so the new event is visible', async () => {
