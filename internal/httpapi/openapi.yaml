@@ -1072,6 +1072,31 @@ paths:
         '422': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/tenant-org:
+    get:
+      summary: Get the CALLER'S OWN tenant's organization
+      description: >-
+        Membership and team administration require an org_id, and a
+        tenant-admin session otherwise has no way to discover it except an
+        operator reading a ULID out of the database to them. Organization is
+        global and outside row-level security (ADR-IDENTITY-002 §3.1), so —
+        unlike GET /admin/tenant-users — this route is itself the only
+        isolation control in front of it: the tenant is resolved strictly
+        from the authenticated context, never a request parameter, so a
+        caller receives only their own tenant's organization. The 1:1
+        between organization and tenant (uq_org_tenant, ADR-IDENTITY-001 §4)
+        makes the result single-valued.
+      operationId: getTenantOrganization
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: The caller's own tenant's organization
+          content: { application/json: { schema: { $ref: '#/components/schemas/Organization' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/teams:
     get:
       summary: List an organization's teams

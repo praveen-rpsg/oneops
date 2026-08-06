@@ -172,6 +172,43 @@ func (s *Server) getOrganization(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toOrganizationDTO(o))
 }
 
+// getTenantOrganization serves GET /admin/tenant-org (E-ID.2a): resolves the
+// CALLER'S OWN tenant's organization, so a tenant administrator can discover
+// the org_id the membership/team endpoints require without an out-of-band
+// ULID handoff.
+//
+// The tenant comes from the authenticated context ONLY, exactly as
+// grantMembership sources it — never a query param or body. organization is
+// global and outside row-level security (ADR-IDENTITY-002 §3.1), so unlike
+// listTenantUsers this handler is the only isolation control in front of it:
+// a caller-chosen tenant id here would let any tenant administrator resolve,
+// and therefore learn the org_id of, every other customer's organization.
+func (s *Server) getTenantOrganization(w http.ResponseWriter, r *http.Request) {
+	if s.organizations == nil {
+		writeProblem(w, r, http.StatusNotImplemented, "not implemented", "organization registry is not configured")
+		return
+	}
+
+	tenant, ok := domain.TenantFrom(r.Context())
+	if !ok {
+		writeProblem(w, r, http.StatusForbidden, "forbidden", "no tenant is bound to this request")
+		return
+	}
+
+	o, err := s.organizations.GetByTenant(r.Context(), tenant.TenantID)
+	if errors.Is(err, domain.ErrNotFound) {
+		// The 1:1 (uq_org_tenant) makes this unreachable in a consistent
+		// database; reported as a 404 rather than a panic in case it ever isn't.
+		writeProblem(w, r, http.StatusNotFound, "not found", "no organization realises this tenant")
+		return
+	}
+	if err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toOrganizationDTO(o))
+}
+
 // patchOrganization suspends or reactivates an organisation, cascading to the
 // realising tenant.
 //

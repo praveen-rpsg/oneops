@@ -448,6 +448,17 @@ func (s *Server) routesFor(root fs.FS, consoleBuilt bool) *chi.Mux {
 		// above it (ADR-ACT-003).
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/tenant-users", s.listTenantUsers)
 
+		// The CALLER'S OWN tenant's organization (E-ID.2a): membership/team
+		// administration requires an org_id, and a tenant-admin session
+		// otherwise has no way to discover it short of an operator reading a
+		// ULID out of a database to them. organization is global and outside
+		// row-level security (ADR-IDENTITY-002 §3.1), so — unlike
+		// tenant-users above — this handler is itself the only isolation
+		// control: it resolves strictly by the tenant bound to the request,
+		// never a request parameter, the same discipline grantMembership
+		// applies to org_id in the write direction just above.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/tenant-org", s.getTenantOrganization)
+
 		// Team administration. Team is TENANT-OWNED, exactly like membership
 		// above and for the same reason: it is in TenantOwnedTables and carries
 		// row-level security, so the permission tier is tenant administration,
