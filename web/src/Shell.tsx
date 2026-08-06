@@ -54,7 +54,14 @@ const NAV_ITEMS: SideNavigationProps.Item[] = [
   { type: 'link', text: 'Topology', href: '/topology' },
   { type: 'link', text: 'Dashboards', href: '/dashboards' },
   { type: 'divider' },
-  { type: 'link', text: 'Administration', href: '/administration' },
+  {
+    type: 'section',
+    text: 'Administration',
+    items: [
+      { type: 'link', text: 'Identity & roles', href: '/administration' },
+      { type: 'link', text: 'Members', href: '/members' },
+    ],
+  },
 ];
 
 /** The path a side-nav item is considered active for — longest-prefix match, `/` is exact. */
@@ -69,6 +76,7 @@ function activeHrefFor(pathname: string): string {
   if (pathname.startsWith('/topology')) return '/topology';
   if (pathname.startsWith('/dashboards')) return '/dashboards';
   if (pathname.startsWith('/administration')) return '/administration';
+  if (pathname.startsWith('/members')) return '/members';
   return '/';
 }
 
@@ -84,6 +92,7 @@ const CRUMB_LABEL: Record<string, string> = {
   topology: 'Topology',
   dashboards: 'Dashboards',
   administration: 'Administration',
+  members: 'Members',
 };
 
 function useBreadcrumbs() {
@@ -113,10 +122,15 @@ function useBreadcrumbs() {
  * alerts board (E7.3c) drive the shared `SplitPanel` through
  * `ShellSplitPanelContext`.
  *
- * Administration (E-ID.1) is visible to any signed-in user for now — its
- * content is the caller's own identity plus a static, read-only RBAC
- * reference table, which is safe to show everyone. Admin-gated items land in
- * later Identity & Access stories.
+ * Administration (E-ID.1) is now a `SideNavigation` section with two links
+ * (ADR-IAC-001 extension, E-ID.2): "Identity & roles" (the caller's own
+ * identity plus a static, read-only RBAC reference table — safe to show
+ * everyone) and "Members" (tenant membership grant/revoke — PermAdmin-gated
+ * server-side, not client-side; a non-admin sees the screen's own clean
+ * 403 state rather than a hidden nav entry, since the server's response is
+ * the only thing this console treats as authoritative). Both are visible to
+ * any signed-in user; the screen itself degrades gracefully when the caller
+ * lacks the permission its endpoints require.
  */
 export function Shell() {
   const navigate = useNavigate();

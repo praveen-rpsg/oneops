@@ -28,6 +28,7 @@ const IncidentBoardPage = lazy(() =>
 const MaintenanceBoardPage = lazy(() =>
   import('./routes/MaintenanceBoardPage').then((m) => ({ default: m.MaintenanceBoardPage })),
 );
+const MembersPage = lazy(() => import('./routes/MembersPage').then((m) => ({ default: m.MembersPage })));
 const NOCOverviewPage = lazy(() => import('./routes/NOCOverviewPage').then((m) => ({ default: m.NOCOverviewPage })));
 const OnCallBoardPage = lazy(() => import('./routes/OnCallBoardPage').then((m) => ({ default: m.OnCallBoardPage })));
 const TopologyPage = lazy(() => import('./routes/TopologyPage').then((m) => ({ default: m.TopologyPage })));
@@ -124,6 +125,7 @@ export default function App() {
         <Route path="topology" element={<TopologyPage />} />
         <Route path="dashboards" element={<DashboardsPage />} />
         <Route path="administration" element={<AdministrationPage />} />
+        <Route path="members" element={<MembersPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
