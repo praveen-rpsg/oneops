@@ -8,6 +8,7 @@ import { ArtifactPage } from './routes/ArtifactPage';
 import { DashboardsPage } from './routes/DashboardsPage';
 import { EstatePage } from './routes/EstatePage';
 import { IncidentBoardPage } from './routes/IncidentBoardPage';
+import { MaintenanceBoardPage } from './routes/MaintenanceBoardPage';
 import { NOCOverviewPage } from './routes/NOCOverviewPage';
 import { OnCallBoardPage } from './routes/OnCallBoardPage';
 import { TopologyPage } from './routes/TopologyPage';
@@ -101,6 +102,7 @@ export default function App() {
         <Route path="noc" element={<NOCOverviewPage />} />
         <Route path="incidents" element={<IncidentBoardPage />} />
         <Route path="alerts" element={<AlertsBoardPage />} />
+        <Route path="maintenance" element={<MaintenanceBoardPage />} />
         <Route path="on-call" element={<OnCallBoardPage />} />
         <Route path="topology" element={<TopologyPage />} />
         <Route path="dashboards" element={<DashboardsPage />} />
