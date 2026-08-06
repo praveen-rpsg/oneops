@@ -233,11 +233,15 @@ func (s *MembershipStore) ListByOrg(
 // tenant-scoped appPool connection supplies it.
 //
 // membership has no "suspended" state of its own (only active/revoked), so
-// "ACTIVE member" is defined as BOTH halves being active: an active
-// membership row naming a user whose app_user.status has not been suspended
-// or deactivated. A membership left active while the underlying account was
-// suspended at the platform level must not populate an assignee picker with
-// someone who cannot currently act.
+// "ACTIVE member" is defined as an active membership row naming a user whose
+// app_user.status has not been suspended or deactivated — 'active' AND
+// 'invited' both qualify (ADR-ACT-003 §4, amended 2026-08-06). An invited
+// account has not finished onboarding but is a legitimate assignee/roster
+// candidate for a tenant that already granted it an active membership: the
+// picker must not come back empty while every seeded user is still
+// 'invited'. A membership left active while the underlying account was
+// suspended or deactivated at the platform level must not populate an
+// assignee picker with someone who cannot currently act.
 //
 // A plain INNER JOIN, not a defensive LEFT JOIN: uq_membership_org_user's
 // sibling FK (membership.user_id REFERENCES app_user) guarantees every
@@ -258,7 +262,7 @@ func (s *MembershipStore) ListActiveDirectory(
 		SELECT m.user_id, u.email, u.display_name
 		  FROM membership m
 		  JOIN app_user u ON u.user_id = m.user_id
-		 WHERE m.status = 'active' AND u.status = 'active'
+		 WHERE m.status = 'active' AND u.status IN ('active', 'invited')
 		   AND ($1 = '' OR m.user_id > $1)
 		 ORDER BY m.user_id
 		 LIMIT $2`, after, limit)

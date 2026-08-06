@@ -290,10 +290,16 @@ func userIDs(items []tenantUserDTO) []string {
 }
 
 // TestTenantUsersAPI_ReturnsExactlyActiveMembers is the correctness proof
-// the review criteria call for: N active members, a member whose global
-// account has since been suspended, and a member whose MEMBERSHIP has been
-// revoked all get seeded in the same tenant — only the N active members
-// come back, in ascending user_id order.
+// the review criteria call for: N active members whose accounts are fully
+// active, an active member whose global account is still 'invited' (onboarding
+// not finished), a member whose global account has since been suspended, a
+// member whose global account has been deactivated, and a member whose
+// MEMBERSHIP has been revoked all get seeded in the same tenant — only the
+// active-membership members with a non-suspended, non-deactivated account
+// (active OR invited) come back, in ascending user_id order. This is the
+// mutation proof for the relaxed predicate (ADR-ACT-003 §4, amended
+// 2026-08-06): flip `u.status IN ('active','invited')` back to
+// `u.status = 'active'` and the invited-member assertion below fails.
 func TestTenantUsersAPI_ReturnsExactlyActiveMembers(t *testing.T) {
 	h := realTenantUsersHarness(t)
 	tn := h.tenantUsersTenant(t, "tenant-users-correctness")
@@ -306,12 +312,26 @@ func TestTenantUsersAPI_ReturnsExactlyActiveMembers(t *testing.T) {
 		wantIDs = append(wantIDs, u.UserID)
 	}
 
+	// An active member whose global account has not finished onboarding
+	// ('invited'). MUST appear: an active member is a legitimate
+	// assignee/roster candidate regardless of global-account activation
+	// (ADR-ACT-003 §4, amended 2026-08-06) — the picker must not come back
+	// empty while every seeded user is still 'invited'.
+	invited := h.createUser(t, uniqueSlug("invited")+"@example.com", "Invited User", domain.UserInvited)
+	h.grantActive(t, tn, orgID, invited.UserID)
+	wantIDs = append(wantIDs, invited.UserID)
+
 	// A member whose global account is suspended: an active membership row
 	// naming a user who can no longer act. Must NOT appear — see
 	// MembershipStore.ListActiveDirectory's own doc comment for why "ACTIVE
 	// member" requires both halves.
 	suspended := h.createUser(t, uniqueSlug("suspended")+"@example.com", "Suspended User", domain.UserSuspended)
 	h.grantActive(t, tn, orgID, suspended.UserID)
+
+	// A member whose global account is deactivated (terminal). Must NOT
+	// appear, same reasoning as suspended.
+	deactivated := h.createUser(t, uniqueSlug("deactivated")+"@example.com", "Deactivated User", domain.UserDeactivated)
+	h.grantActive(t, tn, orgID, deactivated.UserID)
 
 	// A member whose MEMBERSHIP itself has been revoked, account otherwise
 	// active. Must NOT appear.
@@ -323,8 +343,8 @@ func TestTenantUsersAPI_ReturnsExactlyActiveMembers(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
-	if len(items) != 3 {
-		t.Fatalf("items = %d, want 3 (only the active members): %+v", len(items), items)
+	if len(items) != 4 {
+		t.Fatalf("items = %d, want 4 (the 3 fully-active members plus the invited-but-active-member): %+v", len(items), items)
 	}
 
 	got := userIDs(items)
@@ -334,9 +354,16 @@ func TestTenantUsersAPI_ReturnsExactlyActiveMembers(t *testing.T) {
 			t.Errorf("item[%d] user_id = %q, want %q (got=%v want=%v)", i, got[i], wantIDs[i], got, wantIDs)
 		}
 	}
+	foundInvited := false
 	for _, it := range items {
+		if it.UserID == invited.UserID {
+			foundInvited = true
+		}
 		if it.UserID == suspended.UserID {
 			t.Error("the suspended user's account appears in the directory")
+		}
+		if it.UserID == deactivated.UserID {
+			t.Error("the deactivated user's account appears in the directory")
 		}
 		if it.UserID == revokedUser.UserID {
 			t.Error("the user with a revoked membership appears in the directory")
@@ -344,6 +371,9 @@ func TestTenantUsersAPI_ReturnsExactlyActiveMembers(t *testing.T) {
 		if it.Email == "" || it.DisplayName == "" {
 			t.Errorf("item %+v is missing profile fields the app_user join should supply", it)
 		}
+	}
+	if !foundInvited {
+		t.Error("the active member whose account is still 'invited' does not appear in the directory")
 	}
 
 	// Ascending user_id order (the query's own ORDER BY), so a repeated call

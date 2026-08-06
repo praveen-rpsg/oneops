@@ -103,7 +103,7 @@ carries its own `REFERENCES app_user (user_id)` foreign key
 roster, which `OnCall`'s own doc comment treats defensively — there is no
 orphan case here to tolerate.
 
-### 4. "Active member" requires BOTH an active membership AND an active account
+### 4. "Active member" requires an active membership AND an account that is not suspended/deactivated
 
 `membership.status` is `active`/`revoked` only; it has no `suspended` state
 of its own. `app_user.status` has `invited`/`active`/`suspended`/
@@ -119,6 +119,22 @@ populate an assignee/roster picker as if they could. If this reading is
 wrong, revert to a plain `membership.status = 'active'` filter; the query
 sites are `MembershipStore.ListActiveDirectory`'s single `WHERE` clause and
 the flip is a one-line change with no schema impact either way.
+
+> **Amendment, 2026-08-06 (E-HARD.2).** The `u.status = 'active'` half above
+> was too narrow in practice: it excluded a person who is an ACTIVE member
+> of the tenant but whose global `app_user` account is still `invited`
+> (onboarding not finished) — which left the assign/roster picker
+> (E-ACT.1/E-ACT.4) empty during onboarding, when every seeded user starts
+> `invited`. An active tenant member is a legitimate assignee/roster
+> candidate regardless of global-account activation; only an account that
+> can no longer act at all (`suspended`, reversible removal of access, or
+> `deactivated`, terminal — ADR-IDENTITY-001 §8.3) should be excluded. The
+> predicate is now `m.status = 'active' AND u.status IN ('active',
+> 'invited')` — equivalently, "an active member whose account is not
+> suspended or deactivated." `TestTenantUsersAPI_ReturnsExactlyActiveMembers`
+> was extended to mutation-verify both directions live: an active member
+> with an `invited` account now appears, and members with `suspended` or
+> `deactivated` accounts still do not.
 
 ### 5. Bound and ordering: keyset over `user_id`, the same shape `ListByOrg` already uses
 
@@ -158,14 +174,16 @@ an error.
 ## Consequences
 
 **What is now guaranteed.** A caller with `PermAdmin` in a tenant gets, in
-one bounded request, every user who is BOTH an active member of their own
-tenant AND holds an active platform account — `user_id`, `email`,
-`display_name` only — confined to their own tenant by row-level security
-alone, proven live and proven to bite when that scoping is removed
-(`TestTenantUsersAPI_TenantIsolation`,
-`TestTenantUsersAPI_TenantIsolation_BitesWhenLoosened`). A suspended
-account with an otherwise-active membership, and a revoked membership with
-an otherwise-active account, are both excluded
+one bounded request, every user who is an active member of their own
+tenant AND holds a platform account that is not suspended or deactivated
+(amended 2026-08-06 — see Decision 4's amendment; `invited` accounts are
+included) — `user_id`, `email`, `display_name` only — confined to their own
+tenant by row-level security alone, proven live and proven to bite when that
+scoping is removed (`TestTenantUsersAPI_TenantIsolation`,
+`TestTenantUsersAPI_TenantIsolation_BitesWhenLoosened`). A suspended or
+deactivated account with an otherwise-active membership, and a revoked
+membership with an otherwise-active account, are all excluded; an active
+member whose account is still `invited` IS included
 (`TestTenantUsersAPI_ReturnsExactlyActiveMembers`). A brand-new, empty
 tenant gets a clean `200` with `{"items":[]}` — never `null`, never a `500`
 (`TestTenantUsersAPI_EmptyTenantIsCleanEmpty`). The contract is additive:
