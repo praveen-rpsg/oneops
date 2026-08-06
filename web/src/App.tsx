@@ -6,6 +6,7 @@ import { Shell } from './Shell';
 import { ArtifactPage } from './routes/ArtifactPage';
 import { ComingSoon } from './routes/ComingSoon';
 import { EstatePage } from './routes/EstatePage';
+import { NOCOverviewPage } from './routes/NOCOverviewPage';
 import { SignIn } from './components/SignIn';
 import Box from '@cloudscape-design/components/box';
 import Spinner from '@cloudscape-design/components/spinner';
@@ -93,7 +94,7 @@ export default function App() {
       <Route element={<Shell />}>
         <Route index element={<EstatePage />} />
         <Route path="artifacts/:id" element={<ArtifactPage />} />
-        <Route path="noc" element={<ComingSoon title="NOC / Overview" />} />
+        <Route path="noc" element={<NOCOverviewPage />} />
         <Route path="incidents" element={<ComingSoon title="Incidents" />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

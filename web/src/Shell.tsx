@@ -50,9 +50,9 @@ function useBreadcrumbs() {
 
 /**
  * The reusable home for every section of the console: top navigation (identity,
- * session, theme), side navigation (Estate/Governance today; NOC and Incidents are
- * placeholders until E7-UI.1/E7-UI.2 land) and breadcrumbs. Routed content renders
- * in the `content` slot via `<Outlet/>`.
+ * session, theme), side navigation (Estate/Governance and NOC/Overview are live;
+ * Incidents remains a placeholder until E7-UI.2 lands) and breadcrumbs. Routed
+ * content renders in the `content` slot via `<Outlet/>`.
  */
 export function Shell() {
   const navigate = useNavigate();
