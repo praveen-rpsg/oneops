@@ -27,26 +27,52 @@ const RETURN_KEY = 'oneops.return_to';
 
 let accessToken: string | null = null;
 let subject: string | null = null;
+let roles: string[] = [];
 
 export const getToken = () => accessToken;
 export const getSubject = () => subject;
 
-/** Claims the console displays. Not trusted for authorization — the server decides that. */
-function readSubject(jwt: string): string | null {
+/**
+ * DISPLAY-ONLY. Returns the `roles` claim carried by the current token, for
+ * the Administration "who am I" screen (E-ID.1). This is never the basis for
+ * an authorization decision — the server (internal/auth) is the sole
+ * authority, exactly as the file header says for the subject and every other
+ * claim. Use it only to label or navigate the UI, never to gate an action.
+ */
+export const getRoles = () => roles;
+
+function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
   try {
     const [, payload] = jwt.split('.');
-    const json = JSON.parse(
+    return JSON.parse(
       decodeURIComponent(
         atob(payload.replace(/-/g, '+').replace(/_/g, '/'))
           .split('')
           .map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`)
           .join(''),
       ),
-    ) as { sub?: string; email?: string; preferred_username?: string };
-    return json.preferred_username ?? json.email ?? json.sub ?? null;
+    ) as Record<string, unknown>;
   } catch {
     return null;
   }
+}
+
+/** Claims the console displays. Not trusted for authorization — the server decides that. */
+function readSubject(jwt: string): string | null {
+  const json = decodeJwtPayload(jwt) as { sub?: string; email?: string; preferred_username?: string } | null;
+  return json?.preferred_username ?? json?.email ?? json?.sub ?? null;
+}
+
+/**
+ * DISPLAY-ONLY (see getRoles). A malformed token, or one with no/non-array
+ * `roles` claim, yields `[]` rather than throwing — the identity panel must
+ * degrade, never crash.
+ */
+function readRoles(jwt: string): string[] {
+  const json = decodeJwtPayload(jwt) as { roles?: unknown } | null;
+  const claim = json?.roles;
+  if (!Array.isArray(claim)) return [];
+  return claim.filter((r): r is string => typeof r === 'string');
 }
 
 export async function fetchAuthConfig(): Promise<AuthConfig> {
@@ -157,6 +183,7 @@ export async function completeSignIn(cfg: AuthConfig): Promise<boolean> {
 export function setToken(token: string | null) {
   accessToken = token;
   subject = token ? readSubject(token) : null;
+  roles = token ? readRoles(token) : [];
 }
 
 export function signOut() {

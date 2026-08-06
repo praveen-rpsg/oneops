@@ -12,6 +12,9 @@ import Spinner from '@cloudscape-design/components/spinner';
 // chart/SVG dependencies) is fetched on navigation. Pages use named exports
 // (their own tests import them by name), so `React.lazy` — which requires a
 // default export — is adapted per import rather than changing the pages.
+const AdministrationPage = lazy(() =>
+  import('./routes/AdministrationPage').then((m) => ({ default: m.AdministrationPage })),
+);
 const AlertsBoardPage = lazy(() => import('./routes/AlertsBoardPage').then((m) => ({ default: m.AlertsBoardPage })));
 const ArtifactPage = lazy(() => import('./routes/ArtifactPage').then((m) => ({ default: m.ArtifactPage })));
 const DashboardsPage = lazy(() => import('./routes/DashboardsPage').then((m) => ({ default: m.DashboardsPage })));
@@ -120,6 +123,7 @@ export default function App() {
         <Route path="escalation" element={<EscalationBoardPage />} />
         <Route path="topology" element={<TopologyPage />} />
         <Route path="dashboards" element={<DashboardsPage />} />
+        <Route path="administration" element={<AdministrationPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

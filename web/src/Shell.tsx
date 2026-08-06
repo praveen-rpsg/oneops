@@ -53,6 +53,8 @@ const NAV_ITEMS: SideNavigationProps.Item[] = [
   { type: 'link', text: 'Escalation', href: '/escalation' },
   { type: 'link', text: 'Topology', href: '/topology' },
   { type: 'link', text: 'Dashboards', href: '/dashboards' },
+  { type: 'divider' },
+  { type: 'link', text: 'Administration', href: '/administration' },
 ];
 
 /** The path a side-nav item is considered active for — longest-prefix match, `/` is exact. */
@@ -66,6 +68,7 @@ function activeHrefFor(pathname: string): string {
   if (pathname.startsWith('/escalation')) return '/escalation';
   if (pathname.startsWith('/topology')) return '/topology';
   if (pathname.startsWith('/dashboards')) return '/dashboards';
+  if (pathname.startsWith('/administration')) return '/administration';
   return '/';
 }
 
@@ -80,6 +83,7 @@ const CRUMB_LABEL: Record<string, string> = {
   escalation: 'Escalation',
   topology: 'Topology',
   dashboards: 'Dashboards',
+  administration: 'Administration',
 };
 
 function useBreadcrumbs() {
@@ -103,10 +107,16 @@ function useBreadcrumbs() {
 /**
  * The reusable home for every section of the console: top navigation (identity,
  * session, theme), side navigation (Estate/Governance, NOC/Overview, Incidents,
- * Alerts, Maintenance, On-call, Escalation, Topology and Dashboards are all live) and breadcrumbs. Routed content renders in
+ * Alerts, Maintenance, On-call, Escalation, Topology, Dashboards and
+ * Administration are all live) and breadcrumbs. Routed content renders in
  * the `content` slot via `<Outlet/>`; the incident board (E7-UI.2) and the
  * alerts board (E7.3c) drive the shared `SplitPanel` through
  * `ShellSplitPanelContext`.
+ *
+ * Administration (E-ID.1) is visible to any signed-in user for now — its
+ * content is the caller's own identity plus a static, read-only RBAC
+ * reference table, which is safe to show everyone. Admin-gated items land in
+ * later Identity & Access stories.
  */
 export function Shell() {
   const navigate = useNavigate();
