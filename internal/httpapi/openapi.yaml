@@ -1037,6 +1037,41 @@ paths:
         '409': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/tenant-users:
+    get:
+      summary: List the CALLER'S OWN tenant's active members (read-only projection)
+      description: >-
+        Unlike GET /admin/users (the platform-wide registry, requirePlatformAdmin),
+        this reads membership — a TENANT-OWNED, row-level-secured table — joined
+        to the global app_user table for display, exactly the join
+        OnCallScheduleRepository.OnCall already performs for on-call
+        display_name (ADR-ACT-003). Tenant isolation is row-level security
+        alone: no explicit tenant predicate, no privileged pool, identical to
+        GET /admin/noc/overview and GET /admin/assets/graph. "Active member"
+        requires BOTH an active membership row AND an app_user account that
+        has not been suspended or deactivated; membership itself has no
+        "suspended" state (only active/revoked). Paging is keyset over
+        user_id, which is a ULID and therefore globally ordered and unique
+        per person — a user can hold at most one membership per organization.
+      operationId: listTenantUsers
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last user_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of the caller's own tenant's active members
+          content: { application/json: { schema: { $ref: '#/components/schemas/TenantUserList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/teams:
     get:
       summary: List an organization's teams
@@ -4580,6 +4615,23 @@ components:
         items:
           type: array
           items: { $ref: '#/components/schemas/User' }
+    TenantUser:
+      type: object
+      description: >-
+        Deliberately narrower than User: an assignee/roster picker projection,
+        not the User aggregate. No status, row_version or timestamps.
+      required: [user_id, email, display_name]
+      properties:
+        user_id:      { type: string }
+        email:        { type: string, format: email }
+        display_name: { type: string }
+    TenantUserList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/TenantUser' }
     CreateUserRequest:
       type: object
       required: [email]

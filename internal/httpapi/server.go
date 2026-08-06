@@ -84,6 +84,13 @@ type Server struct {
 	adminAudit  domain.AdminAuditReader
 	memberships domain.MembershipRepository
 
+	// Tenant-scoped user-directory projection (E-ACT.0); nil until
+	// SetTenantUserDirectory. Unlike users above, this reads membership (a
+	// TENANT-OWNED, row-level-secured table) joined to the global app_user
+	// profile, so it needs the tenant-administration permission, not
+	// requirePlatformAdmin — see tenantUserDirectory's own doc comment.
+	tenantUsers tenantUserDirectory
+
 	// Team registry; nil until SetTeams. team is TENANT-OWNED, like membership
 	// above, so nothing here needs an exemption from row-level security.
 	teams domain.TeamRepository
@@ -431,6 +438,15 @@ func (s *Server) routesFor(root fs.FS, consoleBuilt bool) *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/memberships", s.listMemberships)
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/memberships", s.grantMembership)
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/memberships/{id}", s.revokeMembership)
+
+		// Tenant-scoped user directory (E-ACT.0): the caller's own tenant's
+		// ACTIVE members, joined to their global app_user profile, for an
+		// assignee/roster picker. Distinct from GET /admin/users above (which
+		// is the platform-wide registry, requirePlatformAdmin) precisely
+		// because membership is tenant-owned and row-level-secured — this is
+		// tenant administration, exactly like the memberships routes just
+		// above it (ADR-ACT-003).
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/tenant-users", s.listTenantUsers)
 
 		// Team administration. Team is TENANT-OWNED, exactly like membership
 		// above and for the same reason: it is in TenantOwnedTables and carries

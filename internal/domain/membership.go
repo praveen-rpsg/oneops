@@ -105,3 +105,17 @@ type MembershipRepository interface {
 	Revoke(ctx context.Context, membershipID string) (*Membership, error)
 	ListByOrg(ctx context.Context, orgID string, limit int, after string) ([]*Membership, error)
 }
+
+// TenantUserSummary is one ACTIVE member of the caller's own tenant, carrying
+// just enough of their global app_user profile to populate an
+// assignee/roster picker (E-ACT.0, ADR-ACT-003) — never the whole User
+// aggregate, and never persisted anywhere itself. It is assembled at request
+// time by joining a tenant-scoped (RLS-confined) membership row to the
+// global app_user table it references, exactly the join
+// OnCallScheduleRepository.OnCall already performs for display_name
+// (ADR-ONCALL-001).
+type TenantUserSummary struct {
+	UserID      string
+	Email       string
+	DisplayName string
+}

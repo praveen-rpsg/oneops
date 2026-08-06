@@ -215,3 +215,68 @@ func (s *MembershipStore) ListByOrg(
 	}
 	return out, nil
 }
+
+// ListActiveDirectory returns a page of the CALLER'S OWN tenant's directory —
+// every ACTIVE member (an active membership row whose app_user account is
+// also active), joined to their global profile for display (E-ACT.0,
+// ADR-ACT-003).
+//
+// The join is the same shape and the same safety argument
+// OnCallScheduleRepository.OnCall already relies on: membership is
+// tenant-owned and carries row-level security, so the set of rows this query
+// can even see is confined to the caller's tenant before app_user is ever
+// touched; app_user itself is global (no tenant_id, no RLS), so joining it
+// onto an already-confined set discloses no other tenant's membership, only
+// the public profile shape (user_id/email/display_name) of a person this
+// tenant already recognises. No explicit tenant_id predicate appears here,
+// for the same reason none appears anywhere else in this store: the
+// tenant-scoped appPool connection supplies it.
+//
+// membership has no "suspended" state of its own (only active/revoked), so
+// "ACTIVE member" is defined as BOTH halves being active: an active
+// membership row naming a user whose app_user.status has not been suspended
+// or deactivated. A membership left active while the underlying account was
+// suspended at the platform level must not populate an assignee picker with
+// someone who cannot currently act.
+//
+// A plain INNER JOIN, not a defensive LEFT JOIN: uq_membership_org_user's
+// sibling FK (membership.user_id REFERENCES app_user) guarantees every
+// membership row names an app_user row that exists, so there is no orphan
+// case to tolerate here the way OnCall's roster-of-participants read does.
+//
+// Keyset over user_id (a ULID, globally unique) rather than membership_id:
+// the caller is paging people, and a user with two memberships in the same
+// tenant is impossible (uq_membership_org_user is per org, and app_user's own
+// FK confines each membership to one org+user pair), so user_id is already
+// the collection's own natural, deterministic order.
+func (s *MembershipStore) ListActiveDirectory(
+	ctx context.Context, limit int, after string,
+) ([]*domain.TenantUserSummary, error) {
+	limit = clampMembershipPage(limit)
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT m.user_id, u.email, u.display_name
+		  FROM membership m
+		  JOIN app_user u ON u.user_id = m.user_id
+		 WHERE m.status = 'active' AND u.status = 'active'
+		   AND ($1 = '' OR m.user_id > $1)
+		 ORDER BY m.user_id
+		 LIMIT $2`, after, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list tenant user directory: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*domain.TenantUserSummary, 0, limit)
+	for rows.Next() {
+		var entry domain.TenantUserSummary
+		if err := rows.Scan(&entry.UserID, &entry.Email, &entry.DisplayName); err != nil {
+			return nil, fmt.Errorf("scan tenant user directory row: %w", err)
+		}
+		out = append(out, &entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tenant user directory: %w", err)
+	}
+	return out, nil
+}
