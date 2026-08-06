@@ -3,10 +3,12 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { completeSignIn, fetchAuthConfig, signIn } from './auth';
 import type { AuthConfig } from './auth';
 import { Shell } from './Shell';
+import { AlertsBoardPage } from './routes/AlertsBoardPage';
 import { ArtifactPage } from './routes/ArtifactPage';
 import { EstatePage } from './routes/EstatePage';
 import { IncidentBoardPage } from './routes/IncidentBoardPage';
 import { NOCOverviewPage } from './routes/NOCOverviewPage';
+import { OnCallBoardPage } from './routes/OnCallBoardPage';
 import { SignIn } from './components/SignIn';
 import Box from '@cloudscape-design/components/box';
 import Spinner from '@cloudscape-design/components/spinner';
@@ -96,6 +98,8 @@ export default function App() {
         <Route path="artifacts/:id" element={<ArtifactPage />} />
         <Route path="noc" element={<NOCOverviewPage />} />
         <Route path="incidents" element={<IncidentBoardPage />} />
+        <Route path="alerts" element={<AlertsBoardPage />} />
+        <Route path="on-call" element={<OnCallBoardPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
