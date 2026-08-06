@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
+import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
+import Form from '@cloudscape-design/components/form';
+import FormField from '@cloudscape-design/components/form-field';
 import Header from '@cloudscape-design/components/header';
+import Input from '@cloudscape-design/components/input';
+import Modal from '@cloudscape-design/components/modal';
 import Pagination from '@cloudscape-design/components/pagination';
 import Select from '@cloudscape-design/components/select';
 import type { SelectProps } from '@cloudscape-design/components/select';
@@ -12,11 +17,24 @@ import Table from '@cloudscape-design/components/table';
 import type { TableProps } from '@cloudscape-design/components/table';
 import type { ShellSplitPanelContext } from '../Shell';
 import { ALERT_SEVERITY_RANK, ALERT_SEVERITY_TYPE, ALERT_STATE_RANK, ALERT_STATE_TYPE, COMPARATOR_SYMBOL } from '../alertPresentation';
-import { ALERT_RULE_LIST_CAP, ALERT_RULE_STATES, ALERT_SEVERITIES, listAlertRules } from '../alertRules';
+import {
+  ALERT_RULE_LIST_CAP,
+  ALERT_RULE_STATES,
+  ALERT_SEVERITIES,
+  alertRuleAssetIdError,
+  alertRuleFlapDwellError,
+  alertRuleForDurationError,
+  alertRuleMetricError,
+  alertRuleThresholdError,
+  createAlertRule,
+  listAlertRules,
+} from '../alertRules';
 import type { AlertRuleDTO, AlertRuleState, AlertSeverity } from '../alertRules';
 import { ApiError } from '../api';
 import type { ProblemDetail } from '../api';
 import { AlertRuleDetailPanel } from '../components/AlertRuleDetail';
+import { AlertRuleConfigFields } from '../components/AlertRuleForm';
+import type { AlertRuleConfigValues } from '../components/AlertRuleForm';
 import { ErrorState } from '../components/States';
 import { humanise } from '../incidentPresentation';
 
@@ -62,15 +80,138 @@ function AlertRulesEmpty({
 }
 
 /**
+ * "Create rule" (ADR-ACT-002): asset_id and metric (fixed at creation, free
+ * text — reusing `AlertRuleConfigFields` for the remaining seven fields the
+ * create and edit forms share). Client-validated before submit, mirroring
+ * `domain.AlertRule.Validate`'s own bounds (`alertRules.ts`'s validator
+ * functions); a bad enum is impossible to submit since every enum field is a
+ * `Select` over the real backend value set.
+ */
+function CreateAlertRuleModal({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (rule: AlertRuleDTO) => void;
+}) {
+  const [assetId, setAssetId] = useState('');
+  const [metric, setMetric] = useState('');
+  const [config, setConfig] = useState<AlertRuleConfigValues>({
+    comparator: 'gt',
+    threshold: '',
+    forDurationSeconds: '300',
+    severity: 'warning',
+    symptomClass: 'unspecified',
+    flapDwellSeconds: '',
+    enabled: true,
+  });
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<ProblemDetail | null>(null);
+
+  const assetIdError = alertRuleAssetIdError(assetId);
+  const metricError = alertRuleMetricError(metric);
+  const thresholdError = alertRuleThresholdError(config.threshold);
+  const forDurationError = alertRuleForDurationError(config.forDurationSeconds);
+  const flapDwellError = alertRuleFlapDwellError(config.flapDwellSeconds);
+
+  const trimmedAssetId = assetId.trim();
+  const trimmedMetric = metric.trim();
+  const canSubmit =
+    trimmedAssetId.length > 0 &&
+    !assetIdError &&
+    trimmedMetric.length > 0 &&
+    !metricError &&
+    config.threshold.trim().length > 0 &&
+    !thresholdError &&
+    config.forDurationSeconds.trim().length > 0 &&
+    !forDurationError &&
+    !flapDwellError &&
+    !busy;
+
+  const submit = useCallback(async () => {
+    if (!canSubmit) return;
+    setBusy(true);
+    setProblem(null);
+    try {
+      const created = await createAlertRule({
+        asset_id: trimmedAssetId,
+        metric: trimmedMetric,
+        comparator: config.comparator,
+        threshold: Number(config.threshold),
+        for_duration_seconds: Number(config.forDurationSeconds),
+        severity: config.severity,
+        symptom_class: config.symptomClass,
+        enabled: config.enabled,
+        flap_dwell_seconds: config.flapDwellSeconds.trim() === '' ? undefined : Number(config.flapDwellSeconds),
+      });
+      onCreated(created);
+    } catch (err) {
+      setProblem(err instanceof ApiError ? err.problem : { title: 'Create failed', status: 0, detail: String(err) });
+    } finally {
+      setBusy(false);
+    }
+  }, [canSubmit, trimmedAssetId, trimmedMetric, config, onCreated]);
+
+  return (
+    <Modal
+      visible
+      header="Create alert rule"
+      onDismiss={() => {
+        if (!busy) onClose();
+      }}
+      closeAriaLabel="Dismiss"
+      footer={
+        <Box float="right">
+          <SpaceBetween direction="horizontal" size="xs">
+            <Button variant="link" onClick={onClose} disabled={busy}>
+              Cancel
+            </Button>
+            <Button variant="primary" loading={busy} disabled={!canSubmit} onClick={() => void submit()}>
+              Create
+            </Button>
+          </SpaceBetween>
+        </Box>
+      }
+    >
+      <Form>
+        <SpaceBetween size="m">
+          {problem && (
+            <div role="alert">
+              <Alert type="error" header="Could not create the alert rule">
+                {problem.detail ?? `The server returned ${problem.status}.`}
+              </Alert>
+            </div>
+          )}
+          <FormField label="Asset ID" errorText={assetIdError}>
+            <Input value={assetId} onChange={({ detail }) => setAssetId(detail.value)} disabled={busy} ariaLabel="Asset ID" placeholder="Required" />
+          </FormField>
+          <FormField label="Metric" description="Lower-case snake_case, e.g. cpu_utilization" errorText={metricError}>
+            <Input value={metric} onChange={({ detail }) => setMetric(detail.value)} disabled={busy} ariaLabel="Metric" placeholder="Required" />
+          </FormField>
+          <AlertRuleConfigFields
+            values={config}
+            onChange={setConfig}
+            disabled={busy}
+            errors={{ threshold: thresholdError, forDurationSeconds: forDurationError, flapDwellSeconds: flapDwellError }}
+          />
+        </SpaceBetween>
+      </Form>
+    </Modal>
+  );
+}
+
+/**
  * The alerts board: every alert rule for the caller's tenant (bounded at
  * ALERT_RULE_LIST_CAP), filterable by state and severity, sortable, and
  * drilling into a rule's own detail through the shell's `SplitPanel` — the
  * same pattern the incident board (ADR-NOC-004) established. No "linked
  * incident" column: current_incident_id is not part of the existing
- * alert-rule HTTP contract (see ADR-NOC-005).
+ * alert-rule HTTP contract (see ADR-NOC-005). New in E-ACT.2 (ADR-ACT-002):
+ * "Create rule" from this board, and edit/enable-disable/delete from the
+ * detail panel it opens.
  */
 export function AlertsBoardPage() {
-  const { openSplitPanel } = useOutletContext<ShellSplitPanelContext>();
+  const { openSplitPanel, closeSplitPanel } = useOutletContext<ShellSplitPanelContext>();
 
   const [stateFilter, setStateFilter] = useState<AlertRuleState | ''>('');
   const [severityFilter, setSeverityFilter] = useState<AlertSeverity | ''>('');
@@ -79,12 +220,26 @@ export function AlertsBoardPage() {
   const [problem, setProblem] = useState<ProblemDetail | null>(null);
   const [reloads, setReloads] = useState(0);
   const [currentPageIndex, setCurrentPageIndex] = useState(1);
+  const [createOpen, setCreateOpen] = useState(false);
+
+  /** Reruns the board's own fetch — shared by error-retry, a successful create, and any edit/enable-disable/delete from the detail panel. */
+  const reload = useCallback(() => setReloads((n) => n + 1), []);
 
   const openRule = useCallback(
     (rule: AlertRuleDTO) => {
-      openSplitPanel(`${rule.asset_id} · ${rule.metric}`, <AlertRuleDetailPanel ruleId={rule.rule_id} />);
+      openSplitPanel(
+        `${rule.asset_id} · ${rule.metric}`,
+        <AlertRuleDetailPanel
+          ruleId={rule.rule_id}
+          onChanged={reload}
+          onDeleted={() => {
+            closeSplitPanel();
+            reload();
+          }}
+        />,
+      );
     },
-    [openSplitPanel],
+    [openSplitPanel, closeSplitPanel, reload],
   );
 
   const columns = useMemo<TableProps.ColumnDefinition<AlertRuleDTO>[]>(
@@ -192,7 +347,6 @@ export function AlertsBoardPage() {
   const pagesCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
   const pageItems = sorted.slice((currentPageIndex - 1) * PAGE_SIZE, currentPageIndex * PAGE_SIZE);
 
-  const retry = () => setReloads((n) => n + 1);
   const clearFilters = () => {
     setStateFilter('');
     setSeverityFilter('');
@@ -207,6 +361,7 @@ export function AlertsBoardPage() {
         variant="h1"
         description="Alert rules for this tenant. Click a rule for detail."
         counter={`(${rawItems.length})`}
+        actions={<Button onClick={() => setCreateOpen(true)}>Create rule</Button>}
       >
         Alerts
       </Header>
@@ -236,7 +391,7 @@ export function AlertsBoardPage() {
         </Box>
       )}
 
-      {problem && <ErrorState problem={problem} onRetry={retry} />}
+      {problem && <ErrorState problem={problem} onRetry={reload} />}
 
       {!problem && (
         <Table
@@ -263,6 +418,17 @@ export function AlertsBoardPage() {
               onChange={({ detail }) => setCurrentPageIndex(detail.currentPageIndex)}
             />
           }
+        />
+      )}
+
+      {createOpen && (
+        <CreateAlertRuleModal
+          onClose={() => setCreateOpen(false)}
+          onCreated={(created) => {
+            setCreateOpen(false);
+            reload();
+            openRule(created);
+          }}
         />
       )}
     </SpaceBetween>

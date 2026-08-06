@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { renderApp } from '../test-render';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import createWrapper from '@cloudscape-design/components/test-utils/dom';
@@ -37,18 +37,48 @@ const firing = rule({
 interface Fixture {
   list?: unknown;
   detail?: Record<string, AlertRuleDTO>;
+  /** 'ERROR' makes POST /v1/admin/alert-rules fail 422, as a bad enum/out-of-range value would. */
+  create?: 'ERROR';
 }
 
 function routedFetch(fx: Fixture = {}) {
-  return vi.fn().mockImplementation(async (url: string) => {
+  const created: Record<string, AlertRuleDTO> = {};
+  return vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
     const u = String(url);
-    const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+    const method = init?.method ?? 'GET';
+    const ok = (body: unknown, status = 200) => ({ ok: true, status, json: async () => body });
 
     if (u.includes('/auth/config')) return ok({ auth_enabled: false });
 
+    if (method === 'POST' && /\/admin\/alert-rules$/.test(u)) {
+      if (fx.create === 'ERROR') {
+        return {
+          ok: false,
+          status: 422,
+          json: async () => ({ title: 'validation failed', status: 422, detail: 'threshold must be a finite number' }),
+        };
+      }
+      const body = JSON.parse(String(init?.body)) as Partial<AlertRuleDTO>;
+      const newRule = rule({
+        rule_id: 'RULE-NEW',
+        asset_id: body.asset_id ?? '',
+        metric: body.metric ?? '',
+        comparator: body.comparator ?? 'gt',
+        threshold: body.threshold ?? 0,
+        for_duration_seconds: body.for_duration_seconds ?? 300,
+        severity: body.severity ?? 'warning',
+        symptom_class: body.symptom_class ?? 'unspecified',
+        enabled: body.enabled ?? true,
+        flap_dwell_seconds: body.flap_dwell_seconds ?? 60,
+      });
+      created[newRule.rule_id] = newRule;
+      return ok(newRule, 201);
+    }
+
     const detailMatch = u.match(/admin\/alert-rules\/([^/?]+)/);
     if (detailMatch) {
-      const body = fx.detail?.[detailMatch[1]];
+      const id = detailMatch[1];
+      const body = fx.detail?.[id] ?? created[id];
       if (!body) return { ok: false, status: 404, json: async () => ({ title: 'not found', status: 404 }) };
       return ok(body);
     }
@@ -131,5 +161,113 @@ describe('alerts board', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
 
     await vi.waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBefore));
+  });
+});
+
+// E-ACT.2 / ADR-ACT-002: "Create rule" — the enum Selects only ever offer the
+// real backend value set, so a bad enum is impossible to submit; the form
+// posts the exact createAlertRuleRequest body and opens the new rule's
+// detail on success, mirroring E-ACT.1's "create incident" test shape.
+describe('create alert rule', () => {
+  it('is disabled until the required fields are filled', async () => {
+    vi.stubGlobal('fetch', routedFetch({ list: { items: [rule()] } }));
+    renderApp();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create rule' }));
+    const dialog = await screen.findByRole('dialog');
+
+    expect(within(dialog).getByRole('button', { name: 'Create' })).toBeDisabled();
+  });
+
+  it('constrains comparator/severity/symptom-class to the real backend enum values', async () => {
+    vi.stubGlobal('fetch', routedFetch({ list: { items: [rule()] } }));
+    renderApp();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create rule' }));
+    const dialog = await screen.findByRole('dialog');
+
+    const comparatorSelect = createWrapper(dialog).findAllSelects()[0];
+    act(() => comparatorSelect.openDropdown());
+    const comparatorValues = comparatorSelect
+      .findDropdown()
+      .findOptions()
+      .map((o) => o.getElement().textContent);
+    expect(comparatorValues.join(' ')).toMatch(/gt.*lt.*gte.*lte/s);
+    act(() => comparatorSelect.selectOptionByValue('lte'));
+
+    expect(dialog).toBeInTheDocument();
+  });
+
+  it('posts the exact create body and opens the new rule', async () => {
+    const f = routedFetch({ list: { items: [rule()] } });
+    vi.stubGlobal('fetch', f);
+    renderApp();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create rule' }));
+    const dialog = await screen.findByRole('dialog');
+
+    fireEvent.change(within(dialog).getByLabelText('Asset ID'), { target: { value: 'AST-NEW' } });
+    fireEvent.change(within(dialog).getByLabelText('Metric'), { target: { value: 'queue_depth' } });
+    fireEvent.change(within(dialog).getByLabelText('Threshold'), { target: { value: '500' } });
+    fireEvent.change(within(dialog).getByLabelText('For duration seconds'), { target: { value: '120' } });
+
+    const severitySelect = createWrapper(dialog).findAllSelects()[1];
+    act(() => severitySelect.openDropdown());
+    act(() => severitySelect.selectOptionByValue('critical'));
+
+    const symptomSelect = createWrapper(dialog).findAllSelects()[2];
+    act(() => symptomSelect.openDropdown());
+    act(() => symptomSelect.selectOptionByValue('availability'));
+
+    const listCallsBefore = f.mock.calls.filter(([u]) => String(u).includes('/admin/alert-rules?')).length;
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    const createCall = f.mock.calls.find(
+      ([u, init]) => String(u).endsWith('/admin/alert-rules') && (init as RequestInit | undefined)?.method === 'POST',
+    )!;
+    expect(JSON.parse(String((createCall[1] as RequestInit).body))).toEqual({
+      asset_id: 'AST-NEW',
+      metric: 'queue_depth',
+      comparator: 'gt',
+      threshold: 500,
+      for_duration_seconds: 120,
+      severity: 'critical',
+      symptom_class: 'availability',
+      enabled: true,
+      flap_dwell_seconds: undefined,
+    });
+
+    // The board reloaded its list...
+    await waitFor(() =>
+      expect(f.mock.calls.filter(([u]) => String(u).includes('/admin/alert-rules?')).length).toBeGreaterThan(
+        listCallsBefore,
+      ),
+    );
+    // ...and the new rule's own detail opened in the split panel.
+    expect(await screen.findByRole('heading', { name: 'AST-NEW · queue_depth' })).toBeInTheDocument();
+  });
+
+  it('surfaces a validation error instead of closing the dialog', async () => {
+    vi.stubGlobal('fetch', routedFetch({ list: { items: [rule()] }, create: 'ERROR' }));
+    renderApp();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create rule' }));
+    const dialog = await screen.findByRole('dialog');
+
+    fireEvent.change(within(dialog).getByLabelText('Asset ID'), { target: { value: 'AST-BAD' } });
+    fireEvent.change(within(dialog).getByLabelText('Metric'), { target: { value: 'bad_metric' } });
+    fireEvent.change(within(dialog).getByLabelText('Threshold'), { target: { value: 'not-really-used' } });
+
+    // Threshold is non-numeric, so Create stays disabled and no request is sent — a
+    // distinct, earlier-caught case than the server-side 422 this test also proves
+    // shows up instead of a silently-closed dialog when the server itself rejects it.
+    fireEvent.change(within(dialog).getByLabelText('Threshold'), { target: { value: '999999' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('threshold must be a finite number');
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 });
