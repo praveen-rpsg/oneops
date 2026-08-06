@@ -42,6 +42,15 @@ export const STATUS_RANK: Record<IncidentStatus, number> = {
   closed: 5,
 };
 
+/**
+ * "Open-class" for overlay purposes (topology map, E7.3b-2): every status
+ * before the terminal resolved/closed pair in STATUS_RANK's own ordering.
+ * Reused instead of re-deriving the split elsewhere.
+ */
+export function isOpenIncidentStatus(status: IncidentStatus): boolean {
+  return STATUS_RANK[status] < STATUS_RANK.resolved;
+}
+
 /** A short, human-scale age — "<1m", "12m", "3h 4m", "2d 6h". */
 export function ageLabel(createdAtIso: string): string {
   const ms = Date.now() - new Date(createdAtIso).getTime();
