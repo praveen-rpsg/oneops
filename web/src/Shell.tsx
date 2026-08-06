@@ -26,6 +26,8 @@ const NAV_ITEMS: SideNavigationProps.Item[] = [
   { type: 'link', text: 'Estate / Governance', href: '/' },
   { type: 'link', text: 'NOC / Overview', href: '/noc' },
   { type: 'link', text: 'Incidents', href: '/incidents' },
+  { type: 'link', text: 'Alerts', href: '/alerts' },
+  { type: 'link', text: 'On-call', href: '/on-call' },
 ];
 
 /** The path a side-nav item is considered active for — longest-prefix match, `/` is exact. */
@@ -33,6 +35,8 @@ function activeHrefFor(pathname: string): string {
   if (pathname === '/' || pathname.startsWith('/artifacts')) return '/';
   if (pathname.startsWith('/noc')) return '/noc';
   if (pathname.startsWith('/incidents')) return '/incidents';
+  if (pathname.startsWith('/alerts')) return '/alerts';
+  if (pathname.startsWith('/on-call')) return '/on-call';
   return '/';
 }
 
@@ -41,6 +45,8 @@ const CRUMB_LABEL: Record<string, string> = {
   artifacts: 'Estate',
   noc: 'NOC / Overview',
   incidents: 'Incidents',
+  alerts: 'Alerts',
+  'on-call': 'On-call',
 };
 
 function useBreadcrumbs() {
@@ -63,10 +69,11 @@ function useBreadcrumbs() {
 
 /**
  * The reusable home for every section of the console: top navigation (identity,
- * session, theme), side navigation (Estate/Governance, NOC/Overview and
- * Incidents are all live) and breadcrumbs. Routed content renders in the
- * `content` slot via `<Outlet/>`; the incident board (E7-UI.2) drives the
- * shared `SplitPanel` through `ShellSplitPanelContext`.
+ * session, theme), side navigation (Estate/Governance, NOC/Overview, Incidents,
+ * Alerts and On-call are all live) and breadcrumbs. Routed content renders in
+ * the `content` slot via `<Outlet/>`; the incident board (E7-UI.2) and the
+ * alerts board (E7.3c) drive the shared `SplitPanel` through
+ * `ShellSplitPanelContext`.
  */
 export function Shell() {
   const navigate = useNavigate();
