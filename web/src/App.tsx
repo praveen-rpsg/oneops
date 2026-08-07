@@ -17,6 +17,7 @@ const AdministrationPage = lazy(() =>
 );
 const AlertsBoardPage = lazy(() => import('./routes/AlertsBoardPage').then((m) => ({ default: m.AlertsBoardPage })));
 const ArtifactPage = lazy(() => import('./routes/ArtifactPage').then((m) => ({ default: m.ArtifactPage })));
+const CompliancePage = lazy(() => import('./routes/CompliancePage').then((m) => ({ default: m.CompliancePage })));
 const DashboardsPage = lazy(() => import('./routes/DashboardsPage').then((m) => ({ default: m.DashboardsPage })));
 const DetectionRulesPage = lazy(() =>
   import('./routes/DetectionRulesPage').then((m) => ({ default: m.DetectionRulesPage })),
@@ -41,6 +42,9 @@ const OnCallBoardPage = lazy(() => import('./routes/OnCallBoardPage').then((m) =
 // session, so it cannot live inside the `Shell`-wrapped routes the auth gate
 // protects. Still lazy-loaded, same as every other route's chunk.
 const RedeemPage = lazy(() => import('./routes/RedeemPage').then((m) => ({ default: m.RedeemPage })));
+const RiskRegisterPage = lazy(() =>
+  import('./routes/RiskRegisterPage').then((m) => ({ default: m.RiskRegisterPage })),
+);
 const TopologyPage = lazy(() => import('./routes/TopologyPage').then((m) => ({ default: m.TopologyPage })));
 const UsersPage = lazy(() => import('./routes/UsersPage').then((m) => ({ default: m.UsersPage })));
 const VulnerabilitiesPage = lazy(() =>
@@ -170,6 +174,8 @@ export default function App() {
         <Route path="security/vulnerabilities" element={<VulnerabilitiesPage />} />
         <Route path="security/detection-rules" element={<DetectionRulesPage />} />
         <Route path="security/indicators" element={<IndicatorsPage />} />
+        <Route path="security/risks" element={<RiskRegisterPage />} />
+        <Route path="security/compliance" element={<CompliancePage />} />
         <Route path="administration" element={<AdministrationPage />} />
         <Route path="members" element={<MembersPage />} />
         <Route path="users" element={<UsersPage />} />

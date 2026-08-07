@@ -61,6 +61,8 @@ const NAV_ITEMS: SideNavigationProps.Item[] = [
       { type: 'link', text: 'Vulnerabilities', href: '/security/vulnerabilities' },
       { type: 'link', text: 'Detection rules', href: '/security/detection-rules' },
       { type: 'link', text: 'Indicators', href: '/security/indicators' },
+      { type: 'link', text: 'Risk register', href: '/security/risks' },
+      { type: 'link', text: 'Compliance', href: '/security/compliance' },
     ],
   },
   {
@@ -89,6 +91,8 @@ function activeHrefFor(pathname: string): string {
   if (pathname.startsWith('/security/vulnerabilities')) return '/security/vulnerabilities';
   if (pathname.startsWith('/security/detection-rules')) return '/security/detection-rules';
   if (pathname.startsWith('/security/indicators')) return '/security/indicators';
+  if (pathname.startsWith('/security/risks')) return '/security/risks';
+  if (pathname.startsWith('/security/compliance')) return '/security/compliance';
   if (pathname.startsWith('/administration')) return '/administration';
   if (pathname.startsWith('/members')) return '/members';
   if (pathname.startsWith('/users')) return '/users';
@@ -119,6 +123,8 @@ const SECOND_SEGMENT_LABEL: Record<string, string> = {
   vulnerabilities: 'Vulnerabilities',
   'detection-rules': 'Detection rules',
   indicators: 'Indicators',
+  risks: 'Risk register',
+  compliance: 'Compliance',
 };
 
 function useBreadcrumbs() {
@@ -151,13 +157,17 @@ function useBreadcrumbs() {
  * alerts board (E7.3c) and the vulnerabilities board (E-SEC-UI.1) all drive
  * the shared `SplitPanel` through `ShellSplitPanelContext`.
  *
- * Security (E-SEC-UI.1, extended E-SEC-UI.2) is a `SideNavigation` section
- * founding the console's SOC-facing surface, over PermAdmin-gated endpoints
- * that already exist: "Vulnerabilities" (E8.3), "Detection rules" (E8.1b-1,
- * `security-rules`) and "Indicators" (E8.2a, `iocs`) — CONFIG ONLY for the
- * latter two, no detector yet evaluates either (E8.1b-2/E8.2b are later,
- * separate stories). Gated server-side, not client-side — the same
- * discipline Administration's own doc comment below states.
+ * Security (E-SEC-UI.1, extended E-SEC-UI.2, E-SEC-UI.3) is a
+ * `SideNavigation` section founding the console's SOC-facing surface, over
+ * PermAdmin-gated endpoints that already exist: "Vulnerabilities" (E8.3),
+ * "Detection rules" (E8.1b-1, `security-rules`), "Indicators" (E8.2a,
+ * `iocs`) — CONFIG ONLY for the latter two, no detector yet evaluates either
+ * (E8.1b-2/E8.2b are later, separate stories) — "Risk register" (E8.4a,
+ * `risks`, the likelihood x impact register + its computed-score ranking)
+ * and "Compliance" (E8.4b, `compliance-controls`, the implementation
+ * lifecycle + its append-only evidence trail). Gated server-side, not
+ * client-side — the same discipline Administration's own doc comment below
+ * states.
  *
  * Administration (E-ID.1) is now a `SideNavigation` section with four links
  * (ADR-IAC-001 extension, E-ID.2/E-ID.3/E-ID.5): "Identity & roles" (the
