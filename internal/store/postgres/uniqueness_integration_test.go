@@ -104,6 +104,11 @@ var serverGeneratedIdentifiers = map[string]string{
 	// already carries tenant_id directly and so never reaches this map; only
 	// the surrogate PK does.
 	"escalation_state_pkey": "state_id is server-minted (domain.NewEscalationState); there is no HTTP write path onto this table at all — it is written only by the leader-gated Seeder",
+
+	// Vulnerability-finding stateful entity (E8.3a). uq_vuln_finding_tenant_asset_vuln
+	// already carries tenant_id directly and so never reaches this map; only
+	// the surrogate PK does.
+	"vuln_finding_pkey": "finding_id is server-minted (domain.NewVulnFinding); no create route accepts one from a client",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

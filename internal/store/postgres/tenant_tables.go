@@ -46,6 +46,7 @@ var TenantOwnedTables = []string{
 	"security_observation",
 	"security_rule",
 	"ioc",
+	"vuln_finding",
 	"collector_check",
 	"alert_rule",
 	"incident",

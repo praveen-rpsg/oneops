@@ -579,6 +579,13 @@ func run(logger *slog.Logger) error {
 	// identical dual-role split AlertRuleStore/SecurityRuleStore already
 	// draw above.
 	srv.SetIOCs(postgres.NewIOCStore(appPool))
+	// Vulnerability-finding administration (E8.3a): tenant-owned and under
+	// row-level security, exactly like ioc above, so the admin CRUD/ingest
+	// API is built from the tenant-scoped pool. Unlike security_rule/ioc this
+	// IS a stateful entity, but there is no privileged-pool counterpart in
+	// this story — prioritization by CI criticality and remediation ->
+	// Incident linkage (E8.3b) is a later, separate story that may need one.
+	srv.SetVulnFindings(postgres.NewVulnFindingStore(appPool))
 	// Telemetry retention + downsampling (E2.1b, ADR-TELEMETRY-002): both
 	// workers process every tenant's chunks/buckets from one process, the
 	// same category of background worker the webhook dispatcher and policy

@@ -2387,6 +2387,118 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/vuln-findings:
+    get:
+      summary: List the caller's tenant's vulnerability findings (E8.3a)
+      operationId: listVulnFindings
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: asset_id
+          in: query
+          description: Filter to one Configuration Item.
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string, enum: [open, remediated, accepted_risk, false_positive] }
+        - name: severity
+          in: query
+          schema: { type: string, enum: [none, low, medium, high, critical] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last finding_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of vulnerability findings
+          content: { application/json: { schema: { $ref: '#/components/schemas/VulnFindingList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Batch-UPSERT vulnerability findings from one scan (E8.3a)
+      description: >-
+        Dedup key is (tenant_id, asset_id, vuln_id): a finding not seen
+        before is created open; an open/remediated/accepted_risk finding
+        already on record is refreshed and forced back to open (a
+        remediated/accepted-risk finding reappearing in a later scan means it
+        was not actually fixed / the accepted risk is still present); a
+        false_positive finding is left exactly as an operator last judged it
+        — only its last_seen timestamp moves. asset_id must already name a
+        Configuration Item visible to the caller's tenant, re-verified
+        server-side; a finding naming a cross-tenant or nonexistent asset_id
+        is reported as a rejected result at its own index, not as a
+        batch-aborting error. Re-ingesting an identical scan is idempotent:
+        no duplicate rows. Prioritization by CI criticality and
+        remediation -> Incident linkage (E8.3b) are a later, separate story —
+        nothing here ranks findings or opens an Incident; a finding open but
+        absent from a later scan is NOT auto-remediated (deferred).
+      operationId: ingestVulnFindings
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IngestVulnFindingsRequest' }
+      responses:
+        '200':
+          description: One outcome per input finding, at that finding's input index
+          content: { application/json: { schema: { $ref: '#/components/schemas/IngestVulnFindingsResponse' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/vuln-findings/{id}:
+    get:
+      summary: Get one vulnerability finding by identifier
+      operationId: getVulnFinding
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The vulnerability finding
+          content: { application/json: { schema: { $ref: '#/components/schemas/VulnFinding' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Perform a lifecycle transition on a vulnerability finding
+      description: >-
+        The ONLY mutation this endpoint performs: a status transition under
+        optimistic locking (domain.VulnFindingStatus.CanTransitionTo).
+        severity/title/scanner/description are scan-supplied facts refreshed
+        only by POST /v1/admin/vuln-findings, never by this endpoint. An
+        illegal move (e.g. accepted_risk directly to false_positive) is
+        refused with 409. false_positive -> open is reachable ONLY through
+        this endpoint (a deliberate operator re-triage) — a scan ingest never
+        performs it.
+      operationId: patchVulnFinding
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchVulnFindingRequest' }
+      responses:
+        '200':
+          description: The updated vulnerability finding
+          content: { application/json: { schema: { $ref: '#/components/schemas/VulnFinding' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/maintenance-windows:
     get:
       summary: List the caller's tenant's maintenance windows (E3.3a)
@@ -4703,6 +4815,110 @@ components:
         enabled: { type: boolean }
         description: { type: string, maxLength: 2000 }
         source: { type: string, maxLength: 200 }
+    IngestVulnFinding:
+      type: object
+      required: [asset_id, vuln_id, title, severity, scanner]
+      description: >-
+        vuln_id is deliberately not CVE-format-only — scanners emit GHSA/
+        RHSA/vendor advisory codes too.
+      properties:
+        asset_id: { type: string }
+        vuln_id:
+          type: string
+          maxLength: 100
+          description: e.g. CVE-2024-1234, GHSA-xxxx-xxxx-xxxx, or a vendor-specific advisory code.
+        title: { type: string, maxLength: 300 }
+        severity:
+          type: string
+          enum: [none, low, medium, high, critical]
+          description: The CVSS-derived rating (NVD scale) — its own vocabulary, distinct from incident/observation severity.
+        scanner:
+          type: string
+          maxLength: 200
+          description: Names the producer that reported this finding, e.g. nessus, qualys, trivy.
+        description: { type: string, maxLength: 2000 }
+    IngestVulnFindingsRequest:
+      type: object
+      required: [findings]
+      properties:
+        findings:
+          type: array
+          maxItems: 1000
+          items: { $ref: '#/components/schemas/IngestVulnFinding' }
+    VulnFindingUpsertResult:
+      type: object
+      description: >-
+        One input finding's outcome, at that finding's input index — always
+        present even when the finding was rejected, so a caller can correlate
+        a failure back to the request it sent.
+      properties:
+        index: { type: integer }
+        outcome: { type: string, enum: [accepted, rejected] }
+        finding_id:
+          type: string
+          description: Present when accepted — the CANONICAL finding_id for (tenant, asset_id, vuln_id), which may be a pre-existing row, not a freshly minted one.
+        status:
+          type: string
+          enum: [open, remediated, accepted_risk, false_positive]
+          description: Present when accepted — the finding's status AFTER this write. "open" following a previously remediated/accepted_risk finding signals a reappearance.
+        reason: { type: string, description: Present when outcome is rejected. }
+    IngestVulnFindingsResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/VulnFindingUpsertResult' }
+    VulnFinding:
+      type: object
+      description: >-
+        A deduplicated vulnerability-on-asset finding (E8.3a): a stateful
+        reified entity — like Incident/Asset, NOT a false noun — deduped by
+        (tenant_id, asset_id, vuln_id) and carrying a governed lifecycle.
+        Prioritization by CI criticality and remediation -> Incident linkage
+        are E8.3b, a later, separate story.
+      properties:
+        finding_id: { type: string }
+        asset_id: { type: string }
+        vuln_id: { type: string }
+        title: { type: string }
+        severity: { type: string, enum: [none, low, medium, high, critical] }
+        status:
+          type: string
+          enum: [open, remediated, accepted_risk, false_positive]
+          description: >-
+            open -> {remediated, accepted_risk, false_positive}; remediated/
+            accepted_risk -> open (automatically, on scan reappearance);
+            false_positive -> open ONLY via a manual PATCH re-triage, never
+            via ingestion.
+        first_seen:
+          type: string
+          format: date-time
+          description: Set once, at first ingestion. Store-managed.
+        last_seen:
+          type: string
+          format: date-time
+          description: Refreshed by every ingestion UPSERT that names this row, including the false_positive branch. Store-managed.
+        scanner: { type: string }
+        description: { type: string }
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    VulnFindingList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/VulnFinding' }
+    PatchVulnFindingRequest:
+      type: object
+      required: [row_version, status]
+      description: >-
+        The ONLY mutation this endpoint performs is a lifecycle transition.
+        severity/title/scanner/description are refreshed only by a later
+        scan ingest (POST /v1/admin/vuln-findings), never by this endpoint.
+      properties:
+        row_version: { type: integer, format: int64 }
+        status: { type: string, enum: [open, remediated, accepted_risk, false_positive] }
     MaintenanceWindow:
       type: object
       description: >-

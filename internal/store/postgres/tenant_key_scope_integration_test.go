@@ -139,6 +139,11 @@ var keyScopeJustifications = map[string]string{
 	// already contains tenant_id directly (route 1), so only the surrogate PK
 	// needs justifying here.
 	"escalation_state.escalation_state_pkey": "state_id is server-minted (domain.NewEscalationState); there is no HTTP write path onto this table at all — it is written only by the leader-gated Seeder",
+
+	// Vulnerability-finding stateful entity (E8.3a). uq_vuln_finding_tenant_asset_vuln
+	// already contains tenant_id directly (route 1), so only the surrogate PK
+	// needs justifying here.
+	"vuln_finding.vuln_finding_pkey": "finding_id is platform-generated (domain.NewVulnFinding); clients never supply it and there is no create route that accepts one",
 }
 
 func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {

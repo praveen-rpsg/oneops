@@ -1,4 +1,4 @@
-h1:xw8ciGRXkyqQVzrv7lxsATerEzobaLlhEO1KgHxZCE0=
+h1:LQurNDoHylIZC+0L5hN5Gu/7e1FiiEyugzTpy7I3GY4=
 20260722000001_init.sql h1:FjI7qqQq6NBkX2OBio0qTF6Pd0mfOA76bJBPGTr5Jdw=
 20260722000002_graph.sql h1:NNRx2bVpG4rT42pUW/Zqa+uL8rMalDr2C51vSxP522w=
 20260723000001_audit.sql h1:3yR04fUOEaQj+7VjPlCUPf0bcBsfH3ZZ47LW8tKWZL4=
@@ -55,3 +55,4 @@ h1:xw8ciGRXkyqQVzrv7lxsATerEzobaLlhEO1KgHxZCE0=
 20260906000001_security_rule.sql h1:F7KQTghzZknkprOM8WAWCvQrgTBhIbU0DJgk+YqaGMU=
 20260907000001_security_rule_detector.sql h1:JQSObV7pT94VQIUrd8ky/iTZfTvNubn+8cBVqPjrKbg=
 20260908000001_ioc.sql h1:yfJAusBb2KdvtVihqJzic6aLa9sa4jMPUADU8bhdP/A=
+20260909000001_vuln_finding.sql h1:L7p5ILonNgmS+Ps1utgLv5Cd58V0nOlFTQos0hJxti0=
