@@ -39,6 +39,9 @@ const OnCallBoardPage = lazy(() => import('./routes/OnCallBoardPage').then((m) =
 const RedeemPage = lazy(() => import('./routes/RedeemPage').then((m) => ({ default: m.RedeemPage })));
 const TopologyPage = lazy(() => import('./routes/TopologyPage').then((m) => ({ default: m.TopologyPage })));
 const UsersPage = lazy(() => import('./routes/UsersPage').then((m) => ({ default: m.UsersPage })));
+const VulnerabilitiesPage = lazy(() =>
+  import('./routes/VulnerabilitiesPage').then((m) => ({ default: m.VulnerabilitiesPage })),
+);
 
 /** Shared with `Shell.tsx`'s ROUTE_LOADING_FALLBACK idiom; used here for the pre-auth `/redeem` Suspense boundary, which has no Shell to host it. */
 const PUBLIC_ROUTE_LOADING_FALLBACK = (
@@ -160,6 +163,7 @@ export default function App() {
         <Route path="escalation" element={<EscalationBoardPage />} />
         <Route path="topology" element={<TopologyPage />} />
         <Route path="dashboards" element={<DashboardsPage />} />
+        <Route path="security/vulnerabilities" element={<VulnerabilitiesPage />} />
         <Route path="administration" element={<AdministrationPage />} />
         <Route path="members" element={<MembersPage />} />
         <Route path="users" element={<UsersPage />} />

@@ -56,6 +56,11 @@ const NAV_ITEMS: SideNavigationProps.Item[] = [
   { type: 'divider' },
   {
     type: 'section',
+    text: 'Security',
+    items: [{ type: 'link', text: 'Vulnerabilities', href: '/security/vulnerabilities' }],
+  },
+  {
+    type: 'section',
     text: 'Administration',
     items: [
       { type: 'link', text: 'Identity & roles', href: '/administration' },
@@ -77,6 +82,7 @@ function activeHrefFor(pathname: string): string {
   if (pathname.startsWith('/escalation')) return '/escalation';
   if (pathname.startsWith('/topology')) return '/topology';
   if (pathname.startsWith('/dashboards')) return '/dashboards';
+  if (pathname.startsWith('/security/vulnerabilities')) return '/security/vulnerabilities';
   if (pathname.startsWith('/administration')) return '/administration';
   if (pathname.startsWith('/members')) return '/members';
   if (pathname.startsWith('/users')) return '/users';
@@ -99,6 +105,12 @@ const CRUMB_LABEL: Record<string, string> = {
   members: 'Members',
   users: 'Users',
   invitations: 'Invitations',
+  security: 'Security',
+};
+
+/** Second-segment labels under a section whose first segment has sub-routes — `/security/vulnerabilities` mirrors `/artifacts/:id`'s own two-level shape. */
+const SECOND_SEGMENT_LABEL: Record<string, string> = {
+  vulnerabilities: 'Vulnerabilities',
 };
 
 function useBreadcrumbs() {
@@ -115,6 +127,9 @@ function useBreadcrumbs() {
     if (first === 'artifacts' && rest[0]) {
       items.push({ text: rest[0], href: location.pathname });
     }
+    if (first === 'security' && rest[0]) {
+      items.push({ text: SECOND_SEGMENT_LABEL[rest[0]] ?? rest[0], href: location.pathname });
+    }
     return items;
   }, [location.pathname]);
 }
@@ -122,11 +137,18 @@ function useBreadcrumbs() {
 /**
  * The reusable home for every section of the console: top navigation (identity,
  * session, theme), side navigation (Estate/Governance, NOC/Overview, Incidents,
- * Alerts, Maintenance, On-call, Escalation, Topology, Dashboards and
+ * Alerts, Maintenance, On-call, Escalation, Topology, Dashboards, Security and
  * Administration are all live) and breadcrumbs. Routed content renders in
- * the `content` slot via `<Outlet/>`; the incident board (E7-UI.2) and the
- * alerts board (E7.3c) drive the shared `SplitPanel` through
- * `ShellSplitPanelContext`.
+ * the `content` slot via `<Outlet/>`; the incident board (E7-UI.2), the
+ * alerts board (E7.3c) and the vulnerabilities board (E-SEC-UI.1) all drive
+ * the shared `SplitPanel` through `ShellSplitPanelContext`.
+ *
+ * Security (E-SEC-UI.1) is a `SideNavigation` section founding the console's
+ * SOC-facing surface, over the E8.3 vuln-management endpoints
+ * (`requirePermission(auth.PermAdmin)`, `server.go:701-706`) that already
+ * exist: "Vulnerabilities" is its first screen, more follow as the backend
+ * grows. Gated server-side, not client-side — the same discipline
+ * Administration's own doc comment below states.
  *
  * Administration (E-ID.1) is now a `SideNavigation` section with four links
  * (ADR-IAC-001 extension, E-ID.2/E-ID.3/E-ID.5): "Identity & roles" (the
