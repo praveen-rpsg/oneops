@@ -32,6 +32,7 @@ const MembersPage = lazy(() => import('./routes/MembersPage').then((m) => ({ def
 const NOCOverviewPage = lazy(() => import('./routes/NOCOverviewPage').then((m) => ({ default: m.NOCOverviewPage })));
 const OnCallBoardPage = lazy(() => import('./routes/OnCallBoardPage').then((m) => ({ default: m.OnCallBoardPage })));
 const TopologyPage = lazy(() => import('./routes/TopologyPage').then((m) => ({ default: m.TopologyPage })));
+const UsersPage = lazy(() => import('./routes/UsersPage').then((m) => ({ default: m.UsersPage })));
 
 type AuthState =
   | { phase: 'checking' }
@@ -126,6 +127,7 @@ export default function App() {
         <Route path="dashboards" element={<DashboardsPage />} />
         <Route path="administration" element={<AdministrationPage />} />
         <Route path="members" element={<MembersPage />} />
+        <Route path="users" element={<UsersPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
