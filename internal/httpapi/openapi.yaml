@@ -1097,6 +1097,95 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/invitations:
+    get:
+      summary: List the CALLER'S OWN organization's pending invitations
+      description: >-
+        Invitation is tenant-owned and under row-level security, exactly like
+        membership, so the result is confined to the caller's tenant by the
+        database rather than by a predicate. The organization is resolved
+        from the authenticated context — never a query parameter — the same
+        discipline GET /admin/tenant-org applies. The DTO never includes the
+        token or its hash; the token exists only in the response of
+        POST /admin/invitations, once. Paging is keyset over
+        invitation_id, which is a ULID and therefore ordered by creation.
+      operationId: listInvitations
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last invitation_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of the caller's own organization's invitations
+          content: { application/json: { schema: { $ref: '#/components/schemas/InvitationList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Invite an email address into the CALLER'S OWN organization
+      description: >-
+        Mints an invitation and returns its one-time plaintext token. The
+        organization and tenant are resolved from the authenticated context
+        ONLY, never the request body — there is no org_id or tenant_id field
+        to smuggle one through, which is what stops a tenant administrator
+        from inviting someone into another tenant's organization. The token
+        is returned exactly once, in this response, alongside the invitation;
+        it is unrecoverable afterward (domain.Invitation stores only its
+        SHA-256 hash) and never appears in GET /admin/invitations or in any
+        log line.
+      operationId: createInvitation
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateInvitationRequest' }
+      responses:
+        '201':
+          description: The invitation, including the one-time plaintext token
+          content: { application/json: { schema: { $ref: '#/components/schemas/CreateInvitationResponse' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+  /v1/admin/invitations/{id}:
+    delete:
+      summary: Revoke an invitation
+      description: >-
+        Withdraws a pending invitation. The row is NOT deleted — revocation is
+        a status change — and the revoked invitation is returned rather than
+        an empty response, the same convention DELETE /admin/memberships/{id}
+        uses. Safe to call twice: an already-revoked or already-redeemed
+        invitation is a conflict, not a second revocation. Isolation is the
+        tenant-scoped pool's row-level security: an id naming another
+        tenant's invitation matches no row and reports 404, never a 403 that
+        would confirm it exists elsewhere.
+      operationId: revokeInvitation
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The revoked invitation
+          content: { application/json: { schema: { $ref: '#/components/schemas/Invitation' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/teams:
     get:
       summary: List an organization's teams
@@ -3340,6 +3429,43 @@ components:
       properties:
         org_id: { type: string }
         user_id: { type: string }
+    Invitation:
+      type: object
+      description: >-
+        Deliberately has no token or token_hash field. The plaintext token is
+        returned exactly once, only in CreateInvitationResponse; it is
+        unrecoverable from this representation and from the table alike.
+      properties:
+        invitation_id: { type: string }
+        org_id: { type: string }
+        email: { type: string, format: email }
+        status: { type: string, enum: [pending, redeemed, revoked, expired] }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        redeemed_at: { type: string, format: date-time, nullable: true }
+    InvitationList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Invitation' }
+    CreateInvitationRequest:
+      type: object
+      required: [email]
+      description: >-
+        Carries no org_id or tenant_id: the target organization is resolved
+        from the caller's authenticated context only.
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+    CreateInvitationResponse:
+      description: >-
+        The invitation plus the one-time plaintext token. This is the only
+        response in the contract that carries a token field.
+      allOf:
+        - $ref: '#/components/schemas/Invitation'
+        - type: object
+          properties:
+            token: { type: string }
     Team:
       type: object
       properties:

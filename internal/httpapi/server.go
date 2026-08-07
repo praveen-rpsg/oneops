@@ -84,6 +84,10 @@ type Server struct {
 	adminAudit  domain.AdminAuditReader
 	memberships domain.MembershipRepository
 
+	// Invitation registry; nil until SetInvitations. invitation is
+	// tenant-owned and row-level-secured exactly like membership above (E-ID.4a).
+	invitations domain.InvitationRepository
+
 	// Tenant-scoped user-directory projection (E-ACT.0); nil until
 	// SetTenantUserDirectory. Unlike users above, this reads membership (a
 	// TENANT-OWNED, row-level-secured table) joined to the global app_user
@@ -458,6 +462,18 @@ func (s *Server) routesFor(root fs.FS, consoleBuilt bool) *chi.Mux {
 		// never a request parameter, the same discipline grantMembership
 		// applies to org_id in the write direction just above.
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/tenant-org", s.getTenantOrganization)
+
+		// Invitation administration (E-ID.4a — admin side only; unauthenticated
+		// redeem is E-ID.4b, a separate route deliberately not registered here).
+		// invitation is TENANT-OWNED, in TenantOwnedTables and under row-level
+		// security exactly like membership above, so this is tenant
+		// administration (PermAdmin), not requirePlatformAdmin. The org and
+		// tenant every one of these three handlers acts against are resolved
+		// from the caller's context, never a request parameter — the same
+		// discipline getTenantOrganization applies just above.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/invitations", s.listInvitations)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/invitations", s.createInvitation)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/invitations/{id}", s.revokeInvitation)
 
 		// Team administration. Team is TENANT-OWNED, exactly like membership
 		// above and for the same reason: it is in TenantOwnedTables and carries

@@ -520,6 +520,10 @@ func run(logger *slog.Logger) error {
 	// reads it, for the page-time active-membership re-check.
 	membershipStore := postgres.NewMembershipStore(appPool)
 	srv.SetMemberships(membershipStore)
+	// Invitation is tenant-owned and under row-level security, exactly like
+	// membership above, so appPool is correct here too (E-ID.4a — admin side
+	// only; the unauthenticated redeem path, E-ID.4b, is not wired here).
+	srv.SetInvitations(postgres.NewInvitationStore(appPool))
 	// E-ACT.0's tenant-scoped user directory reuses the SAME appPool-scoped
 	// instance rather than a second one: unlike E5.2b-2's escalation_state
 	// (privileged Seeder/Worker + a distinct tenant-scoped read instance),
