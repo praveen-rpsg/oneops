@@ -192,6 +192,17 @@ type Server struct {
 	// speculative on a customer-less product.
 	complianceControls domain.ComplianceControlRepository
 
+	// Security-response automation rule registry (E8.5, ADR-SOC-010); nil
+	// until SetSecurityResponseRules. security_response_rule is
+	// TENANT-OWNED, like compliance_control above, so nothing here needs an
+	// exemption from row-level security. CONFIG ONLY: there is no
+	// privileged-pool counterpart and no worker in this field — the
+	// leader-gated SecurityResponder that evaluates these rules against NEW
+	// security-sourced incidents and runs their SAFE action is wired
+	// separately (internal/security.SecurityResponder, over the privileged
+	// pool) — this field is only the admin CRUD surface.
+	securityResponseRules domain.SecurityResponseRuleRepository
+
 	// Maintenance window registry (E3.3a); nil until SetMaintenanceWindows.
 	// maintenance_window is TENANT-OWNED, like alert_rule above, so nothing
 	// here needs an exemption from row-level security. The evaluator's
@@ -728,6 +739,23 @@ func (s *Server) routesFor(root fs.FS, consoleBuilt bool) *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/compliance-controls/{id}", s.getComplianceControl)
 		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/compliance-controls/{id}", s.patchComplianceControl)
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/compliance-controls/{id}/evidence", s.addControlEvidence)
+
+		// Security-response automation rule administration (E8.5,
+		// ADR-SOC-010), completing E8. security_response_rule is
+		// TENANT-OWNED, exactly like compliance_control above, so the
+		// permission tier is tenant administration, not requirePlatformAdmin.
+		// CONFIG ONLY: no responder, worker or "dispatches" endpoint exists
+		// here — a dispatch is derived by the leader-gated SecurityResponder
+		// evaluating this config against NEW security-sourced incidents and
+		// recorded on the append-only security_response_dispatch ledger,
+		// never exposed as a mutation surface. action_type is a SAFE
+		// allowlist (http|notification) — see createSecurityResponseRule's
+		// own doc comment.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/security-response-rules", s.listSecurityResponseRules)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/security-response-rules", s.createSecurityResponseRule)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/security-response-rules/{id}", s.getSecurityResponseRule)
+		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/security-response-rules/{id}", s.patchSecurityResponseRule)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/security-response-rules/{id}", s.deleteSecurityResponseRule)
 
 		// Maintenance window administration (E3.3a). maintenance_window is
 		// TENANT-OWNED, exactly like alert_rule above, so the permission tier

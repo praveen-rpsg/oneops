@@ -31,6 +31,34 @@ func (s IncidentSeverity) Valid() bool {
 	}
 }
 
+// incidentSeverityRank orders IncidentSeverity from least (low) to most
+// (critical) severe — the numeric backing for AtLeast below. An unrecognised
+// value ranks below every defined severity so a caller comparing against
+// garbage input never treats it as satisfying a threshold.
+func incidentSeverityRank(s IncidentSeverity) int {
+	switch s {
+	case IncidentSeverityLow:
+		return 1
+	case IncidentSeverityMedium:
+		return 2
+	case IncidentSeverityHigh:
+		return 3
+	case IncidentSeverityCritical:
+		return 4
+	default:
+		return 0
+	}
+}
+
+// AtLeast reports whether s is at least as severe as threshold — critical >
+// high > medium > low, e.g. IncidentSeverityHigh.AtLeast(IncidentSeverityMedium)
+// is true. Introduced for SecurityResponseRule's MinSeverity threshold match
+// (E8.5, ADR-SOC-010), the first caller in this codebase to compare two
+// IncidentSeverity values by ORDER rather than by equality.
+func (s IncidentSeverity) AtLeast(threshold IncidentSeverity) bool {
+	return incidentSeverityRank(s) >= incidentSeverityRank(threshold)
+}
+
 // IncidentStatus is the lifecycle of an Incident (E5.1, extending the ITSM
 // core sketched in docs/PLATFORM-BUILD-PLAN.md E5). Incident is the ratified
 // reduced noun for a stateful ITSM work item — it is modelled as a state

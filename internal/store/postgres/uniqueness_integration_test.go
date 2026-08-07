@@ -121,6 +121,13 @@ var serverGeneratedIdentifiers = map[string]string{
 	// directly and so never reaches this map; only the two surrogate PKs do.
 	"compliance_control_pkey": "control_id is server-minted (domain.NewComplianceControl); no create route accepts one from a client",
 	"control_evidence_pkey":   "evidence_id is server-minted (domain.NewControlEvidence, called from ComplianceControlStore.AddEvidence); no route accepts one from a client",
+
+	// Security-response automation config + exactly-once dispatch ledger
+	// (E8.5, ADR-SOC-010). uq_security_response_dispatch_once already carries
+	// tenant_id directly and so never reaches this map; only the two
+	// surrogate PKs do.
+	"security_response_rule_pkey":     "rule_id is server-minted (domain.NewSecurityResponseRule); no create route accepts one from a client",
+	"security_response_dispatch_pkey": "dispatch_id is server-minted (domain.NewID, in SecurityResponderStore.ClaimDispatch); written only by the leader-gated SecurityResponder's privileged path, no client route accepts one",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

@@ -137,6 +137,20 @@ func TestAppUserMigration_AppliesAndRollsBackOnPopulatedDatabase(t *testing.T) {
 		t.Fatalf("roll back vuln_finding.remediation_incident_id before incident: %v", err)
 	}
 
+	// security_response_dispatch (E8.5) also references incident, so its
+	// rollback must run before incident's own — the same ordering protection
+	// escalation_state's rollback above already documents. The same down
+	// file also drops security_response_rule (which references only asset,
+	// not incident, but is dropped here regardless since it is this file's
+	// other table).
+	srDown, err := os.ReadFile("../migrate/rollback/20260913000001_security_response_rule.down.sql")
+	if err != nil {
+		t.Fatalf("read security response rule rollback: %v", err)
+	}
+	if _, err := tx.Exec(ctx, string(srDown)); err != nil {
+		t.Fatalf("roll back security_response_dispatch before incident: %v", err)
+	}
+
 	// incident.assignee_user_id (E5.1) also references app_user, so that
 	// migration's rollback must run first too — the same ordering protection
 	// every other referencing table's rollback documents here.

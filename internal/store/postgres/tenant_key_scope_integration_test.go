@@ -156,6 +156,13 @@ var keyScopeJustifications = map[string]string{
 	// need justifying here.
 	"compliance_control.compliance_control_pkey": "control_id is platform-generated (domain.NewComplianceControl); clients never supply it and there is no create route that accepts one",
 	"control_evidence.control_evidence_pkey":     "evidence_id is platform-generated (domain.NewControlEvidence, called from ComplianceControlStore.AddEvidence); clients never supply it and there is no route that accepts one",
+
+	// Security-response automation config + exactly-once dispatch ledger
+	// (E8.5, ADR-SOC-010). uq_security_response_dispatch_once already
+	// contains tenant_id directly (route 1), so only the two surrogate PKs
+	// need justifying here.
+	"security_response_rule.security_response_rule_pkey":         "rule_id is platform-generated (domain.NewSecurityResponseRule); clients never supply it and there is no create route that accepts one",
+	"security_response_dispatch.security_response_dispatch_pkey": "dispatch_id is server-minted (domain.NewID, in SecurityResponderStore.ClaimDispatch); the table is written only by the leader-gated SecurityResponder's privileged path, no client route accepts one",
 }
 
 func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {

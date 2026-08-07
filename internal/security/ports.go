@@ -16,9 +16,11 @@ package security
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/rpsg/oneops/internal/domain"
+	"github.com/rpsg/oneops/internal/policy"
 )
 
 // Store is the persistence port the SecurityDetector depends on.
@@ -191,3 +193,118 @@ func (NopIOCMatcherMetrics) IncObservationsChecked() {}
 func (NopIOCMatcherMetrics) IncMatched()             {}
 func (NopIOCMatcherMetrics) IncTenantsProcessed()    {}
 func (NopIOCMatcherMetrics) IncErrors()              {}
+
+// ---------------------------------------------------------------------------
+// E8.5: the Responder's own ports (responder.go, ADR-SOC-010). A THIRD
+// sibling pair, mirroring the SAME split-privileged-surface reasoning
+// IOCLister/ObservationWindowReader already draw against Store/
+// ObservationCounter: the responder reads yet another config table
+// (security_response_rule) over yet another shape (incidents, not
+// observations), so it gets its own minimal ports.
+
+// ResponseRuleLister is the leader-gated Responder's own privileged read
+// over security_response_rule (E8.5). *postgres.SecurityResponderStore
+// satisfies it when built over the PRIVILEGED pool — DELIBERATELY SEPARATE
+// from SecurityResponseRuleStore (the admin CRUD API,
+// domain.SecurityResponseRuleRepository, tenant-scoped), the identical
+// dual-role split SecurityRuleDetectorStore/SecurityRuleStore and
+// IOCMatcherStore/IOCStore already draw, and for the identical reason:
+// keeping this port's method set to exactly these two methods means
+// SecurityResponseRuleStore.Create's asset-existence probe is never
+// reachable from a privileged instance.
+type ResponseRuleLister interface {
+	// TenantsWithEnabledSecurityResponseRules returns every tenant_id that
+	// currently holds at least one enabled security_response_rule — mirrors
+	// IOCLister.TenantsWithEnabledIOCs: tenant-agnostic, discloses only which
+	// tenants have work.
+	TenantsWithEnabledSecurityResponseRules(ctx context.Context) ([]string, error)
+	// EnabledSecurityResponseRulesForTenant returns up to limit of tenantID's
+	// enabled rules, keyset-paginated over rule_id — mirrors
+	// IOCLister.EnabledIOCsForTenant narrowed to one tenant via an EXPLICIT
+	// tenant_id predicate (ADR-TENANCY-012): this connection has row-level
+	// security switched off, so nothing else confines the read to tenantID.
+	EnabledSecurityResponseRulesForTenant(ctx context.Context, tenantID string, limit int, after string) ([]*domain.SecurityResponseRule, error)
+}
+
+// IncidentWindowReader is the Responder's own privileged read over incident,
+// narrowed to Source == domain.IncidentSourceSecurity — the ONLY source this
+// engine ever considers (see Responder's own doc comment).
+// *postgres.SecurityResponderStore satisfies both this and ResponseRuleLister
+// — one privileged type, two narrow ports, mirroring how
+// *postgres.SecurityObservationCounterStore satisfies both ObservationCounter
+// and ObservationWindowReader.
+type IncidentWindowReader interface {
+	// RecentSecurityIncidentsForTenant returns up to limit of tenantID's
+	// security-sourced incidents with created_at in (from, to] — EXCLUSIVE of
+	// from, so consecutive tiled windows never double-return the incident
+	// created exactly at the shared boundary, the same convention
+	// ObservationWindowReader.RecentForTenant states — ordered and
+	// keyset-paginated over incident_id (a ULID, and therefore
+	// chronological). after, when non-nil, is the previous page's own LAST
+	// row.
+	RecentSecurityIncidentsForTenant(ctx context.Context, tenantID string, from, to time.Time, limit int, after *domain.Incident) ([]domain.Incident, error)
+}
+
+// DispatchClaimer is the Responder's own exactly-once ledger port over
+// security_response_dispatch (E8.5). ClaimDispatch is record-first: it
+// inserts the ledger row BEFORE the action runs — see Responder's own doc
+// comment for why this ordering, not alerting/security's usual
+// run-then-record, is the right trade for a SAFE action that is not
+// naturally idempotent (an outbound webhook POST or internal notification
+// firing twice is a genuine duplicate side effect).
+type DispatchClaimer interface {
+	// ClaimDispatch attempts to claim (tenantID, incidentID, ruleID) for
+	// exactly-once execution. claimed=false, err=nil means the row already
+	// existed (an earlier pass, or a concurrent goroutine, already claimed
+	// it) — this is the ordinary "already handled" outcome, not a failure;
+	// the caller must NOT run the action in that case.
+	ClaimDispatch(ctx context.Context, tenantID, incidentID, ruleID, actionType string, at time.Time) (claimed bool, err error)
+}
+
+// ActionRunner is the SAFE-action EXECUTION port Responder depends on —
+// satisfied by *policy.Registry (ADR-SOC-010's own non-negotiable: reuse the
+// EXISTING action Registry the policy engine runs on, not a new action
+// framework). Its signature is EXACTLY policy.Registry.Run's, so no adapter
+// is needed at the composition root (cmd/controlplane/main.go passes the
+// SAME policyRegistry instance the policy executor already uses).
+//
+// This package never touches policy.Executor/ExecutionStore/Consumer, and
+// never constructs a policy.Execution or policy.Policy row: those exist to
+// authorize an action against the audit-event GOVERNANCE hash-chain
+// (domain.ResolveAndAuthorize, comparing a policy's own tenant against the
+// triggering audit_event's committed owner) — a security incident has no
+// place on that chain (see this package's own doc comment: it derives
+// firings from security_observation/security_rule/ioc, never from
+// audit_event). The incident triggering a dispatch is already known to
+// belong to tenantID because it was loaded through THIS package's own
+// tenant-explicit IncidentWindowReader, so there is no audit-chain
+// ownership left to re-derive — using policy.Executor here would inject a
+// security incident into the governance consumer's own event shape for no
+// benefit and a real risk (a security-derived "event" flowing through the
+// chain the policy audit consumer tails).
+type ActionRunner interface {
+	Run(ctx context.Context, actionType string, ev policy.Event, config json.RawMessage) error
+}
+
+// ResponderMetrics receives Responder observability signals — a
+// SEPARATE interface from Metrics/IOCMatcherMetrics above: "rules matched
+// against incidents" and "actions dispatched" are different signals from
+// either detection pipeline's own counters.
+type ResponderMetrics interface {
+	IncIncidentsChecked()
+	IncMatched()
+	IncDispatched()
+	IncSkippedAlreadyDispatched()
+	IncTenantsProcessed()
+	IncErrors()
+}
+
+// NopResponderMetrics is the no-op ResponderMetrics.
+type NopResponderMetrics struct{}
+
+func (NopResponderMetrics) IncIncidentsChecked()         {}
+func (NopResponderMetrics) IncMatched()                  {}
+func (NopResponderMetrics) IncDispatched()               {}
+func (NopResponderMetrics) IncSkippedAlreadyDispatched() {}
+func (NopResponderMetrics) IncTenantsProcessed()         {}
+func (NopResponderMetrics) IncErrors()                   {}

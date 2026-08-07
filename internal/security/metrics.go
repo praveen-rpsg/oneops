@@ -90,3 +90,64 @@ func (m *IOCMatcherPromMetrics) IncTenantsProcessed() { m.tenantsProcessed.Inc()
 
 // IncErrors implements IOCMatcherMetrics.
 func (m *IOCMatcherPromMetrics) IncErrors() { m.errors.Inc() }
+
+// ResponderPromMetrics is the Prometheus ResponderMetrics implementation
+// (E8.5) — a SEPARATE type/metric-name family from PromMetrics/
+// IOCMatcherPromMetrics above, the same split each of those draws: "security
+// incidents checked against response rules" and "SAFE actions dispatched"
+// are their own signals a dashboard needs to tell apart from either
+// detection pipeline's own counters.
+type ResponderPromMetrics struct {
+	incidentsChecked         prometheus.Counter
+	matched                  prometheus.Counter
+	dispatched               prometheus.Counter
+	skippedAlreadyDispatched prometheus.Counter
+	tenantsProcessed         prometheus.Counter
+	errors                   prometheus.Counter
+}
+
+var _ ResponderMetrics = (*ResponderPromMetrics)(nil)
+
+// NewResponderPromMetrics builds and registers the responder's collectors.
+func NewResponderPromMetrics(reg prometheus.Registerer) *ResponderPromMetrics {
+	m := &ResponderPromMetrics{
+		incidentsChecked: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "oneops_security_response_incidents_checked_total", Help: "Total security-sourced incidents checked against response rules.",
+		}),
+		matched: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "oneops_security_response_matches_total", Help: "Total (incident, rule) pairs that satisfied a response rule's condition.",
+		}),
+		dispatched: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "oneops_security_response_dispatched_total", Help: "Total SAFE actions successfully run.",
+		}),
+		skippedAlreadyDispatched: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "oneops_security_response_skipped_already_dispatched_total", Help: "Total matches skipped because the (incident, rule) pair was already claimed.",
+		}),
+		tenantsProcessed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "oneops_security_response_tenants_processed_total", Help: "Total per-tenant response passes completed.",
+		}),
+		errors: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "oneops_security_response_errors_total", Help: "Total responder errors (list, read, claim, or action failures).",
+		}),
+	}
+	reg.MustRegister(m.incidentsChecked, m.matched, m.dispatched, m.skippedAlreadyDispatched, m.tenantsProcessed, m.errors)
+	return m
+}
+
+// IncIncidentsChecked implements ResponderMetrics.
+func (m *ResponderPromMetrics) IncIncidentsChecked() { m.incidentsChecked.Inc() }
+
+// IncMatched implements ResponderMetrics.
+func (m *ResponderPromMetrics) IncMatched() { m.matched.Inc() }
+
+// IncDispatched implements ResponderMetrics.
+func (m *ResponderPromMetrics) IncDispatched() { m.dispatched.Inc() }
+
+// IncSkippedAlreadyDispatched implements ResponderMetrics.
+func (m *ResponderPromMetrics) IncSkippedAlreadyDispatched() { m.skippedAlreadyDispatched.Inc() }
+
+// IncTenantsProcessed implements ResponderMetrics.
+func (m *ResponderPromMetrics) IncTenantsProcessed() { m.tenantsProcessed.Inc() }
+
+// IncErrors implements ResponderMetrics.
+func (m *ResponderPromMetrics) IncErrors() { m.errors.Inc() }

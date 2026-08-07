@@ -2813,6 +2813,120 @@ paths:
         '422': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/security-response-rules:
+    get:
+      summary: List the caller's tenant's security-response-automation rules (E8.5)
+      operationId: listSecurityResponseRules
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last rule_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of security response rules
+          content: { application/json: { schema: { $ref: '#/components/schemas/SecurityResponseRuleList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Register a security-response-automation rule (E8.5, the SAFE slice of SOAR)
+      description: >-
+        When a NEW security-sourced incident's severity is at least
+        min_severity (and, if asset_id is set, the incident is linked to that
+        one CI), the leader-gated SecurityResponder runs action_type exactly
+        once (security_response_dispatch's append-only ledger). SAFE ONLY:
+        action_type must be "http" (webhook) or "notification" (internal) —
+        any other value, including "command" (arbitrary execution) or any
+        destructive/response action (isolate, block, disable, quarantine), is
+        rejected with 422. Destructive/autonomous response is DEFERRED behind
+        the machine-action attestation model. asset_id, when supplied, must
+        already name a Configuration Item visible to the caller's tenant,
+        re-verified server-side (ADR-ASSET-001 §6) — a cross-tenant or
+        nonexistent asset_id is rejected with 404. This is a condition + one
+        safe ActionSpec CONFIG row, never a reified Workflow/Playbook.
+      operationId: createSecurityResponseRule
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSecurityResponseRuleRequest' }
+      responses:
+        '201':
+          description: The created security response rule
+          content: { application/json: { schema: { $ref: '#/components/schemas/SecurityResponseRule' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/security-response-rules/{id}:
+    get:
+      summary: Get one security response rule by identifier
+      operationId: getSecurityResponseRule
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The security response rule
+          content: { application/json: { schema: { $ref: '#/components/schemas/SecurityResponseRule' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Change one or more fields of a security response rule
+      description: >-
+        Supply one or more of name, min_severity, action_config or enabled.
+        asset_id and action_type cannot be changed — delete and recreate the
+        rule instead (repointing action_type via PATCH would defeat the
+        create-time SAFE allowlist check).
+      operationId: patchSecurityResponseRule
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchSecurityResponseRuleRequest' }
+      responses:
+        '200':
+          description: The updated security response rule
+          content: { application/json: { schema: { $ref: '#/components/schemas/SecurityResponseRule' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    delete:
+      summary: Remove a security response rule
+      description: >-
+        Carries no row_version (ADR-HARD-003): a delete is idempotent on
+        identity, not a field-level merge, so there is nothing for an
+        optimistic-lock token to protect here — the same asymmetry
+        deleteSecurityRule documents.
+      operationId: deleteSecurityResponseRule
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/maintenance-windows:
     get:
       summary: List the caller's tenant's maintenance windows (E3.3a)
@@ -5434,6 +5548,71 @@ components:
       properties:
         kind: { type: string, enum: [url, note, attestation] }
         value: { type: string, maxLength: 4000 }
+    SecurityResponseRule:
+      type: object
+      description: >-
+        A security-response-automation config (E8.5, ADR-SOC-010): condition
+        (min_severity + optional asset_id scope) + one SAFE ActionSpec
+        (action_type/action_config). NOT a reified Workflow/Playbook — one
+        rule runs one action. Evaluated by the leader-gated SecurityResponder
+        against NEW security-sourced incidents only; a dispatch is recorded
+        on the append-only security_response_dispatch ledger, never exposed
+        here.
+      properties:
+        rule_id: { type: string }
+        name: { type: string, maxLength: 200 }
+        min_severity:
+          type: string
+          enum: [critical, high, medium, low]
+          description: Fire when a matching incident's severity is at least this.
+        asset_id:
+          type: string
+          nullable: true
+          description: Scopes this rule to incidents linked to one Configuration Item. Absent/null means every security incident this tenant raises.
+        action_type:
+          type: string
+          enum: [http, notification]
+          description: >-
+            SAFE allowlist ONLY. command (arbitrary execution) and any
+            destructive/response action are refused at creation.
+        action_config:
+          type: object
+          additionalProperties: true
+          description: Opaque configuration for action_type, validated by the action implementation itself when it runs.
+        enabled: { type: boolean }
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SecurityResponseRuleList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SecurityResponseRule' }
+    CreateSecurityResponseRuleRequest:
+      type: object
+      required: [name, min_severity, action_type]
+      description: enabled defaults to true. asset_id omitted means every security incident this tenant raises.
+      properties:
+        name: { type: string, maxLength: 200 }
+        min_severity: { type: string, enum: [critical, high, medium, low] }
+        asset_id: { type: string }
+        action_type: { type: string, enum: [http, notification] }
+        action_config: { type: object, additionalProperties: true }
+        enabled: { type: boolean }
+    PatchSecurityResponseRuleRequest:
+      type: object
+      required: [row_version]
+      description: >-
+        Supply one or more of name, min_severity, action_config or enabled.
+        asset_id and action_type cannot be changed — delete and recreate the
+        rule instead.
+      properties:
+        row_version: { type: integer, format: int64 }
+        name: { type: string, maxLength: 200 }
+        min_severity: { type: string, enum: [critical, high, medium, low] }
+        action_config: { type: object, additionalProperties: true }
+        enabled: { type: boolean }
     MaintenanceWindow:
       type: object
       description: >-

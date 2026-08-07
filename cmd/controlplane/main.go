@@ -599,6 +599,14 @@ func run(logger *slog.Logger) error {
 	// counterpart: continuous-audit automation is deferred as speculative on
 	// a customer-less product.
 	srv.SetComplianceControls(postgres.NewComplianceControlStore(appPool))
+	// Security-response automation rule administration (E8.5, ADR-SOC-010),
+	// completing E8: tenant-owned and under row-level security, exactly like
+	// compliance_control above, so the admin CRUD API is built from the
+	// tenant-scoped pool. The leader-gated security.Responder that evaluates
+	// these rules against NEW security-sourced incidents is wired further
+	// below, over the privileged pool — the identical dual-role split
+	// SecurityRuleStore/IOCStore already draw above.
+	srv.SetSecurityResponseRules(postgres.NewSecurityResponseRuleStore(appPool))
 	// Telemetry retention + downsampling (E2.1b, ADR-TELEMETRY-002): both
 	// workers process every tenant's chunks/buckets from one process, the
 	// same category of background worker the webhook dispatcher and policy
@@ -776,6 +784,29 @@ func run(logger *slog.Logger) error {
 	iocMatcher := security.NewIOCMatcher(
 		iocMatcherStore, securityObservationCounter, incidentCorrelator, iocMatcherMetrics, logger, security.IOCMatcherConfig{})
 	workers = append(workers, iocMatcher.Run)
+
+	// Security-response automation (E8.5, ADR-SOC-010, completing E8): a
+	// THIRD sibling leader-gated pass, the SAFE-action-response analog of
+	// securityDetector/iocMatcher above. UNLIKE both of those, it correlates
+	// nothing into Incident — its ONLY consequence is running a matched
+	// rule's SAFE action (http|notification) via the EXISTING policyRegistry
+	// (built above, PRS-020) — so it takes no IncidentCorrelator at all, only
+	// a narrow, tenant-explicit READ over incident (security.
+	// IncidentWindowReader). Its own privileged store type
+	// (SecurityResponderStore) mirrors SecurityRuleDetectorStore/
+	// IOCMatcherStore's identical minimal-surface split from their own admin
+	// CRUD stores. This engine is NEVER wired through policyConsumer/
+	// policyExecutor/audit_event — see internal/security.Responder's
+	// own doc comment for why a security incident has no place on the
+	// governance hash-chain those exist to serve; policyRegistry (the bare
+	// action dispatcher) is the only piece of the policy engine this worker
+	// reuses.
+	securityResponderStore := postgres.NewSecurityResponderStore(pool)
+	securityResponderMetrics := security.NewResponderPromMetrics(metrics.Registry())
+	securityResponder := security.NewResponder(
+		securityResponderStore, securityResponderStore, securityResponderStore,
+		policyRegistry, securityResponderMetrics, logger, security.ResponderConfig{})
+	workers = append(workers, securityResponder.Run)
 
 	// Escalation engine (E5.2b-2, ADR-ONCALL-003): pages an incident's
 	// on-call chain and escalates through its policy's tiers while it stays

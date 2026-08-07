@@ -141,6 +141,12 @@ var immutableAuditTables = []struct {
 	// append-only table, not part of the audit_event/admin_audit_event hash
 	// chain (see domain.ControlEvidence's doc comment).
 	{"control_evidence", "trg_control_evidence_no_row_mutate", "trg_control_evidence_no_truncate", true},
+	// security_response_dispatch (E8.5): tenant-owned exactly-once
+	// dispatch ledger, armed ENABLE ALWAYS from its first migration, exactly
+	// like control_evidence — see 20260913000001_security_response_rule.sql.
+	// A PLAIN append-only table, not part of the audit_event/
+	// admin_audit_event hash chain (ADR-SOC-010).
+	{"security_response_dispatch", "trg_security_response_dispatch_no_row_mutate", "trg_security_response_dispatch_no_truncate", true},
 }
 
 // validateAuditImmutability verifies that every append-only audit table, and
