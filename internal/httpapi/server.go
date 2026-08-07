@@ -176,6 +176,14 @@ type Server struct {
 	// wiring is E4; incidents are created manually via this API until then.
 	incidents domain.IncidentRepository
 
+	// Risk register (E8.4a); nil until SetRisks. risk is TENANT-OWNED, like
+	// incident above, so nothing here needs an exemption from row-level
+	// security. Unlike vuln_finding, a risk carries no natural dedup key —
+	// it is operator-authored, not scan-deduped. Compliance controls/
+	// evidence (E8.4b) and continuous-audit automation are OUT of scope
+	// here — separate, later stories (ADR-SOC-008).
+	risks domain.RiskRepository
+
 	// Maintenance window registry (E3.3a); nil until SetMaintenanceWindows.
 	// maintenance_window is TENANT-OWNED, like alert_rule above, so nothing
 	// here needs an exemption from row-level security. The evaluator's
@@ -677,6 +685,24 @@ func (s *Server) routesFor(root fs.FS, consoleBuilt bool) *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/vuln-findings/{id}", s.getVulnFinding)
 		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/vuln-findings/{id}", s.patchVulnFinding)
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/vuln-findings/{id}/remediate", s.remediateVulnFinding)
+
+		// Risk register administration (E8.4a). risk is TENANT-OWNED,
+		// exactly like vuln_finding above, so the permission tier is tenant
+		// administration, not requirePlatformAdmin. Unlike vuln_finding's
+		// PATCH (status-only, since its fields are scan-owned), a risk's
+		// PATCH edits ordinary fields OR performs a lifecycle transition —
+		// never both in the same call — mirroring PATCH /admin/assets/{id}'s
+		// identical split. GET .../register is mounted alongside GET
+		// .../{id}, exactly like GET .../prioritized is for vuln-findings —
+		// chi resolves the static segment before the param regardless of
+		// registration order. There is no Delete: a risk is operational
+		// history the moment it is registered (ADR-HARD-003) — "removing"
+		// one is a transition to closed.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/risks", s.listRisks)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/risks", s.createRisk)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/risks/register", s.getRiskRegister)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/risks/{id}", s.getRisk)
+		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/risks/{id}", s.patchRisk)
 
 		// Maintenance window administration (E3.3a). maintenance_window is
 		// TENANT-OWNED, exactly like alert_rule above, so the permission tier

@@ -2558,6 +2558,131 @@ paths:
         '422': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/risks:
+    get:
+      summary: List the caller's tenant's risk-register entries (E8.4a)
+      operationId: listRisks
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [open, mitigating, accepted, closed] }
+        - name: category
+          in: query
+          description: Filter to one exact category value.
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last risk_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of risks
+          content: { application/json: { schema: { $ref: '#/components/schemas/RiskList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Register a new risk (E8.4a)
+      description: >-
+        Always minted open. asset_id, when supplied, must already name a
+        Configuration Item visible to the caller's tenant, re-verified
+        server-side (ADR-ASSET-001 §6) — a cross-tenant or nonexistent
+        asset_id is refused with 404. category is open-but-bounded, NOT a
+        closed enum. treatment is optional.
+      operationId: createRisk
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRiskRequest' }
+      responses:
+        '201':
+          description: The registered risk
+          content: { application/json: { schema: { $ref: '#/components/schemas/Risk' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/risks/register:
+    get:
+      summary: Rank the caller's OPEN risks by likelihood x impact score — the risk matrix (E8.4a)
+      description: >-
+        A bounded, read-only PROJECTION — never a stored score. "OPEN" means
+        every non-closed status (open, mitigating, accepted). Ranked by
+        score = likelihoodRank(risk.likelihood) * impactRank(risk.impact),
+        each rank 1-based over its own five-member scale (likelihood:
+        rare=1..almost_certain=5; impact: negligible=1..severe=5) so no
+        combination ever scores zero. Ties are broken by updated_at DESC,
+        then risk_id. Row-level security alone confines this to the
+        caller's own tenant.
+      operationId: getRiskRegister
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+      responses:
+        '200':
+          description: The caller's open risks, highest score first
+          content: { application/json: { schema: { $ref: '#/components/schemas/RiskRegisterResponse' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/risks/{id}:
+    get:
+      summary: Get one risk by identifier
+      operationId: getRisk
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The risk
+          content: { application/json: { schema: { $ref: '#/components/schemas/Risk' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Edit a risk's fields, OR perform a lifecycle transition (E8.4a)
+      description: >-
+        Exactly one of (title/description/category/likelihood/impact/
+        treatment/asset_id) or status must be supplied — never both in the
+        same call (mirrors PATCH /admin/assets/{id}'s identical split). A
+        status transition is checked by domain.RiskStatus.CanTransitionTo;
+        an illegal move (e.g. accepted directly to mitigating) is refused
+        with 409. Both halves are row_version-guarded.
+      operationId: patchRisk
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchRiskRequest' }
+      responses:
+        '200':
+          description: The updated risk
+          content: { application/json: { schema: { $ref: '#/components/schemas/Risk' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/maintenance-windows:
     get:
       summary: List the caller's tenant's maintenance windows (E3.3a)
@@ -5014,6 +5139,89 @@ components:
       properties:
         vuln_finding: { $ref: '#/components/schemas/VulnFinding' }
         incident: { $ref: '#/components/schemas/Incident' }
+    Risk:
+      type: object
+      description: >-
+        One tenant-owned risk-register entry (E8.4a): a stateful reified
+        entity — like Incident/VulnFinding, NOT a false noun — with a
+        governed lifecycle and a computed (never stored) likelihood x
+        impact score (see GET .../register).
+      properties:
+        risk_id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        category:
+          type: string
+          description: Open-but-bounded operator label (e.g. operational, compliance, security) — NOT a closed enum. Blank means uncategorised.
+        likelihood: { type: string, enum: [rare, unlikely, possible, likely, almost_certain] }
+        impact: { type: string, enum: [negligible, minor, moderate, major, severe] }
+        status:
+          type: string
+          enum: [open, mitigating, accepted, closed]
+          description: >-
+            open -> {mitigating, accepted, closed}; mitigating -> {accepted,
+            closed, open}; accepted -> {open, closed}; closed -> open
+            (reopened).
+        treatment:
+          type: string
+          enum: [mitigate, accept, transfer, avoid]
+          description: The operator's OPTIONAL disposition decision, or absent when not yet decided.
+        asset_id:
+          type: string
+          description: The Configuration Item this risk concerns, or absent when not tied to one.
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    RiskList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Risk' }
+    CreateRiskRequest:
+      type: object
+      required: [title, likelihood, impact]
+      properties:
+        title: { type: string, maxLength: 200 }
+        description: { type: string, maxLength: 10000 }
+        category: { type: string, maxLength: 100 }
+        likelihood: { type: string, enum: [rare, unlikely, possible, likely, almost_certain] }
+        impact: { type: string, enum: [negligible, minor, moderate, major, severe] }
+        treatment: { type: string, enum: [mitigate, accept, transfer, avoid] }
+        asset_id: { type: string }
+    PatchRiskRequest:
+      type: object
+      required: [row_version]
+      description: >-
+        Supply exactly one of the non-status fields below, or status —
+        never both in the same call.
+      properties:
+        row_version: { type: integer, format: int64 }
+        title: { type: string, maxLength: 200 }
+        description: { type: string, maxLength: 10000 }
+        category: { type: string, maxLength: 100, description: "\"\" clears it to uncategorised." }
+        likelihood: { type: string, enum: [rare, unlikely, possible, likely, almost_certain] }
+        impact: { type: string, enum: [negligible, minor, moderate, major, severe] }
+        treatment: { type: string, description: "One of mitigate/accept/transfer/avoid, or \"\" to clear it." }
+        asset_id: { type: string, description: "The asset_id to link, or \"\" to unlink." }
+        status: { type: string, enum: [open, mitigating, accepted, closed] }
+    RiskRegisterEntry:
+      type: object
+      description: >-
+        One row of the E8.4a scoring projection: a Risk plus its computed
+        score/band. Never stored — recomputed on every call.
+      properties:
+        risk: { $ref: '#/components/schemas/Risk' }
+        score:
+          type: integer
+          description: likelihoodRank(risk.likelihood) * impactRank(risk.impact), each rank 1-based (1..5).
+        band: { type: string, enum: [critical, high, medium, low] }
+    RiskRegisterResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/RiskRegisterEntry' }
     MaintenanceWindow:
       type: object
       description: >-

@@ -1,0 +1,2 @@
+-- Reverses 20260911000001_risk.
+DROP TABLE IF EXISTS risk;

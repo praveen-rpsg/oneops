@@ -109,6 +109,12 @@ var serverGeneratedIdentifiers = map[string]string{
 	// already carries tenant_id directly and so never reaches this map; only
 	// the surrogate PK does.
 	"vuln_finding_pkey": "finding_id is server-minted (domain.NewVulnFinding); no create route accepts one from a client",
+
+	// Risk register stateful entity + scoring projection (E8.4a). Unlike
+	// vuln_finding, risk carries no natural dedup key at all — it is
+	// operator-authored, not scan-deduped — so only the surrogate PK needs
+	// this justification.
+	"risk_pkey": "risk_id is server-minted (domain.NewRisk); no create route accepts one from a client",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

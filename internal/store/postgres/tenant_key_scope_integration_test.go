@@ -144,6 +144,11 @@ var keyScopeJustifications = map[string]string{
 	// already contains tenant_id directly (route 1), so only the surrogate PK
 	// needs justifying here.
 	"vuln_finding.vuln_finding_pkey": "finding_id is platform-generated (domain.NewVulnFinding); clients never supply it and there is no create route that accepts one",
+
+	// Risk register stateful entity + scoring projection (E8.4a). risk
+	// carries no natural dedup key at all — it is operator-authored, not
+	// scan-deduped — so only the surrogate PK needs justifying here.
+	"risk.risk_pkey": "risk_id is platform-generated (domain.NewRisk); clients never supply it and there is no create route that accepts one",
 }
 
 func TestEveryTenantScopedUniqueKey_IsTenantScoped(t *testing.T) {

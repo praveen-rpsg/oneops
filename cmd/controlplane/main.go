@@ -586,6 +586,12 @@ func run(logger *slog.Logger) error {
 	// this story — prioritization by CI criticality and remediation ->
 	// Incident linkage (E8.3b) is a later, separate story that may need one.
 	srv.SetVulnFindings(postgres.NewVulnFindingStore(appPool))
+	// Risk register administration (E8.4a): tenant-owned and under
+	// row-level security, exactly like vuln_finding above, so the admin
+	// CRUD API + scoring projection are built from the tenant-scoped pool.
+	// There is no privileged-pool counterpart: compliance controls/evidence
+	// (E8.4b) and continuous-audit automation are separate, later stories.
+	srv.SetRisks(postgres.NewRiskStore(appPool))
 	// Telemetry retention + downsampling (E2.1b, ADR-TELEMETRY-002): both
 	// workers process every tenant's chunks/buckets from one process, the
 	// same category of background worker the webhook dispatcher and policy
