@@ -541,6 +541,10 @@ func TestProducersHaveNoOutboundCapability(t *testing.T) {
 var registeredBinaries = map[string]string{
 	"controlplane": "the platform; all privileged writes go through the shared security framework",
 	"kg":           "read-only derivation over the working tree; opens no database connection and writes only pkg.json",
+	"seed-demo": "a demo/dev tool; opens no database connection and mints no credentials of its own — every " +
+		"write is an ordinary call to the running control plane's existing /v1/admin API, authorized exactly " +
+		"as any other caller (a bearer token, or the local no-auth dev mode), so it owns nothing outside that " +
+		"framework",
 }
 
 // registeredScripts is the same control for operational *scripts*.

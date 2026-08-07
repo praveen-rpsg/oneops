@@ -6,7 +6,7 @@ LDFLAGS := -s -w -X $(PKG)/pkg/version.Version=$(VERSION) -X $(PKG)/pkg/version.
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down build graph run test test-integration cover lint fmt vet tidy docker migrate-hash migrate-validate clean db-backup db-restore dr-drill db-reset web web-test contract-breaking loadtest
+.PHONY: help up down build graph run seed-demo test test-integration cover lint fmt vet tidy docker migrate-hash migrate-validate clean db-backup db-restore dr-drill db-reset web web-test contract-breaking loadtest
 
 MIGRATIONS_DIR := internal/store/migrate/sql
 ATLAS := docker run --rm -v "$(PWD)":/src -w /src arigaio/atlas:latest
@@ -57,6 +57,11 @@ graph: ## Derive the knowledge graph into pkg.json (generated, never committed)
 
 run: ## Run the control plane locally
 	@$(DOTENV) go run ./cmd/controlplane
+
+SEED_BASE_URL ?= http://localhost:8080
+
+seed-demo: ## Populate a running (fresh-tenant) control plane with a demo dataset via its /v1/admin API
+	@go run ./cmd/seed-demo -base $(SEED_BASE_URL)
 
 db-backup: ## Take a verified logical backup into ./backups
 	@$(PGTOOLS) scripts/db-backup.sh /src/backups
