@@ -45,3 +45,48 @@ func (m *PromMetrics) IncRecovered() { m.recovered.Inc() }
 
 // IncErrors implements Metrics.
 func (m *PromMetrics) IncErrors() { m.errors.Inc() }
+
+// IOCMatcherPromMetrics is the Prometheus IOCMatcherMetrics implementation
+// (E8.2b) — a SEPARATE type/metric-name family from PromMetrics above, the
+// same split IOCMatcherMetrics's own doc comment draws: "rules evaluated" and
+// "observations checked against the watchlist" are different signals.
+type IOCMatcherPromMetrics struct {
+	observationsChecked prometheus.Counter
+	matched             prometheus.Counter
+	tenantsProcessed    prometheus.Counter
+	errors              prometheus.Counter
+}
+
+var _ IOCMatcherMetrics = (*IOCMatcherPromMetrics)(nil)
+
+// NewIOCMatcherPromMetrics builds and registers the matcher's collectors.
+func NewIOCMatcherPromMetrics(reg prometheus.Registerer) *IOCMatcherPromMetrics {
+	m := &IOCMatcherPromMetrics{
+		observationsChecked: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "oneops_ioc_observations_checked_total", Help: "Total security_observation rows checked against the IOC watchlist.",
+		}),
+		matched: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "oneops_ioc_matches_total", Help: "Total observations that matched an enabled ioc.",
+		}),
+		tenantsProcessed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "oneops_ioc_matcher_tenants_processed_total", Help: "Total per-tenant match passes completed.",
+		}),
+		errors: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "oneops_ioc_matcher_errors_total", Help: "Total IOC matcher errors (list, read, or correlate failures).",
+		}),
+	}
+	reg.MustRegister(m.observationsChecked, m.matched, m.tenantsProcessed, m.errors)
+	return m
+}
+
+// IncObservationsChecked implements IOCMatcherMetrics.
+func (m *IOCMatcherPromMetrics) IncObservationsChecked() { m.observationsChecked.Inc() }
+
+// IncMatched implements IOCMatcherMetrics.
+func (m *IOCMatcherPromMetrics) IncMatched() { m.matched.Inc() }
+
+// IncTenantsProcessed implements IOCMatcherMetrics.
+func (m *IOCMatcherPromMetrics) IncTenantsProcessed() { m.tenantsProcessed.Inc() }
+
+// IncErrors implements IOCMatcherMetrics.
+func (m *IOCMatcherPromMetrics) IncErrors() { m.errors.Inc() }

@@ -573,9 +573,11 @@ func run(logger *slog.Logger) error {
 	srv.SetSecurityRules(postgres.NewSecurityRuleStore(appPool))
 	// Indicator-of-compromise watchlist administration (E8.2a): tenant-owned
 	// and under row-level security, exactly like security_rule above, so the
-	// admin CRUD API is built from the tenant-scoped pool. CONFIG ONLY: no
-	// detector reads this watchlist yet — that is E8.2b, a later, separate
-	// story.
+	// admin CRUD API is built from the tenant-scoped pool. The leader-gated
+	// IOCMatcher that reads this watchlist against security_observation
+	// (E8.2b) is wired further below, over the privileged pool — the
+	// identical dual-role split AlertRuleStore/SecurityRuleStore already
+	// draw above.
 	srv.SetIOCs(postgres.NewIOCStore(appPool))
 	// Telemetry retention + downsampling (E2.1b, ADR-TELEMETRY-002): both
 	// workers process every tenant's chunks/buckets from one process, the
@@ -737,6 +739,23 @@ func run(logger *slog.Logger) error {
 	securityDetector := security.NewDetector(
 		securityRuleDetectorStore, securityObservationCounter, incidentCorrelator, securityMetrics, logger, security.Config{})
 	workers = append(workers, securityDetector.Run)
+
+	// IOC-watchlist matcher (E8.2b, ADR-SOC-005): a SEPARATE leader-gated
+	// pass over ioc, the WATCHLIST analog of securityDetector above — reuses
+	// the SAME incidentCorrelator (security.IncidentCorrelator) and the SAME
+	// securityObservationCounter instance (it now also satisfies
+	// security.ObservationWindowReader alongside security.ObservationCounter
+	// — see that type's own doc comment), so this adds exactly one new
+	// privileged store type (IOCMatcherStore, mirroring
+	// SecurityRuleDetectorStore's own minimal-surface split from the admin
+	// CRUD IOCStore above) rather than a second privileged observation
+	// reader. Its correlator argument must never be nil for the identical
+	// reason security.NewDetector's own doc comment gives.
+	iocMatcherStore := postgres.NewIOCMatcherStore(pool)
+	iocMatcherMetrics := security.NewIOCMatcherPromMetrics(metrics.Registry())
+	iocMatcher := security.NewIOCMatcher(
+		iocMatcherStore, securityObservationCounter, incidentCorrelator, iocMatcherMetrics, logger, security.IOCMatcherConfig{})
+	workers = append(workers, iocMatcher.Run)
 
 	// Escalation engine (E5.2b-2, ADR-ONCALL-003): pages an incident's
 	// on-call chain and escalates through its policy's tiers while it stays

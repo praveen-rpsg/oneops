@@ -112,3 +112,82 @@ func (NopMetrics) IncEvaluated() {}
 func (NopMetrics) IncFired()     {}
 func (NopMetrics) IncRecovered() {}
 func (NopMetrics) IncErrors()    {}
+
+// ---------------------------------------------------------------------------
+// E8.2b: the IOCMatcher's own ports (ioc_matcher.go, ADR-SOC-005). A SEPARATE
+// pair of interfaces from Store/ObservationCounter above, mirroring the
+// SAME split-privileged-surface reasoning: the IOCMatcher reads a different
+// config table (ioc, not security_rule) over a different SQL shape (a
+// bounded row read across every asset/type in a tenant's window, not a
+// per-asset/type COUNT), so it gets its own minimal ports rather than
+// widening Store/ObservationCounter to carry both rules and iocs.
+
+// IOCLister is the leader-gated IOCMatcher's own privileged read over ioc
+// (E8.2b). *postgres.IOCMatcherStore satisfies it when built over the
+// PRIVILEGED pool — DELIBERATELY SEPARATE from IOCStore (the admin CRUD API,
+// domain.IOCRepository, tenant-scoped), the identical dual-role split
+// SecurityRuleDetectorStore/SecurityRuleStore already draws, and for the
+// identical reason: keeping this port's (and its implementation's) method
+// set to exactly these two methods means IOCStore.Create/Update/Delete are
+// never reachable from a privileged instance.
+type IOCLister interface {
+	// TenantsWithEnabledIOCs returns every tenant_id that currently holds at
+	// least one enabled ioc — mirrors grouping.Store.TenantsWithOpenAlertIncidents:
+	// tenant-agnostic, discloses only which tenants have work, never any
+	// tenant's row data. This is what bounds RunOnce to tenants with
+	// something to match against, instead of sweeping every tenant that ever
+	// registered (the same "only tenants with work" discipline
+	// TenantsWithOpenAlertIncidents applies to grouping).
+	TenantsWithEnabledIOCs(ctx context.Context) ([]string, error)
+	// EnabledIOCsForTenant returns up to limit of tenantID's enabled iocs,
+	// keyset-paginated over ioc_id — mirrors Store.EnabledRules narrowed to
+	// one tenant via an EXPLICIT tenant_id predicate (ADR-TENANCY-012): this
+	// connection has row-level security switched off, so nothing else
+	// confines the read to tenantID.
+	EnabledIOCsForTenant(ctx context.Context, tenantID string, limit int, after string) ([]*domain.IOC, error)
+}
+
+// ObservationWindowReader is the IOCMatcher's own privileged read over
+// security_observation — narrower in SCOPE than ObservationCounter (which
+// fixes one asset_id/observation_type and only counts) but WIDER in SHAPE (it
+// returns full rows, Attributes included, across every asset/type a tenant
+// reported): an IOC match is checked against everything the tenant observed
+// in the trailing window, not one rule's own asset/type pair.
+// *postgres.SecurityObservationCounterStore satisfies both this and
+// ObservationCounter — one privileged type, two narrow ports, mirroring how
+// *postgres.IncidentStore satisfies both alerting.IncidentCorrelator and
+// IncidentCorrelator above.
+type ObservationWindowReader interface {
+	// RecentForTenant returns up to limit of tenantID's security_observation
+	// rows with observed_at in (from, to], ordered by the table's own natural
+	// key (observed_at, asset_id, observation_type, source) ascending —
+	// EXCLUSIVE of from, so consecutive tiled windows ([a,b] then [b,c]) never
+	// double-return the row observed exactly at the shared boundary. after,
+	// when non-nil, is the previous page's own LAST row: security_observation
+	// has no surrogate id (its own migration's doc comment), so the natural
+	// key compared as a whole (a Postgres ROW value) is the only usable
+	// keyset cursor once asset_id/observation_type are no longer fixed to one
+	// pair — contrast domain.SecurityObservationRepository.QueryRange, which
+	// fixes both and so can key on observed_at alone.
+	RecentForTenant(ctx context.Context, tenantID string, from, to time.Time, limit int, after *domain.SecurityObservation) ([]domain.SecurityObservation, error)
+}
+
+// IOCMatcherMetrics receives IOCMatcher observability signals — a SEPARATE
+// interface from Metrics above: "rules evaluated/fired/recovered" and
+// "observations checked against the watchlist/matched" are different
+// signals a dashboard needs to tell apart (different underlying detection
+// pipelines, per securityDetectorSystemActor's own doc comment reasoning).
+type IOCMatcherMetrics interface {
+	IncObservationsChecked()
+	IncMatched()
+	IncTenantsProcessed()
+	IncErrors()
+}
+
+// NopIOCMatcherMetrics is the no-op IOCMatcherMetrics.
+type NopIOCMatcherMetrics struct{}
+
+func (NopIOCMatcherMetrics) IncObservationsChecked() {}
+func (NopIOCMatcherMetrics) IncMatched()             {}
+func (NopIOCMatcherMetrics) IncTenantsProcessed()    {}
+func (NopIOCMatcherMetrics) IncErrors()              {}
