@@ -36,12 +36,16 @@ const MaintenanceBoardPage = lazy(() =>
 );
 const MembersPage = lazy(() => import('./routes/MembersPage').then((m) => ({ default: m.MembersPage })));
 const NOCOverviewPage = lazy(() => import('./routes/NOCOverviewPage').then((m) => ({ default: m.NOCOverviewPage })));
+const ObservationsPage = lazy(() => import('./routes/ObservationsPage').then((m) => ({ default: m.ObservationsPage })));
 const OnCallBoardPage = lazy(() => import('./routes/OnCallBoardPage').then((m) => ({ default: m.OnCallBoardPage })));
 // `/redeem` (E-ID.5, ADR-IAC-004) is reached via the PUBLIC-ROUTE bypass
 // below, never through the authenticated <Routes> tree — an invitee has no
 // session, so it cannot live inside the `Shell`-wrapped routes the auth gate
 // protects. Still lazy-loaded, same as every other route's chunk.
 const RedeemPage = lazy(() => import('./routes/RedeemPage').then((m) => ({ default: m.RedeemPage })));
+const ResponseRulesPage = lazy(() =>
+  import('./routes/ResponseRulesPage').then((m) => ({ default: m.ResponseRulesPage })),
+);
 const RiskRegisterPage = lazy(() =>
   import('./routes/RiskRegisterPage').then((m) => ({ default: m.RiskRegisterPage })),
 );
@@ -176,6 +180,8 @@ export default function App() {
         <Route path="security/indicators" element={<IndicatorsPage />} />
         <Route path="security/risks" element={<RiskRegisterPage />} />
         <Route path="security/compliance" element={<CompliancePage />} />
+        <Route path="security/response-rules" element={<ResponseRulesPage />} />
+        <Route path="security/observations" element={<ObservationsPage />} />
         <Route path="administration" element={<AdministrationPage />} />
         <Route path="members" element={<MembersPage />} />
         <Route path="users" element={<UsersPage />} />
