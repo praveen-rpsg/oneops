@@ -102,6 +102,9 @@ var keyScopeJustifications = map[string]string{
 	// Alert rule config + firing-state (E3.1).
 	"alert_rule.alert_rule_pkey": "rule_id is platform-generated (domain.NewAlertRule); clients never supply it and there is no create route that accepts one",
 
+	// Security rule detection config (E8.1b-1).
+	"security_rule.security_rule_pkey": "rule_id is platform-generated (domain.NewSecurityRule); clients never supply it and there is no create route that accepts one",
+
 	// Incident work item + append-only timeline (E5.1).
 	"incident.incident_pkey":             "incident_id is platform-generated (domain.NewIncident); clients never supply it and there is no create route that accepts one",
 	"incident_event.incident_event_pkey": "event_id is platform-generated (domain.NewID() in IncidentStore.recordEvent); clients never supply it and there is no route that accepts one",

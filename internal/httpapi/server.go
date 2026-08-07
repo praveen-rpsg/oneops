@@ -145,6 +145,14 @@ type Server struct {
 	// field is only the admin CRUD surface.
 	alertRules domain.AlertRuleRepository
 
+	// Security rule registry (E8.1b-1); nil until SetSecurityRules.
+	// security_rule is TENANT-OWNED, like alert_rule above, so nothing here
+	// needs an exemption from row-level security. CONFIG ONLY: there is no
+	// privileged-pool counterpart and no detector/worker in this story — the
+	// SOC detector that derives firings against security_observation
+	// (E8.1b-2) is a later, separate story.
+	securityRules domain.SecurityRuleRepository
+
 	// Incident registry (E5.1); nil until SetIncidents. incident/
 	// incident_event are TENANT-OWNED, like asset above, so nothing here
 	// needs an exemption from row-level security. Alert-firing -> Incident
@@ -610,6 +618,18 @@ func (s *Server) routesFor(root fs.FS, consoleBuilt bool) *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/alert-rules/{id}", s.getAlertRule)
 		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/alert-rules/{id}", s.patchAlertRule)
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/alert-rules/{id}", s.deleteAlertRule)
+
+		// Security rule administration (E8.1b-1). security_rule is
+		// TENANT-OWNED, exactly like alert_rule above, so the permission tier
+		// is tenant administration, not requirePlatformAdmin. CONFIG ONLY: no
+		// detector, worker or "firings" endpoint exists here — a firing is
+		// derived by a future, separate detector (E8.1b-2) evaluating this
+		// config against security_observation, never stored here.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/security-rules", s.listSecurityRules)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/security-rules", s.createSecurityRule)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/security-rules/{id}", s.getSecurityRule)
+		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/security-rules/{id}", s.patchSecurityRule)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/security-rules/{id}", s.deleteSecurityRule)
 
 		// Maintenance window administration (E3.3a). maintenance_window is
 		// TENANT-OWNED, exactly like alert_rule above, so the permission tier

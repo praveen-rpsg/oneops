@@ -562,6 +562,13 @@ func run(logger *slog.Logger) error {
 	// telemetry_sample (ADR-TELEMETRY-001, ADR-SOC-001). Fact ingest/query
 	// only: no detection, correlation or worker is wired here (E8.1b).
 	srv.SetSecurityObservations(postgres.NewSecurityObservationStore(appPool))
+	// Security rule administration (E8.1b-1): tenant-owned and under
+	// row-level security, exactly like security_observation above, so the
+	// admin CRUD API is built from the tenant-scoped pool. CONFIG ONLY: no
+	// detector/worker is wired here — the SOC detector that evaluates these
+	// rules against security_observation (E8.1b-2) is a later, separate
+	// story, so there is no privileged-pool counterpart yet either.
+	srv.SetSecurityRules(postgres.NewSecurityRuleStore(appPool))
 	// Telemetry retention + downsampling (E2.1b, ADR-TELEMETRY-002): both
 	// workers process every tenant's chunks/buckets from one process, the
 	// same category of background worker the webhook dispatcher and policy

@@ -2179,6 +2179,109 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/security-rules:
+    get:
+      summary: List the caller's tenant's security rules (E8.1b-1)
+      operationId: listSecurityRules
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last rule_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of security rules
+          content: { application/json: { schema: { $ref: '#/components/schemas/SecurityRuleList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Register a threshold-over-window detection rule over one asset's security observations (E8.1b-1)
+      description: >-
+        asset_id must already name a Configuration Item visible to the
+        caller's tenant, re-verified server-side before the row is written
+        (ADR-ASSET-001 §6, extended here) — a cross-tenant or nonexistent
+        asset_id is rejected with 404. CONFIG ONLY: a firing is DERIVED by a
+        future, separate detector (E8.1b-2) evaluating this config against
+        security_observation, never stored here as a reified
+        Alert/Detection/Correlation row.
+      operationId: createSecurityRule
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSecurityRuleRequest' }
+      responses:
+        '201':
+          description: The created security rule
+          content: { application/json: { schema: { $ref: '#/components/schemas/SecurityRule' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/security-rules/{id}:
+    get:
+      summary: Get one security rule by identifier
+      operationId: getSecurityRule
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The security rule
+          content: { application/json: { schema: { $ref: '#/components/schemas/SecurityRule' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Change one or more fields of a security rule
+      operationId: patchSecurityRule
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchSecurityRuleRequest' }
+      responses:
+        '200':
+          description: The updated security rule
+          content: { application/json: { schema: { $ref: '#/components/schemas/SecurityRule' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    delete:
+      summary: Remove a security rule
+      description: >-
+        Carries no row_version (ADR-HARD-003): a delete is idempotent on
+        identity, not a field-level merge, so there is nothing for an
+        optimistic-lock token to protect here — the same asymmetry
+        deleteAlertRule documents.
+      operationId: deleteSecurityRule
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/maintenance-windows:
     get:
       summary: List the caller's tenant's maintenance windows (E3.3a)
@@ -4339,6 +4442,93 @@ components:
         symptom_class: { type: string, enum: [availability, resource, unspecified] }
         enabled: { type: boolean }
         flap_dwell_seconds: { type: integer, minimum: 0, maximum: 86400 }
+    SecurityRule:
+      type: object
+      description: >-
+        A threshold-over-window SIEM detection config over
+        security_observation (E8.1b-1): it fires when the count of matching
+        observations for its asset in a trailing window meets a threshold. A
+        firing is DERIVED by a future, separate detector (E8.1b-2) evaluating
+        this config — never a reified Alert/Detection/Correlation row.
+        CONFIG ONLY: last_state/current_incident_id exist as columns but
+        nothing writes them yet — exactly as alert_rule's were before its
+        evaluator.
+      properties:
+        rule_id: { type: string }
+        asset_id: { type: string }
+        observation_type: { type: string }
+        min_severity:
+          type: string
+          enum: [info, low, medium, high, critical]
+          default: info
+          description: Count only observations at or above this severity.
+        window_seconds:
+          type: integer
+          minimum: 1
+          maximum: 86400
+          description: The trailing lookback the count is taken over.
+        threshold_count:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          description: Fire when the matching count meets or exceeds this value.
+        incident_severity:
+          type: string
+          enum: [critical, high, medium, low]
+          description: >-
+            The severity of the Incident a future detector (E8.1b-2) will
+            raise on a firing — the INCIDENT severity vocabulary, not
+            min_severity's observation-severity scale.
+        enabled: { type: boolean }
+        last_state:
+          type: string
+          enum: [ok, firing]
+          description: Set only by a future detector (E8.1b-2). A new rule starts at "ok".
+        current_incident_id:
+          type: string
+          nullable: true
+          description: >-
+            The open Incident this rule's firing is currently linked to.
+            Set only by a future detector (E8.1b-2), never through PATCH.
+            Nothing writes this in the current increment.
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SecurityRuleList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SecurityRule' }
+    CreateSecurityRuleRequest:
+      type: object
+      required: [asset_id, observation_type, window_seconds, threshold_count, incident_severity]
+      description: min_severity defaults to "info" when omitted. enabled defaults to true.
+      properties:
+        asset_id: { type: string }
+        observation_type: { type: string }
+        min_severity:
+          type: string
+          enum: [info, low, medium, high, critical]
+          default: info
+        window_seconds: { type: integer, minimum: 1, maximum: 86400 }
+        threshold_count: { type: integer, minimum: 1, maximum: 1000000 }
+        incident_severity: { type: string, enum: [critical, high, medium, low] }
+        enabled: { type: boolean }
+    PatchSecurityRuleRequest:
+      type: object
+      required: [row_version]
+      description: >-
+        Supply one or more of min_severity, window_seconds, threshold_count,
+        incident_severity or enabled. asset_id and observation_type cannot be
+        changed — delete and recreate the rule instead.
+      properties:
+        row_version: { type: integer, format: int64 }
+        min_severity: { type: string, enum: [info, low, medium, high, critical] }
+        window_seconds: { type: integer, minimum: 1, maximum: 86400 }
+        threshold_count: { type: integer, minimum: 1, maximum: 1000000 }
+        incident_severity: { type: string, enum: [critical, high, medium, low] }
+        enabled: { type: boolean }
     MaintenanceWindow:
       type: object
       description: >-
