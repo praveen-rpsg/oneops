@@ -61,6 +61,7 @@ const NAV_ITEMS: SideNavigationProps.Item[] = [
       { type: 'link', text: 'Identity & roles', href: '/administration' },
       { type: 'link', text: 'Members', href: '/members' },
       { type: 'link', text: 'Users', href: '/users' },
+      { type: 'link', text: 'Invitations', href: '/invitations' },
     ],
   },
 ];
@@ -79,6 +80,7 @@ function activeHrefFor(pathname: string): string {
   if (pathname.startsWith('/administration')) return '/administration';
   if (pathname.startsWith('/members')) return '/members';
   if (pathname.startsWith('/users')) return '/users';
+  if (pathname.startsWith('/invitations')) return '/invitations';
   return '/';
 }
 
@@ -96,6 +98,7 @@ const CRUMB_LABEL: Record<string, string> = {
   administration: 'Administration',
   members: 'Members',
   users: 'Users',
+  invitations: 'Invitations',
 };
 
 function useBreadcrumbs() {
@@ -125,17 +128,21 @@ function useBreadcrumbs() {
  * alerts board (E7.3c) drive the shared `SplitPanel` through
  * `ShellSplitPanelContext`.
  *
- * Administration (E-ID.1) is now a `SideNavigation` section with three links
- * (ADR-IAC-001 extension, E-ID.2/E-ID.3): "Identity & roles" (the caller's own
- * identity plus a static, read-only RBAC reference table — safe to show
- * everyone), "Members" (tenant membership grant/revoke — PermAdmin-gated
- * server-side) and "Users" (the global user registry — `requirePlatformAdmin`
- * server-side, a strictly higher bar than PermAdmin). All are gated
- * server-side, not client-side; a caller without the required permission sees
- * the screen's own clean 403 state rather than a hidden nav entry, since the
- * server's response is the only thing this console treats as authoritative.
- * All three are visible to any signed-in user; each screen itself degrades
- * gracefully when the caller lacks the permission its endpoints require.
+ * Administration (E-ID.1) is now a `SideNavigation` section with four links
+ * (ADR-IAC-001 extension, E-ID.2/E-ID.3/E-ID.5): "Identity & roles" (the
+ * caller's own identity plus a static, read-only RBAC reference table — safe
+ * to show everyone), "Members" (tenant membership grant/revoke —
+ * PermAdmin-gated server-side), "Users" (the global user registry —
+ * `requirePlatformAdmin` server-side, a strictly higher bar than PermAdmin)
+ * and "Invitations" (invite-by-email, list, revoke, over the PermAdmin
+ * endpoints ADR-IAC-003 added — the invitee's own REDEEM screen lives at the
+ * unauthenticated top-level `/redeem` route instead, outside this nav
+ * entirely, per ADR-IAC-004). All four are gated server-side, not
+ * client-side; a caller without the required permission sees the screen's
+ * own clean 403 state rather than a hidden nav entry, since the server's
+ * response is the only thing this console treats as authoritative. All four
+ * are visible to any signed-in user; each screen itself degrades gracefully
+ * when the caller lacks the permission its endpoints require.
  */
 export function Shell() {
   const navigate = useNavigate();

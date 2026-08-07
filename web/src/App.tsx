@@ -1,4 +1,4 @@
-import { lazy, useCallback, useEffect, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { completeSignIn, fetchAuthConfig, signIn } from './auth';
 import type { AuthConfig } from './auth';
@@ -25,14 +25,29 @@ const EstatePage = lazy(() => import('./routes/EstatePage').then((m) => ({ defau
 const IncidentBoardPage = lazy(() =>
   import('./routes/IncidentBoardPage').then((m) => ({ default: m.IncidentBoardPage })),
 );
+const InvitationsPage = lazy(() => import('./routes/InvitationsPage').then((m) => ({ default: m.InvitationsPage })));
 const MaintenanceBoardPage = lazy(() =>
   import('./routes/MaintenanceBoardPage').then((m) => ({ default: m.MaintenanceBoardPage })),
 );
 const MembersPage = lazy(() => import('./routes/MembersPage').then((m) => ({ default: m.MembersPage })));
 const NOCOverviewPage = lazy(() => import('./routes/NOCOverviewPage').then((m) => ({ default: m.NOCOverviewPage })));
 const OnCallBoardPage = lazy(() => import('./routes/OnCallBoardPage').then((m) => ({ default: m.OnCallBoardPage })));
+// `/redeem` (E-ID.5, ADR-IAC-004) is reached via the PUBLIC-ROUTE bypass
+// below, never through the authenticated <Routes> tree — an invitee has no
+// session, so it cannot live inside the `Shell`-wrapped routes the auth gate
+// protects. Still lazy-loaded, same as every other route's chunk.
+const RedeemPage = lazy(() => import('./routes/RedeemPage').then((m) => ({ default: m.RedeemPage })));
 const TopologyPage = lazy(() => import('./routes/TopologyPage').then((m) => ({ default: m.TopologyPage })));
 const UsersPage = lazy(() => import('./routes/UsersPage').then((m) => ({ default: m.UsersPage })));
+
+/** Shared with `Shell.tsx`'s ROUTE_LOADING_FALLBACK idiom; used here for the pre-auth `/redeem` Suspense boundary, which has no Shell to host it. */
+const PUBLIC_ROUTE_LOADING_FALLBACK = (
+  <Box margin="xxl" textAlign="center" padding="xxl">
+    <div role="status" aria-busy="true">
+      <Spinner size="large" /> Loading…
+    </div>
+  </Box>
+);
 
 type AuthState =
   | { phase: 'checking' }
@@ -43,9 +58,21 @@ type AuthState =
 export default function App() {
   const [auth, setAuth] = useState<AuthState>({ phase: 'checking' });
 
+  // PUBLIC ROUTE (E-ID.5, ADR-IAC-004): an invitee arriving at /redeem has no
+  // session, and may never have had one — that is the entire reason
+  // `POST /auth/invitations/redeem` is unauthenticated. It must render
+  // BEFORE, and independently of, every phase below (checking/signed-out/
+  // ready), and must not require /auth/config to have resolved. A plain
+  // pathname check rather than a react-router <Route> because it has to win
+  // ahead of the auth gate, not live inside the authenticated <Routes> tree
+  // that gate protects.
+  const isPublicRoute = window.location.pathname === '/redeem';
+
   // Establish the session before any data request is made. When the deployment
   // runs with auth disabled (local development) the console proceeds directly.
+  // Skipped entirely for the public route: it needs none of this state.
   useEffect(() => {
+    if (isPublicRoute) return;
     let cancelled = false;
 
     (async () => {
@@ -76,7 +103,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isPublicRoute]);
 
   const beginSignIn = useCallback(async () => {
     if (auth.phase !== 'signed-out') return;
@@ -91,6 +118,14 @@ export default function App() {
       });
     }
   }, [auth]);
+
+  if (isPublicRoute) {
+    return (
+      <Suspense fallback={PUBLIC_ROUTE_LOADING_FALLBACK}>
+        <RedeemPage />
+      </Suspense>
+    );
+  }
 
   if (auth.phase === 'checking') {
     return (
@@ -128,6 +163,7 @@ export default function App() {
         <Route path="administration" element={<AdministrationPage />} />
         <Route path="members" element={<MembersPage />} />
         <Route path="users" element={<UsersPage />} />
+        <Route path="invitations" element={<InvitationsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
