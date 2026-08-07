@@ -157,16 +157,49 @@ func TestIncidentEventKind_Valid(t *testing.T) {
 	}
 }
 
-// TestIncidentSource_Valid pins the closed vocabulary: manual, alert and
-// security (E8.1b-2) are defined; nothing else is.
+// TestIncidentSource_Valid pins the closed vocabulary: manual, alert,
+// security (E8.1b-2) and vuln (E8.3b) are defined; nothing else is.
 func TestIncidentSource_Valid(t *testing.T) {
-	for _, s := range []IncidentSource{IncidentSourceManual, IncidentSourceAlert, IncidentSourceSecurity} {
+	for _, s := range []IncidentSource{IncidentSourceManual, IncidentSourceAlert, IncidentSourceSecurity, IncidentSourceVuln} {
 		if !s.Valid() {
 			t.Errorf("%q should be valid", s)
 		}
 	}
 	if IncidentSource("bogus").Valid() {
 		t.Error(`"bogus" should not be a valid source`)
+	}
+}
+
+// TestNewVulnRemediationIncident_BuildsAnOpenVulnSourcedIncident proves
+// NewVulnRemediationIncident is NewAlertIncident/NewSecurityIncident's exact
+// analog for E8.3b's remediation path.
+func TestNewVulnRemediationIncident_BuildsAnOpenVulnSourcedIncident(t *testing.T) {
+	inc, err := NewVulnRemediationIncident(" tn-1 ", " remediate CVE-2024-1234 ", "vuln_id=CVE-2024-1234", IncidentSeverityHigh, "asset-1")
+	if err != nil {
+		t.Fatalf("NewVulnRemediationIncident: %v", err)
+	}
+	if inc.TenantID != "tn-1" || inc.Title != "remediate CVE-2024-1234" {
+		t.Errorf("identifiers/title not trimmed: %+v", inc)
+	}
+	if inc.Source != IncidentSourceVuln {
+		t.Errorf("source = %q, want vuln", inc.Source)
+	}
+	if inc.Status != IncidentOpen {
+		t.Errorf("status = %q, want open", inc.Status)
+	}
+	if inc.AssetID == nil || *inc.AssetID != "asset-1" {
+		t.Errorf("asset_id = %v, want asset-1", inc.AssetID)
+	}
+	if inc.IncidentID == "" {
+		t.Error("incident_id must be minted")
+	}
+}
+
+// TestNewVulnRemediationIncident_RequiresAssetID mirrors
+// NewAlertIncident/NewSecurityIncident's own required-assetID contract.
+func TestNewVulnRemediationIncident_RequiresAssetID(t *testing.T) {
+	if _, err := NewVulnRemediationIncident("tn-1", "title", "", IncidentSeverityHigh, ""); err == nil {
+		t.Error("an empty assetID should be rejected")
 	}
 }
 
@@ -198,10 +231,10 @@ func TestNewSecurityIncident_BuildsAnOpenSecuritySourcedIncident(t *testing.T) {
 
 // TestIncident_Validate_RequiresAssetIDForAlertOrSecuritySource proves the
 // AssetID-required check AlertIncident's own doc comment states is extended
-// to security-sourced incidents too — neither correlation path can create an
-// incident with no CI to link.
+// to security- and vuln-sourced incidents too — none of the three paths can
+// create an incident with no CI to link.
 func TestIncident_Validate_RequiresAssetIDForAlertOrSecuritySource(t *testing.T) {
-	for _, source := range []IncidentSource{IncidentSourceAlert, IncidentSourceSecurity} {
+	for _, source := range []IncidentSource{IncidentSourceAlert, IncidentSourceSecurity, IncidentSourceVuln} {
 		inc, err := NewIncident("tn-1", "title", "", IncidentSeverityHigh, nil, nil)
 		if err != nil {
 			t.Fatalf("new incident: %v", err)

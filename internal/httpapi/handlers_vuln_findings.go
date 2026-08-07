@@ -30,9 +30,14 @@ type vulnFindingDTO struct {
 	LastSeen    time.Time `json:"last_seen"`
 	Scanner     string    `json:"scanner"`
 	Description string    `json:"description"`
-	RowVersion  int64     `json:"row_version"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	// RemediationIncidentID projects VulnFinding.RemediationIncidentID
+	// (E8.3b) — read-only: there is no PATCH field for it. Set only by POST
+	// .../remediate. omitempty keeps a not-yet-remediated finding's JSON
+	// identical to what it was before E8.3b.
+	RemediationIncidentID *string   `json:"remediation_incident_id,omitempty"`
+	RowVersion            int64     `json:"row_version"`
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
 }
 
 // toVulnFindingDTO deliberately omits tenant_id, the same choice
@@ -44,7 +49,8 @@ func toVulnFindingDTO(f *domain.VulnFinding) vulnFindingDTO {
 		Severity: string(f.Severity), Status: string(f.Status),
 		FirstSeen: f.FirstSeen, LastSeen: f.LastSeen,
 		Scanner: f.Scanner, Description: f.Description,
-		RowVersion: f.RowVersion, CreatedAt: f.CreatedAt, UpdatedAt: f.UpdatedAt,
+		RemediationIncidentID: f.RemediationIncidentID,
+		RowVersion:            f.RowVersion, CreatedAt: f.CreatedAt, UpdatedAt: f.UpdatedAt,
 	}
 }
 
@@ -257,4 +263,121 @@ func (s *Server) patchVulnFinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, toVulnFindingDTO(updated))
+}
+
+// prioritizedVulnFindingDTO is one row of GET
+// /v1/admin/vuln-findings/prioritized (E8.3b): the finding, the asset
+// criticality it was joined against, and the computed score/label — see
+// domain.PrioritizedVulnFinding's own doc comment. Nothing here is stored.
+type prioritizedVulnFindingDTO struct {
+	Finding          vulnFindingDTO `json:"finding"`
+	AssetCriticality string         `json:"asset_criticality"`
+	PriorityScore    int            `json:"priority_score"`
+	Priority         string         `json:"priority"`
+}
+
+func toPrioritizedVulnFindingDTO(p *domain.PrioritizedVulnFinding) prioritizedVulnFindingDTO {
+	return prioritizedVulnFindingDTO{
+		Finding:          toVulnFindingDTO(&p.Finding),
+		AssetCriticality: string(p.Criticality),
+		PriorityScore:    p.Score,
+		Priority:         string(p.Priority),
+	}
+}
+
+type vulnFindingsPrioritizedResponse struct {
+	Items []prioritizedVulnFindingDTO `json:"items"`
+}
+
+// listPrioritizedVulnFindings serves GET /v1/admin/vuln-findings/prioritized
+// (E8.3b, ADR-SOC-007): a bounded, read-only projection of the caller's OPEN
+// findings ranked by business risk (domain.VulnFindingRepository.
+// Prioritized's own doc comment states the exact ranking). Row-level
+// security on both vuln_finding and asset is the ONLY isolation mechanism —
+// there is no explicit tenant predicate, mirroring GET /admin/noc/overview
+// (ADR-NOC-001).
+func (s *Server) listPrioritizedVulnFindings(w http.ResponseWriter, r *http.Request) {
+	if s.vulnFindings == nil {
+		writeProblem(w, r, http.StatusNotImplemented, "not implemented", "vuln finding administration is not configured")
+		return
+	}
+	limit := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			writeProblem(w, r, http.StatusUnprocessableEntity, "invalid limit", "limit must be an integer")
+			return
+		}
+		limit = n
+	}
+	items, err := s.vulnFindings.Prioritized(r.Context(), limit)
+	if err != nil {
+		s.mapError(w, r, err)
+		return
+	}
+	out := make([]prioritizedVulnFindingDTO, 0, len(items))
+	for i := range items {
+		out = append(out, toPrioritizedVulnFindingDTO(&items[i]))
+	}
+	writeJSON(w, http.StatusOK, vulnFindingsPrioritizedResponse{Items: out})
+}
+
+// remediateVulnFindingRequest carries the row_version the caller last read
+// for the finding — the same optimistic-locking shape patchVulnFindingRequest
+// uses, guarding the LINK write exactly as PATCH guards a status transition.
+type remediateVulnFindingRequest struct {
+	RowVersion int64 `json:"row_version"`
+}
+
+// remediateVulnFindingResponse returns both halves of the link: the Incident
+// opened (or reused) and the finding's own updated view of the link.
+type remediateVulnFindingResponse struct {
+	VulnFinding vulnFindingDTO `json:"vuln_finding"`
+	Incident    incidentDTO    `json:"incident"`
+}
+
+// remediateVulnFinding serves POST /v1/admin/vuln-findings/{id}/remediate
+// (E8.3b, ADR-SOC-007): opens, or reuses, a tracked remediation Incident for
+// one finding — see domain.VulnFindingRepository.Remediate's doc comment for
+// the full idempotency/concurrency contract this handler exposes unchanged.
+func (s *Server) remediateVulnFinding(w http.ResponseWriter, r *http.Request) {
+	if s.vulnFindings == nil {
+		writeProblem(w, r, http.StatusNotImplemented, "not implemented", "vuln finding administration is not configured")
+		return
+	}
+	id := chi.URLParam(r, "id")
+
+	var req remediateVulnFindingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeProblem(w, r, http.StatusBadRequest, "invalid request", "malformed JSON body")
+		return
+	}
+	if req.RowVersion < 1 {
+		s.mapError(w, r, domain.NewValidationError("row_version", "must be the row_version last read for this vuln finding"))
+		return
+	}
+
+	finding, incident, err := s.vulnFindings.Remediate(r.Context(), id, req.RowVersion)
+	switch {
+	case errors.Is(err, domain.ErrNotFound):
+		writeProblem(w, r, http.StatusNotFound, "not found", "no such vuln finding")
+		return
+	case errors.Is(err, domain.ErrVersionMismatch):
+		writeProblem(w, r, http.StatusConflict, "conflict", "vuln finding was modified concurrently; re-read and retry")
+		return
+	case errors.Is(err, domain.ErrVulnFindingNotOpen):
+		// The finding exists and the version matches; it is its CURRENT
+		// status that refuses remediation — a conflict with the record's
+		// state, not a malformed request, mirrors patchVulnFinding's own
+		// ErrInvalidTransition branch immediately above.
+		writeProblem(w, r, http.StatusConflict, "conflict", err.Error())
+		return
+	case err != nil:
+		s.mapError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, remediateVulnFindingResponse{
+		VulnFinding: toVulnFindingDTO(finding),
+		Incident:    toIncidentDTO(incident),
+	})
 }

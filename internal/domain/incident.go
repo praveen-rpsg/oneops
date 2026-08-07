@@ -77,28 +77,41 @@ func (s IncidentStatus) Valid() bool {
 
 // IncidentSource distinguishes an incident an operator filed directly
 // (manual, the only kind before E4) from one internal/alerting's evaluator
-// created or linked off an alert-rule firing (alert, E4.1), or one
+// created or linked off an alert-rule firing (alert, E4.1), one
 // internal/security's detector created or linked off a security-rule firing
-// (security, E8.1b-2). It is the ONLY thing that gates auto-correlation:
-// FindOrCreateOpenAlertIncident only ever considers incidents whose Source is
-// alert, and FindOrCreateOpenSecurityIncident only ever considers incidents
-// whose Source is security, so a later firing on the same CI can never
-// silently annex an operator's own manually-filed incident, and an alert
-// firing and a security firing on the SAME asset always produce two SEPARATE
-// open incidents rather than colliding into one — nothing else about the
-// three shapes would otherwise tell them apart.
+// (security, E8.1b-2), or one VulnFindingRepository.Remediate opened to track
+// fixing a vulnerability finding (vuln, E8.3b, ADR-SOC-007). It is the ONLY
+// thing that gates auto-correlation: FindOrCreateOpenAlertIncident only ever
+// considers incidents whose Source is alert, and
+// FindOrCreateOpenSecurityIncident only ever considers incidents whose
+// Source is security, so a later firing on the same CI can never silently
+// annex an operator's own manually-filed incident, and an alert firing and a
+// security firing on the SAME asset always produce two SEPARATE open
+// incidents rather than colliding into one — nothing else about the three
+// shapes would otherwise tell them apart. vuln does not participate in that
+// per-asset correlation at all: Remediate's own idempotency is keyed by the
+// FINDING's own RemediationIncidentID link, not by (tenant, asset, source),
+// so a vuln-sourced incident carries no partial-unique-index analog to
+// ux_incident_open_alert_per_asset/ux_incident_open_security_per_asset (see
+// VulnFindingRepository.Remediate's doc comment).
 type IncidentSource string
 
 const (
 	IncidentSourceManual   IncidentSource = "manual"
 	IncidentSourceAlert    IncidentSource = "alert"
 	IncidentSourceSecurity IncidentSource = "security"
+	// IncidentSourceVuln is written ONLY by VulnFindingRepository.Remediate
+	// (E8.3b) — an operator-triggered action, not an evaluator/detector
+	// background correlation, but still distinguished from manual so a
+	// remediation-tracking incident is filterable/reportable as its own
+	// provenance, exactly as alert/security are.
+	IncidentSourceVuln IncidentSource = "vuln"
 )
 
 // Valid reports whether s is a defined source.
 func (s IncidentSource) Valid() bool {
 	switch s {
-	case IncidentSourceManual, IncidentSourceAlert, IncidentSourceSecurity:
+	case IncidentSourceManual, IncidentSourceAlert, IncidentSourceSecurity, IncidentSourceVuln:
 		return true
 	default:
 		return false
@@ -284,11 +297,11 @@ func (i *Incident) Validate() error {
 		return newValidation("status", "must be one of: open, acknowledged, investigating, resolved, closed, reopened")
 	}
 	if !i.Source.Valid() {
-		return newValidation("source", "must be one of: manual, alert, security")
+		return newValidation("source", "must be one of: manual, alert, security, vuln")
 	}
-	if (i.Source == IncidentSourceAlert || i.Source == IncidentSourceSecurity) &&
+	if (i.Source == IncidentSourceAlert || i.Source == IncidentSourceSecurity || i.Source == IncidentSourceVuln) &&
 		(i.AssetID == nil || strings.TrimSpace(*i.AssetID) == "") {
-		return newValidation("asset_id", "must be set for an alert- or security-sourced incident — correlation always names the CI the firing rule watches")
+		return newValidation("asset_id", "must be set for an alert-, security- or vuln-sourced incident — correlation/remediation always names the CI the firing rule/finding watches")
 	}
 	if i.AssetID != nil && strings.TrimSpace(*i.AssetID) == "" {
 		return newValidation("asset_id", "must not be blank when supplied; omit it to leave the incident unlinked")
@@ -367,6 +380,34 @@ func NewSecurityIncident(tenantID, title, description string, severity IncidentS
 		Severity:    severity,
 		Status:      IncidentOpen,
 		Source:      IncidentSourceSecurity,
+		AssetID:     &trimmed,
+	}
+	if err := inc.Validate(); err != nil {
+		return nil, err
+	}
+	return inc, nil
+}
+
+// NewVulnRemediationIncident builds a freshly opened, vuln-sourced Incident —
+// the shape VulnFindingRepository.Remediate opens to track fixing one
+// VulnFinding (E8.3b, ADR-SOC-007). assetID is required for the identical
+// reason NewAlertIncident/NewSecurityIncident require one: a correlation
+// always names the CI in question, and IncidentSourceVuln without one is
+// refused by Validate. Unlike the alert/security paths, there is no
+// per-(tenant,asset) uniqueness here — Remediate's own idempotency is keyed
+// by the finding's own RemediationIncidentID link (see that method's doc
+// comment), so calling this twice for two DIFFERENT findings on the SAME
+// asset is expected to produce two separate incidents.
+func NewVulnRemediationIncident(tenantID, title, description string, severity IncidentSeverity, assetID string) (*Incident, error) {
+	trimmed := strings.TrimSpace(assetID)
+	inc := &Incident{
+		IncidentID:  NewID(),
+		TenantID:    strings.TrimSpace(tenantID),
+		Title:       strings.TrimSpace(title),
+		Description: description,
+		Severity:    severity,
+		Status:      IncidentOpen,
+		Source:      IncidentSourceVuln,
 		AssetID:     &trimmed,
 	}
 	if err := inc.Validate(); err != nil {

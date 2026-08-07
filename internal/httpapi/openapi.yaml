@@ -2431,10 +2431,10 @@ paths:
         server-side; a finding naming a cross-tenant or nonexistent asset_id
         is reported as a rejected result at its own index, not as a
         batch-aborting error. Re-ingesting an identical scan is idempotent:
-        no duplicate rows. Prioritization by CI criticality and
-        remediation -> Incident linkage (E8.3b) are a later, separate story —
-        nothing here ranks findings or opens an Incident; a finding open but
-        absent from a later scan is NOT auto-remediated (deferred).
+        no duplicate rows. Prioritization (GET .../prioritized) and
+        remediation -> Incident linkage (POST .../{id}/remediate) are E8.3b;
+        this endpoint itself ranks nothing and opens no Incident. A finding
+        open but absent from a later scan is NOT auto-remediated (deferred).
       operationId: ingestVulnFindings
       security: [ { bearerAuth: [] } ]
       requestBody:
@@ -2447,6 +2447,33 @@ paths:
           description: One outcome per input finding, at that finding's input index
           content: { application/json: { schema: { $ref: '#/components/schemas/IngestVulnFindingsResponse' } } }
         '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/vuln-findings/prioritized:
+    get:
+      summary: Rank the caller's OPEN vulnerability findings by business risk (E8.3b)
+      description: >-
+        A bounded, read-only PROJECTION — never a stored priority. Ranked by
+        score = severityRank(finding.severity) * criticalityRank(asset.criticality),
+        each rank 1-based over its own five-member scale (severity:
+        none=1..critical=5; criticality: unknown=1..critical=5) so "unknown"
+        criticality never outranks a known "low" tier while still keeping
+        every combination strictly positive. Ties are broken by last_seen
+        DESC, then finding_id. Row-level security alone confines this to the
+        caller's own tenant.
+      operationId: listPrioritizedVulnFindings
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+      responses:
+        '200':
+          description: The caller's open findings, highest business risk first
+          content: { application/json: { schema: { $ref: '#/components/schemas/VulnFindingPrioritizedList' } } }
         '401': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
@@ -2491,6 +2518,38 @@ paths:
         '200':
           description: The updated vulnerability finding
           content: { application/json: { schema: { $ref: '#/components/schemas/VulnFinding' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/vuln-findings/{id}/remediate:
+    post:
+      summary: Open, or reuse, a tracked remediation Incident for a finding (E8.3b)
+      description: >-
+        IDEMPOTENT: if the finding already names an OPEN remediation
+        Incident, that SAME incident is returned unchanged — no second
+        incident is ever created for one finding. Otherwise a new Incident
+        (source vuln) is opened and linked in one transaction. row_version-
+        guarded like PATCH; the finding must currently be status=open
+        (409 otherwise). Two concurrent calls with the SAME row_version can
+        never both create an incident — the loser gets 409 and must re-read.
+      operationId: remediateVulnFinding
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RemediateVulnFindingRequest' }
+      responses:
+        '200':
+          description: The linked (created or reused) remediation incident, and the finding's own updated link
+          content: { application/json: { schema: { $ref: '#/components/schemas/RemediateVulnFindingResponse' } } }
         '400': { $ref: '#/components/responses/Problem' }
         '401': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
@@ -4875,7 +4934,7 @@ components:
         reified entity — like Incident/Asset, NOT a false noun — deduped by
         (tenant_id, asset_id, vuln_id) and carrying a governed lifecycle.
         Prioritization by CI criticality and remediation -> Incident linkage
-        are E8.3b, a later, separate story.
+        are E8.3b (see GET .../prioritized and POST .../{id}/remediate).
       properties:
         finding_id: { type: string }
         asset_id: { type: string }
@@ -4900,6 +4959,12 @@ components:
           description: Refreshed by every ingestion UPSERT that names this row, including the false_positive branch. Store-managed.
         scanner: { type: string }
         description: { type: string }
+        remediation_incident_id:
+          type: string
+          description: >-
+            The OPEN, vuln-sourced Incident this finding's remediation is
+            currently tracked by, or absent when none is linked (E8.3b).
+            Read-only: set only by POST .../remediate.
         row_version: { type: integer, format: int64 }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -4919,6 +4984,36 @@ components:
       properties:
         row_version: { type: integer, format: int64 }
         status: { type: string, enum: [open, remediated, accepted_risk, false_positive] }
+    VulnFindingPrioritized:
+      type: object
+      description: >-
+        One row of the E8.3b prioritization projection: a VulnFinding joined
+        with its own asset's criticality, plus the computed score/label.
+        Never stored — recomputed on every call.
+      properties:
+        finding: { $ref: '#/components/schemas/VulnFinding' }
+        asset_criticality: { type: string, enum: [critical, high, medium, low, unknown] }
+        priority_score:
+          type: integer
+          description: severityRank(finding.severity) * criticalityRank(asset_criticality), each rank 1-based (1..5).
+        priority: { type: string, enum: [critical, high, medium, low] }
+    VulnFindingPrioritizedList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/VulnFindingPrioritized' }
+    RemediateVulnFindingRequest:
+      type: object
+      required: [row_version]
+      description: The row_version last read for this finding — the same optimistic-locking shape PatchVulnFindingRequest uses.
+      properties:
+        row_version: { type: integer, format: int64 }
+    RemediateVulnFindingResponse:
+      type: object
+      properties:
+        vuln_finding: { $ref: '#/components/schemas/VulnFinding' }
+        incident: { $ref: '#/components/schemas/Incident' }
     MaintenanceWindow:
       type: object
       description: >-

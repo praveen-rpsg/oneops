@@ -125,6 +125,18 @@ func TestAppUserMigration_AppliesAndRollsBackOnPopulatedDatabase(t *testing.T) {
 		t.Fatalf("roll back alert_rule.current_incident_id before incident: %v", err)
 	}
 
+	// vuln_finding.remediation_incident_id (E8.3b) also references incident,
+	// so that migration's rollback must run before incident's own too — the
+	// same ordering protection alert_rule.current_incident_id's rollback
+	// just above already documents.
+	vfrDown, err := os.ReadFile("../migrate/rollback/20260910000001_vuln_finding_remediation.down.sql")
+	if err != nil {
+		t.Fatalf("read vuln_finding remediation rollback: %v", err)
+	}
+	if _, err := tx.Exec(ctx, string(vfrDown)); err != nil {
+		t.Fatalf("roll back vuln_finding.remediation_incident_id before incident: %v", err)
+	}
+
 	// incident.assignee_user_id (E5.1) also references app_user, so that
 	// migration's rollback must run first too — the same ordering protection
 	// every other referencing table's rollback documents here.

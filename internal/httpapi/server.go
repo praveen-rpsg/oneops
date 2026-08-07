@@ -161,13 +161,13 @@ type Server struct {
 	// (E8.2b) is a later, separate story.
 	iocs domain.IOCRepository
 
-	// Vulnerability-finding registry (E8.3a); nil until SetVulnFindings.
-	// vuln_finding is TENANT-OWNED, like ioc above, so nothing here needs an
-	// exemption from row-level security. Unlike security_rule/ioc, this IS a
-	// stateful entity with its own lifecycle (VulnFindingStatus) — but it
-	// carries no privileged-pool counterpart in this story: prioritization by
-	// CI criticality and remediation -> Incident linkage (E8.3b) are a
-	// later, separate story.
+	// Vulnerability-finding registry (E8.3a) + prioritization/remediation
+	// (E8.3b, ADR-SOC-007); nil until SetVulnFindings. vuln_finding is
+	// TENANT-OWNED, like ioc above, so nothing here needs an exemption from
+	// row-level security. Unlike security_rule/ioc, this IS a stateful
+	// entity with its own lifecycle (VulnFindingStatus) — but it carries no
+	// privileged-pool counterpart: Remediate writes both vuln_finding and
+	// incident from this same tenant-scoped instance in one transaction.
 	vulnFindings domain.VulnFindingRepository
 
 	// Incident registry (E5.1); nil until SetIncidents. incident/
@@ -660,19 +660,23 @@ func (s *Server) routesFor(root fs.FS, consoleBuilt bool) *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/iocs/{id}", s.patchIOC)
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/iocs/{id}", s.deleteIOC)
 
-		// Vulnerability-finding administration (E8.3a). vuln_finding is
+		// Vulnerability-finding administration (E8.3a) + prioritization/
+		// remediation->Incident linkage (E8.3b, ADR-SOC-007). vuln_finding is
 		// TENANT-OWNED, exactly like ioc above, so the permission tier is
 		// tenant administration, not requirePlatformAdmin. POST batch-UPSERTs
 		// a scan's findings (dedup by asset_id+vuln_id); PATCH is the ONLY
-		// mutation on an existing finding and performs a lifecycle
-		// transition — there is no general field-Update (severity/title/
-		// scanner/description are scan-supplied facts, refreshed only by a
-		// later POST). Prioritization/remediation->Incident linkage (E8.3b)
-		// is a later, separate story — no such endpoint exists here.
+		// status-transition mutation on an existing finding — there is no
+		// general field-Update (severity/title/scanner/description are
+		// scan-supplied facts, refreshed only by a later POST).
+		// GET .../prioritized is mounted alongside GET .../{id}, exactly like
+		// /admin/assets/health alongside /admin/assets/{id} — chi resolves the
+		// static segment before the param regardless of registration order.
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/vuln-findings", s.ingestVulnFindings)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/vuln-findings", s.listVulnFindings)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/vuln-findings/prioritized", s.listPrioritizedVulnFindings)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/vuln-findings/{id}", s.getVulnFinding)
 		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/vuln-findings/{id}", s.patchVulnFinding)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/vuln-findings/{id}/remediate", s.remediateVulnFinding)
 
 		// Maintenance window administration (E3.3a). maintenance_window is
 		// TENANT-OWNED, exactly like alert_rule above, so the permission tier

@@ -291,3 +291,73 @@ func TestVulnFinding_ValidateDescriptionLength(t *testing.T) {
 		t.Errorf("empty description must validate: %v", err)
 	}
 }
+
+// TestVulnFindingPriority_Valid pins the closed vocabulary: critical, high,
+// medium, low — nothing else, and deliberately no "none" (see
+// VulnFindingPriority's own doc comment).
+func TestVulnFindingPriority_Valid(t *testing.T) {
+	for _, p := range []VulnFindingPriority{
+		VulnFindingPriorityCritical, VulnFindingPriorityHigh, VulnFindingPriorityMedium, VulnFindingPriorityLow,
+	} {
+		if !p.Valid() {
+			t.Errorf("%q should be valid", p)
+		}
+	}
+	if VulnFindingPriority("none").Valid() {
+		t.Error(`"none" should not be a valid priority label`)
+	}
+}
+
+// TestVulnFindingPriorityOf pins the four equal-width bands over [1, 25] —
+// the boundaries VulnFindingPriorityOf's own doc comment states, plus the
+// full range's own extremes.
+func TestVulnFindingPriorityOf(t *testing.T) {
+	cases := []struct {
+		score int
+		want  VulnFindingPriority
+	}{
+		{1, VulnFindingPriorityLow},
+		{6, VulnFindingPriorityLow},
+		{7, VulnFindingPriorityMedium},
+		{12, VulnFindingPriorityMedium},
+		{13, VulnFindingPriorityHigh},
+		{18, VulnFindingPriorityHigh},
+		{19, VulnFindingPriorityCritical},
+		{25, VulnFindingPriorityCritical},
+	}
+	for _, c := range cases {
+		if got := VulnFindingPriorityOf(c.score); got != c.want {
+			t.Errorf("VulnFindingPriorityOf(%d) = %q, want %q", c.score, got, c.want)
+		}
+	}
+}
+
+// TestVulnFindingPriorityOf_UnknownCriticalityNeverOutranksKnownLow proves
+// the story's explicit requirement at the RANK level (not just the label):
+// an untiered asset's criticality rank must never exceed "low"'s — using the
+// exact 1-based rank tables VulnFindingRepository.Prioritized's doc comment
+// states.
+func TestVulnFindingPriorityOf_UnknownCriticalityNeverOutranksKnownLow(t *testing.T) {
+	severityRank := map[VulnFindingSeverity]int{
+		VulnFindingSeverityNone: 1, VulnFindingSeverityLow: 2, VulnFindingSeverityMedium: 3,
+		VulnFindingSeverityHigh: 4, VulnFindingSeverityCritical: 5,
+	}
+	criticalityRank := map[AssetCriticality]int{
+		AssetCriticalityUnknown: 1, AssetCriticalityLow: 2, AssetCriticalityMedium: 3,
+		AssetCriticalityHigh: 4, AssetCriticalityCritical: 5,
+	}
+	if criticalityRank[AssetCriticalityUnknown] > criticalityRank[AssetCriticalityLow] {
+		t.Fatalf("unknown criticality rank (%d) outranks low's (%d)",
+			criticalityRank[AssetCriticalityUnknown], criticalityRank[AssetCriticalityLow])
+	}
+	// For every severity, an unknown-criticality score must never exceed the
+	// SAME severity's low-criticality score.
+	for sev, sr := range severityRank {
+		unknownScore := sr * criticalityRank[AssetCriticalityUnknown]
+		lowScore := sr * criticalityRank[AssetCriticalityLow]
+		if unknownScore > lowScore {
+			t.Errorf("severity %q: unknown-criticality score %d outranks low-criticality score %d",
+				sev, unknownScore, lowScore)
+		}
+	}
+}

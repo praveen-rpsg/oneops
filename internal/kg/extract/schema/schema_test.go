@@ -100,8 +100,8 @@ func TestCommentsDoNotDeclareObjects(t *testing.T) {
 func TestIndexOnClauseMaySpanLines(t *testing.T) {
 	nodes, edges := extract(t)
 	idx := byKind(nodes)[kindIndex]
-	if len(idx) != 96 {
-		t.Errorf("extracted %d indexes, want 96", len(idx))
+	if len(idx) != 97 {
+		t.Errorf("extracted %d indexes, want 97", len(idx))
 	}
 	// ix_webhook_delivery_due declares ON on a following line.
 	const want = "index:ix_webhook_delivery_due"
@@ -284,7 +284,7 @@ func TestCorpusCensus(t *testing.T) {
 		got[n.Kind]++
 	}
 	want := map[string]int{
-		kindTable: 47, kindColumn: 449, kindIndex: 96, kindConstraint: 168, kindTrigger: 8,
+		kindTable: 47, kindColumn: 450, kindIndex: 97, kindConstraint: 170, kindTrigger: 8,
 	}
 	for kind, w := range want {
 		if got[kind] != w {
