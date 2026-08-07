@@ -571,6 +571,12 @@ func run(logger *slog.Logger) error {
 	// (E8.1b-2) is wired further below, over the privileged pool — the
 	// identical dual-role split AlertRuleStore already draws above.
 	srv.SetSecurityRules(postgres.NewSecurityRuleStore(appPool))
+	// Indicator-of-compromise watchlist administration (E8.2a): tenant-owned
+	// and under row-level security, exactly like security_rule above, so the
+	// admin CRUD API is built from the tenant-scoped pool. CONFIG ONLY: no
+	// detector reads this watchlist yet — that is E8.2b, a later, separate
+	// story.
+	srv.SetIOCs(postgres.NewIOCStore(appPool))
 	// Telemetry retention + downsampling (E2.1b, ADR-TELEMETRY-002): both
 	// workers process every tenant's chunks/buckets from one process, the
 	// same category of background worker the webhook dispatcher and policy

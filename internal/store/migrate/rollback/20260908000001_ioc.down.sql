@@ -1,0 +1,2 @@
+-- Reverses 20260908000001_ioc.
+DROP TABLE IF EXISTS ioc;

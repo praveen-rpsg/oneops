@@ -153,6 +153,14 @@ type Server struct {
 	// (E8.1b-2) is a later, separate story.
 	securityRules domain.SecurityRuleRepository
 
+	// Indicator-of-compromise watchlist (E8.2a); nil until SetIOCs. ioc is
+	// TENANT-OWNED, like security_rule above, so nothing here needs an
+	// exemption from row-level security. CONFIG ONLY: there is no
+	// privileged-pool counterpart and no detector/worker in this story — the
+	// detector that matches this watchlist against security_observation
+	// (E8.2b) is a later, separate story.
+	iocs domain.IOCRepository
+
 	// Incident registry (E5.1); nil until SetIncidents. incident/
 	// incident_event are TENANT-OWNED, like asset above, so nothing here
 	// needs an exemption from row-level security. Alert-firing -> Incident
@@ -630,6 +638,18 @@ func (s *Server) routesFor(root fs.FS, consoleBuilt bool) *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/security-rules/{id}", s.getSecurityRule)
 		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/security-rules/{id}", s.patchSecurityRule)
 		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/security-rules/{id}", s.deleteSecurityRule)
+
+		// Indicator-of-compromise watchlist administration (E8.2a). ioc is
+		// TENANT-OWNED, exactly like security_rule above, so the permission
+		// tier is tenant administration, not requirePlatformAdmin. CONFIG
+		// ONLY: no detector, worker or "matches" endpoint exists here — a
+		// match is derived by a future, separate detector (E8.2b) evaluating
+		// this watchlist against security_observation, never stored here.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/iocs", s.listIOCs)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/iocs", s.createIOC)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/iocs/{id}", s.getIOC)
+		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/iocs/{id}", s.patchIOC)
+		rt.With(s.requirePermission(auth.PermAdmin)).Delete("/admin/iocs/{id}", s.deleteIOC)
 
 		// Maintenance window administration (E3.3a). maintenance_window is
 		// TENANT-OWNED, exactly like alert_rule above, so the permission tier

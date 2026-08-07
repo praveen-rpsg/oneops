@@ -2282,6 +2282,111 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/iocs:
+    get:
+      summary: List the caller's tenant's indicator-of-compromise watchlist (E8.2a)
+      operationId: listIOCs
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last ioc_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of ioc watchlist entries
+          content: { application/json: { schema: { $ref: '#/components/schemas/IOCList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Add an indicator to the caller's tenant's watchlist (E8.2a)
+      description: >-
+        indicator_value is normalized before storage: always trimmed,
+        additionally lower-cased for domain/url/email. A duplicate
+        (indicator_type, indicator_value) already on this tenant's watchlist
+        is rejected with 409; a future, separate detector (E8.2b) is what
+        eventually matches this watchlist against security_observation and
+        raises an Incident — nothing here does that yet.
+      operationId: createIOC
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateIOCRequest' }
+      responses:
+        '201':
+          description: The created ioc
+          content: { application/json: { schema: { $ref: '#/components/schemas/IOC' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/iocs/{id}:
+    get:
+      summary: Get one ioc watchlist entry by identifier
+      operationId: getIOC
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The ioc
+          content: { application/json: { schema: { $ref: '#/components/schemas/IOC' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Change one or more fields of an ioc watchlist entry
+      description: >-
+        indicator_type and indicator_value cannot be changed — delete and
+        recreate the entry instead.
+      operationId: patchIOC
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchIOCRequest' }
+      responses:
+        '200':
+          description: The updated ioc
+          content: { application/json: { schema: { $ref: '#/components/schemas/IOC' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    delete:
+      summary: Remove an ioc watchlist entry
+      description: >-
+        Carries no row_version (ADR-HARD-003): a delete is idempotent on
+        identity, not a field-level merge, so there is nothing for an
+        optimistic-lock token to protect here — the same asymmetry
+        deleteSecurityRule documents.
+      operationId: deleteIOC
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/maintenance-windows:
     get:
       summary: List the caller's tenant's maintenance windows (E3.3a)
@@ -4537,6 +4642,67 @@ components:
         threshold_count: { type: integer, minimum: 1, maximum: 1000000 }
         incident_severity: { type: string, enum: [critical, high, medium, low] }
         enabled: { type: boolean }
+    IOC:
+      type: object
+      description: >-
+        One entry in a tenant's indicator-of-compromise watchlist (E8.2a):
+        reference data an operator curates, never a reified Threat/Event row.
+        A future, separate detector (E8.2b) will match this entry against
+        security_observation and raise an Incident on a hit — nothing does
+        that yet; this row is config only.
+      properties:
+        ioc_id: { type: string }
+        indicator_type:
+          type: string
+          enum: [ip, domain, url, file_hash, email]
+        indicator_value:
+          type: string
+          description: >-
+            Normalized before storage: always trimmed, additionally
+            lower-cased for domain/url/email.
+        severity:
+          type: string
+          enum: [critical, high, medium, low]
+          description: >-
+            The severity of the Incident a future detector (E8.2b) will
+            raise on a match — the INCIDENT severity vocabulary, not
+            security_observation's five-level observation-severity scale.
+        enabled: { type: boolean }
+        description: { type: string }
+        source: { type: string }
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    IOCList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/IOC' }
+    CreateIOCRequest:
+      type: object
+      required: [indicator_type, indicator_value, severity]
+      description: enabled defaults to true. description/source default to empty.
+      properties:
+        indicator_type: { type: string, enum: [ip, domain, url, file_hash, email] }
+        indicator_value: { type: string, maxLength: 2048 }
+        severity: { type: string, enum: [critical, high, medium, low] }
+        enabled: { type: boolean }
+        description: { type: string, maxLength: 2000 }
+        source: { type: string, maxLength: 200 }
+    PatchIOCRequest:
+      type: object
+      required: [row_version]
+      description: >-
+        Supply one or more of severity, enabled, description or source.
+        indicator_type and indicator_value cannot be changed — delete and
+        recreate the entry instead.
+      properties:
+        row_version: { type: integer, format: int64 }
+        severity: { type: string, enum: [critical, high, medium, low] }
+        enabled: { type: boolean }
+        description: { type: string, maxLength: 2000 }
+        source: { type: string, maxLength: 200 }
     MaintenanceWindow:
       type: object
       description: >-

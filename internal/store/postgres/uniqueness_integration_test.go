@@ -75,6 +75,11 @@ var serverGeneratedIdentifiers = map[string]string{
 	// Security rule detection config (E8.1b-1).
 	"security_rule_pkey": "rule_id is server-minted (domain.NewSecurityRule); no create route accepts one from a client",
 
+	// Indicator-of-compromise watchlist (E8.2a). uq_ioc_tenant_indicator
+	// already carries tenant_id directly and so never reaches this map; only
+	// the surrogate PK does.
+	"ioc_pkey": "ioc_id is server-minted (domain.NewIOC); no create route accepts one from a client",
+
 	// Incident work item + append-only timeline (E5.1).
 	"incident_pkey":       "incident_id is server-minted (domain.NewIncident); no create route accepts one from a client",
 	"incident_event_pkey": "event_id is server-minted (domain.NewID() in IncidentStore.recordEvent); no route accepts one from a client",
