@@ -1186,6 +1186,43 @@ paths:
         '409': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /auth/invitations/redeem:
+    post:
+      summary: Redeem an invitation token (UNAUTHENTICATED)
+      description: >-
+        Deliberately outside the /v1 contract and outside the router's
+        contract-bijection sweep, exactly like /auth/config: this endpoint
+        carries no bearer token by design, and s.authenticate on the /v1 group
+        would reject a caller who has not obtained one yet — which is the
+        entire situation this endpoint exists to resolve. Possession of the
+        32-byte token in the request body IS the authorization (E-ID.4b; ADR
+        pending — follows ADR-IAC-003, which reserved this story). In one
+        transaction it consumes the invitation, creates
+        or activates the account it names, and grants that account an active
+        membership in the invitation's own organization — never anything a
+        caller could name in the request. Every failure (unknown token,
+        already redeemed, revoked, expired, or naming a suspended/deactivated
+        account) is the identical generic response; distinguishing any of them
+        would make this an oracle for guessing valid tokens or for confirming
+        that an email address already has an account. Rate-limited like the
+        rest of the service (ADR-SECURITY-004), keyed to a single shared
+        bucket for this route since there is no authenticated tenant to key
+        one on.
+      operationId: redeemInvitation
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RedeemInvitationRequest' }
+      responses:
+        '200':
+          description: The invitation was redeemed; the invitee is now an active member
+          content: { application/json: { schema: { $ref: '#/components/schemas/RedeemInvitationResponse' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/teams:
     get:
       summary: List an organization's teams
@@ -3466,6 +3503,23 @@ components:
         - type: object
           properties:
             token: { type: string }
+    RedeemInvitationRequest:
+      type: object
+      required: [token]
+      description: >-
+        Carries ONLY the token. Every other fact the redemption needs —
+        organization, tenant, email — is resolved from the invitation row the
+        token names, never from this request.
+      properties:
+        token: { type: string }
+    RedeemInvitationResponse:
+      type: object
+      description: >-
+        Deliberately minimal: no user id, membership id or invitation id,
+        each of which would be one more identifier available to whoever
+        holds, or is guessing, a token.
+      properties:
+        organization: { type: string, description: The organization the invitee just joined. }
     Team:
       type: object
       properties:

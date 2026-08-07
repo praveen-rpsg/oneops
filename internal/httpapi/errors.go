@@ -64,6 +64,13 @@ func (s *Server) mapError(w http.ResponseWriter, r *http.Request, err error) {
 		// §8: the role may never be deleted. A refusal on constitutional grounds,
 		// not a client error in the request itself.
 		writeProblem(w, r, http.StatusConflict, "conflict", err.Error())
+	case errors.Is(err, domain.ErrTokenNotRedeemable):
+		// One shape for every cause — unknown token, already redeemed, revoked,
+		// expired, or naming a suspended/deactivated account (see
+		// domain.ErrTokenNotRedeemable's own doc comment and
+		// RedemptionRepository.Redeem). err.Error() is always the same sentinel
+		// text; never replace it with anything that could vary by cause.
+		writeProblem(w, r, http.StatusBadRequest, "invitation not redeemable", err.Error())
 	default:
 		if ve, ok := domain.AsValidation(err); ok {
 			writeProblem(w, r, http.StatusUnprocessableEntity, "validation failed", ve.Error())

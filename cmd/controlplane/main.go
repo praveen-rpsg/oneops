@@ -522,8 +522,18 @@ func run(logger *slog.Logger) error {
 	srv.SetMemberships(membershipStore)
 	// Invitation is tenant-owned and under row-level security, exactly like
 	// membership above, so appPool is correct here too (E-ID.4a — admin side
-	// only; the unauthenticated redeem path, E-ID.4b, is not wired here).
+	// only; the unauthenticated redeem path is wired separately below).
 	srv.SetInvitations(postgres.NewInvitationStore(appPool))
+	// E-ID.4b — the unauthenticated redeem path. Deliberately on the
+	// PRIVILEGED pool, like the tenant registry above: an invitee holds no
+	// membership yet, so there is no tenant to resolve before the invitation
+	// is found, and appPool's row-level security would match no row for
+	// anyone (RedemptionStore's own doc comment). This is the ONE place a
+	// request-path handler is allowed to write a tenant-owned row
+	// (membership) outside row-level security — every predicate that confines
+	// it comes from the invitation row itself, never from the request
+	// (ADR-TENANCY-004).
+	srv.SetRedemptions(postgres.NewRedemptionStore(pool))
 	// E-ACT.0's tenant-scoped user directory reuses the SAME appPool-scoped
 	// instance rather than a second one: unlike E5.2b-2's escalation_state
 	// (privileged Seeder/Worker + a distinct tenant-scoped read instance),

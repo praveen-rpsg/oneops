@@ -88,6 +88,16 @@ type Server struct {
 	// tenant-owned and row-level-secured exactly like membership above (E-ID.4a).
 	invitations domain.InvitationRepository
 
+	// Unauthenticated invitation redemption (E-ID.4b); nil until
+	// SetRedemptions. Unlike every other identity dependency above,
+	// RedemptionRepository must be built from the PRIVILEGED pool: the
+	// invitee holds no membership yet, so there is no tenant to resolve
+	// before the invitation is found, exactly the ordering
+	// InvitationRepository.Consume already documents for the admin store's
+	// own exception (ADR-TENANCY-001 §4). It is reached from a route outside
+	// /v1 that carries no bearer token by design — see routesFor.
+	redemptions domain.RedemptionRepository
+
 	// Tenant-scoped user-directory projection (E-ACT.0); nil until
 	// SetTenantUserDirectory. Unlike users above, this reads membership (a
 	// TENANT-OWNED, row-level-secured table) joined to the global app_user
@@ -285,6 +295,38 @@ func (s *Server) routesFor(root fs.FS, consoleBuilt bool) *chi.Mux {
 	r.Get("/healthz", s.health.Live)
 	r.Get("/readyz", s.health.Ready)
 	r.Get("/auth/config", s.serveAuthConfig)
+
+	// Unauthenticated invitation redemption (E-ID.4b; ADR pending — follows
+	// ADR-IAC-003, which reserved this story). Possession
+	// of the 32-byte token in the request body IS the authorization, so this
+	// cannot sit inside the /v1 group below — s.authenticate there rejects
+	// every request before a handler runs, and a caller redeeming an
+	// invitation holds no bearer token yet by definition.
+	//
+	// It is still gated by two of that group's three middlewares, in the same
+	// relative order, for reasons that do not depend on identity:
+	//
+	//   - invariantGate: redemption writes a tenant-owned row (membership)
+	//     over the PRIVILEGED pool, trusting the invitation row's own
+	//     tenant_id rather than relying on row-level security to supply one.
+	//     A platform that has detected its isolation invariant is broken must
+	//     refuse this write exactly as it refuses every other tenant-data
+	//     write (ADR-SECURITY-002).
+	//   - rateLimit: blunts token-guessing. There is no authenticated identity
+	//     here to key a bucket on, so domain.TenantIDFrom resolves every
+	//     caller to domain.SystemTenantID and every anonymous redemption
+	//     attempt against this instance shares ONE bucket. That is a
+	//     deliberate reuse of the existing per-tenant limiter, not a new
+	//     per-IP one: ADR-SECURITY-004 §6 explicitly keeps per-IP/pre-auth
+	//     limiting out of the application (this service cannot trust a
+	//     forwarded client IP behind an arbitrary proxy) and defers edge-level
+	//     throttling to the ingress. authenticate itself is deliberately
+	//     absent — that is the entire point of this route.
+	r.Route("/auth/invitations", func(rt chi.Router) {
+		rt.Use(s.invariantGate)
+		rt.Use(s.rateLimit)
+		rt.Post("/redeem", s.redeemInvitation)
+	})
 	// /metrics rides the public listener only when no separate observability
 	// listener is configured. It discloses audit-integrity state, per-route
 	// request volumes and dependency health — no tenant data, but enough to

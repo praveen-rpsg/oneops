@@ -65,6 +65,18 @@ var wiringExemptions = map[string]string{
 
 	"SetAdmin":       "process diagnostics, not tenant data",
 	"SetDiagnostics": "process diagnostics, not tenant data",
+
+	// Redemption necessarily precedes tenant binding, the same ordering
+	// problem SetTenants above is exempt for: an invitee holds no membership
+	// yet, so there is no tenant to resolve before the invitation naming it
+	// is found. The route this reaches (POST /auth/invitations/redeem) is
+	// deliberately outside /v1 and carries no bearer token, so it is not
+	// reachable with an authenticated tenant identity to scope a connection
+	// to in the first place. Every predicate that confines the write this
+	// repository performs (which tenant's membership) comes from the
+	// consumed invitation row itself, never from the request (E-ID.4b,
+	// ADR-TENANCY-004).
+	"SetRedemptions": "redemption precedes tenant binding, like tenant resolution itself",
 }
 
 // TestServerWiringUsesTenantScopedPool parses the composition root and fails if
