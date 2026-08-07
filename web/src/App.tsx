@@ -18,6 +18,9 @@ const AdministrationPage = lazy(() =>
 const AlertsBoardPage = lazy(() => import('./routes/AlertsBoardPage').then((m) => ({ default: m.AlertsBoardPage })));
 const ArtifactPage = lazy(() => import('./routes/ArtifactPage').then((m) => ({ default: m.ArtifactPage })));
 const DashboardsPage = lazy(() => import('./routes/DashboardsPage').then((m) => ({ default: m.DashboardsPage })));
+const DetectionRulesPage = lazy(() =>
+  import('./routes/DetectionRulesPage').then((m) => ({ default: m.DetectionRulesPage })),
+);
 const EscalationBoardPage = lazy(() =>
   import('./routes/EscalationBoardPage').then((m) => ({ default: m.EscalationBoardPage })),
 );
@@ -25,6 +28,7 @@ const EstatePage = lazy(() => import('./routes/EstatePage').then((m) => ({ defau
 const IncidentBoardPage = lazy(() =>
   import('./routes/IncidentBoardPage').then((m) => ({ default: m.IncidentBoardPage })),
 );
+const IndicatorsPage = lazy(() => import('./routes/IndicatorsPage').then((m) => ({ default: m.IndicatorsPage })));
 const InvitationsPage = lazy(() => import('./routes/InvitationsPage').then((m) => ({ default: m.InvitationsPage })));
 const MaintenanceBoardPage = lazy(() =>
   import('./routes/MaintenanceBoardPage').then((m) => ({ default: m.MaintenanceBoardPage })),
@@ -164,6 +168,8 @@ export default function App() {
         <Route path="topology" element={<TopologyPage />} />
         <Route path="dashboards" element={<DashboardsPage />} />
         <Route path="security/vulnerabilities" element={<VulnerabilitiesPage />} />
+        <Route path="security/detection-rules" element={<DetectionRulesPage />} />
+        <Route path="security/indicators" element={<IndicatorsPage />} />
         <Route path="administration" element={<AdministrationPage />} />
         <Route path="members" element={<MembersPage />} />
         <Route path="users" element={<UsersPage />} />
