@@ -2683,6 +2683,136 @@ paths:
         '422': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/compliance-controls:
+    get:
+      summary: List the caller's tenant's compliance controls (E8.4b)
+      operationId: listComplianceControls
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: framework
+          in: query
+          description: Filter to one exact framework value (e.g. SOC2, ISO27001).
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string, enum: [not_implemented, in_progress, implemented, not_applicable] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: after
+          in: query
+          description: Keyset cursor — the last control_id of the previous page.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of compliance controls
+          content: { application/json: { schema: { $ref: '#/components/schemas/ComplianceControlList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    post:
+      summary: Register a new compliance control (E8.4b)
+      description: >-
+        Always minted not_implemented. framework/control_ref together name
+        WHICH control this is and are immutable after creation; a second
+        control naming the same (framework, control_ref) within this tenant
+        is refused with 409. framework is open-but-bounded, NOT a closed
+        enum.
+      operationId: createComplianceControl
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateComplianceControlRequest' }
+      responses:
+        '201':
+          description: The registered compliance control
+          content: { application/json: { schema: { $ref: '#/components/schemas/ComplianceControl' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/compliance-controls/{id}:
+    get:
+      summary: Get one compliance control, with its append-only evidence trail (E8.4b)
+      description: >-
+        Evidence has no separate paginated endpoint — it is embedded here,
+        bounded, oldest first.
+      operationId: getComplianceControl
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The control and its evidence trail
+          content: { application/json: { schema: { $ref: '#/components/schemas/ComplianceControlWithEvidence' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    patch:
+      summary: Edit a control's title/description, OR perform a lifecycle transition (E8.4b)
+      description: >-
+        Exactly one of (title/description) or status must be supplied —
+        never both in the same call (mirrors PATCH /admin/risks/{id}'s
+        identical split). framework/control_ref cannot be changed here — they
+        are immutable after creation. A status transition is checked by
+        domain.ComplianceControlStatus.CanTransitionTo; an illegal move is
+        refused with 409. Both halves are row_version-guarded.
+      operationId: patchComplianceControl
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchComplianceControlRequest' }
+      responses:
+        '200':
+          description: The updated compliance control
+          content: { application/json: { schema: { $ref: '#/components/schemas/ComplianceControl' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
+  /v1/admin/compliance-controls/{id}/evidence:
+    post:
+      summary: File one evidence record against a compliance control (E8.4b)
+      description: >-
+        Append-only: there is no update or delete of a filed evidence
+        record. The control is re-verified against the caller's own tenant
+        before the write; a control_id this tenant cannot see is refused
+        with 404. recorded_by is sourced from the authenticated request
+        subject, never from the request body.
+      operationId: addControlEvidence
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddControlEvidenceRequest' }
+      responses:
+        '201':
+          description: The filed evidence record
+          content: { application/json: { schema: { $ref: '#/components/schemas/ControlEvidence' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/maintenance-windows:
     get:
       summary: List the caller's tenant's maintenance windows (E3.3a)
@@ -5222,6 +5352,88 @@ components:
         items:
           type: array
           items: { $ref: '#/components/schemas/RiskRegisterEntry' }
+    ComplianceControl:
+      type: object
+      description: >-
+        One tenant-owned compliance-control register entry (E8.4b): a
+        stateful reified entity — like Risk/Incident/VulnFinding, NOT a
+        false noun — with a governed implementation lifecycle and an
+        append-only evidence trail (see GET .../{id}).
+      properties:
+        control_id: { type: string }
+        framework:
+          type: string
+          description: The compliance framework this control belongs to (e.g. SOC2, ISO27001, PCI-DSS) — open-but-bounded, NOT a closed enum. Immutable after creation.
+        control_ref:
+          type: string
+          description: The control's own identifier within framework (e.g. CC6.1 under SOC2). Immutable after creation.
+        title: { type: string }
+        description: { type: string }
+        status:
+          type: string
+          enum: [not_implemented, in_progress, implemented, not_applicable]
+          description: >-
+            not_implemented -> {in_progress, not_applicable}; in_progress ->
+            {implemented, not_applicable, not_implemented}; implemented ->
+            {in_progress, not_implemented}; not_applicable -> not_implemented.
+        row_version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ComplianceControlList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ComplianceControl' }
+    CreateComplianceControlRequest:
+      type: object
+      required: [framework, control_ref, title]
+      properties:
+        framework: { type: string, maxLength: 100 }
+        control_ref: { type: string, maxLength: 50 }
+        title: { type: string, maxLength: 200 }
+        description: { type: string, maxLength: 10000 }
+    PatchComplianceControlRequest:
+      type: object
+      required: [row_version]
+      description: >-
+        Supply exactly one of title/description, or status — never both in
+        the same call.
+      properties:
+        row_version: { type: integer, format: int64 }
+        title: { type: string, maxLength: 200 }
+        description: { type: string, maxLength: 10000 }
+        status: { type: string, enum: [not_implemented, in_progress, implemented, not_applicable] }
+    ControlEvidence:
+      type: object
+      description: >-
+        One append-only proof record filed against a ComplianceControl
+        (E8.4b): a URL, a note, or a formal attestation. Never updated or
+        deleted after it is written.
+      properties:
+        evidence_id: { type: string }
+        kind: { type: string, enum: [url, note, attestation] }
+        value: { type: string }
+        recorded_by:
+          type: string
+          description: The actor who filed this evidence, sourced from the authenticated request subject — never client-supplied.
+        recorded_at: { type: string, format: date-time }
+    ComplianceControlWithEvidence:
+      type: object
+      description: GET .../{id}'s response shape — the control plus its bounded, oldest-first evidence trail.
+      allOf:
+        - $ref: '#/components/schemas/ComplianceControl'
+        - type: object
+          properties:
+            evidence:
+              type: array
+              items: { $ref: '#/components/schemas/ControlEvidence' }
+    AddControlEvidenceRequest:
+      type: object
+      required: [kind, value]
+      properties:
+        kind: { type: string, enum: [url, note, attestation] }
+        value: { type: string, maxLength: 4000 }
     MaintenanceWindow:
       type: object
       description: >-

@@ -135,6 +135,12 @@ var immutableAuditTables = []struct {
 	// ALWAYS from its first migration, exactly like asset_change_history —
 	// see 20260825000001_incident.sql.
 	{"incident_event", "trg_incident_event_no_row_mutate", "trg_incident_event_no_truncate", true},
+	// control_evidence (E8.4b): tenant-owned compliance-control evidence
+	// trail, armed ENABLE ALWAYS from its first migration, exactly like
+	// incident_event — see 20260912000001_compliance_control.sql. A PLAIN
+	// append-only table, not part of the audit_event/admin_audit_event hash
+	// chain (see domain.ControlEvidence's doc comment).
+	{"control_evidence", "trg_control_evidence_no_row_mutate", "trg_control_evidence_no_truncate", true},
 }
 
 // validateAuditImmutability verifies that every append-only audit table, and

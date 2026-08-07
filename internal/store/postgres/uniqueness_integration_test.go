@@ -115,6 +115,12 @@ var serverGeneratedIdentifiers = map[string]string{
 	// operator-authored, not scan-deduped — so only the surrogate PK needs
 	// this justification.
 	"risk_pkey": "risk_id is server-minted (domain.NewRisk); no create route accepts one from a client",
+
+	// Compliance-control register + append-only evidence trail (E8.4b).
+	// uq_compliance_control_tenant_framework_ref already carries tenant_id
+	// directly and so never reaches this map; only the two surrogate PKs do.
+	"compliance_control_pkey": "control_id is server-minted (domain.NewComplianceControl); no create route accepts one from a client",
+	"control_evidence_pkey":   "evidence_id is server-minted (domain.NewControlEvidence, called from ComplianceControlStore.AddEvidence); no route accepts one from a client",
 }
 
 // TestUniquenessIsScopedToTenant fails when a tenant-owned table carries a

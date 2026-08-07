@@ -184,6 +184,14 @@ type Server struct {
 	// here — separate, later stories (ADR-SOC-008).
 	risks domain.RiskRepository
 
+	// Compliance control register + append-only evidence trail (E8.4b,
+	// ADR-SOC-009); nil until SetComplianceControls. compliance_control/
+	// control_evidence are TENANT-OWNED, like risk above, so nothing here
+	// needs an exemption from row-level security. Completes E8.4:
+	// continuous-audit automation is OUT of scope here — deferred as
+	// speculative on a customer-less product.
+	complianceControls domain.ComplianceControlRepository
+
 	// Maintenance window registry (E3.3a); nil until SetMaintenanceWindows.
 	// maintenance_window is TENANT-OWNED, like alert_rule above, so nothing
 	// here needs an exemption from row-level security. The evaluator's
@@ -703,6 +711,23 @@ func (s *Server) routesFor(root fs.FS, consoleBuilt bool) *chi.Mux {
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/risks/register", s.getRiskRegister)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/risks/{id}", s.getRisk)
 		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/risks/{id}", s.patchRisk)
+
+		// Compliance control register + append-only evidence trail (E8.4b,
+		// ADR-SOC-009), completing E8.4. compliance_control/control_evidence
+		// are TENANT-OWNED, exactly like risk above, so the permission tier
+		// is tenant administration, not requirePlatformAdmin. A control's
+		// PATCH edits title/description OR performs a lifecycle transition —
+		// never both — mirroring PATCH /admin/risks/{id}'s identical split.
+		// GET .../{id} returns the control together with its evidence trail
+		// (bounded) — evidence has no separate paginated endpoint. There is
+		// no Delete: a tracked control is operational history the moment it
+		// is registered (ADR-HARD-003) — "removing" one is a transition to
+		// not_applicable.
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/compliance-controls", s.listComplianceControls)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/compliance-controls", s.createComplianceControl)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/compliance-controls/{id}", s.getComplianceControl)
+		rt.With(s.requirePermission(auth.PermAdmin)).Patch("/admin/compliance-controls/{id}", s.patchComplianceControl)
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/compliance-controls/{id}/evidence", s.addControlEvidence)
 
 		// Maintenance window administration (E3.3a). maintenance_window is
 		// TENANT-OWNED, exactly like alert_rule above, so the permission tier

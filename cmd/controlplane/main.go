@@ -592,6 +592,13 @@ func run(logger *slog.Logger) error {
 	// There is no privileged-pool counterpart: compliance controls/evidence
 	// (E8.4b) and continuous-audit automation are separate, later stories.
 	srv.SetRisks(postgres.NewRiskStore(appPool))
+	// Compliance control register + append-only evidence trail (E8.4b,
+	// ADR-SOC-009), completing E8.4: tenant-owned and under row-level
+	// security, exactly like risk above, so the admin CRUD + evidence-append
+	// API is built from the tenant-scoped pool. There is no privileged-pool
+	// counterpart: continuous-audit automation is deferred as speculative on
+	// a customer-less product.
+	srv.SetComplianceControls(postgres.NewComplianceControlStore(appPool))
 	// Telemetry retention + downsampling (E2.1b, ADR-TELEMETRY-002): both
 	// workers process every tenant's chunks/buckets from one process, the
 	// same category of background worker the webhook dispatcher and policy
