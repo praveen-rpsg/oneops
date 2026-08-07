@@ -4448,11 +4448,11 @@ components:
         A threshold-over-window SIEM detection config over
         security_observation (E8.1b-1): it fires when the count of matching
         observations for its asset in a trailing window meets a threshold. A
-        firing is DERIVED by a future, separate detector (E8.1b-2) evaluating
-        this config — never a reified Alert/Detection/Correlation row.
-        CONFIG ONLY: last_state/current_incident_id exist as columns but
-        nothing writes them yet — exactly as alert_rule's were before its
-        evaluator.
+        firing is DERIVED by the leader-gated SecurityDetector (E8.1b-2)
+        evaluating this config against security_observation and delivered as
+        a create/link against Incident — never a reified Alert/Detection/
+        Correlation row. last_state/last_transition_at/current_incident_id
+        are the detector's last verdict, set only by it, never through PATCH.
       properties:
         rule_id: { type: string }
         asset_id: { type: string }
@@ -4483,14 +4483,22 @@ components:
         last_state:
           type: string
           enum: [ok, firing]
-          description: Set only by a future detector (E8.1b-2). A new rule starts at "ok".
+          description: Set only by the detector (E8.1b-2). A new rule starts at "ok".
+        last_transition_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Set only by the detector. Absent means never evaluated to a transition.
         current_incident_id:
           type: string
           nullable: true
           description: >-
-            The open Incident this rule's firing is currently linked to.
-            Set only by a future detector (E8.1b-2), never through PATCH.
-            Nothing writes this in the current increment.
+            The open, security-sourced Incident this rule's firing is
+            currently linked to (E8.1b-2). Absent/null means the rule is ok,
+            or is firing but not yet correlated to an incident. Set only by
+            the detector, never through PATCH; cleared on the matching
+            firing->ok transition (the linked incident itself is not
+            auto-resolved).
         row_version: { type: integer, format: int64 }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -4886,10 +4894,12 @@ components:
           enum: [open, acknowledged, investigating, resolved, closed, reopened]
         source:
           type: string
-          enum: [manual, alert]
+          enum: [manual, alert, security]
           description: >-
             Read-only. manual: filed via this API. alert: created or linked
             by E4.1's alert-correlation pipeline off an alert-rule firing.
+            security: created or linked by E8.1b-2's SecurityDetector off a
+            security-rule firing.
         asset_id:
           type: string
           nullable: true

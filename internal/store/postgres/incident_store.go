@@ -12,6 +12,7 @@ import (
 
 	"github.com/rpsg/oneops/internal/alerting"
 	"github.com/rpsg/oneops/internal/domain"
+	"github.com/rpsg/oneops/internal/security"
 )
 
 const (
@@ -839,6 +840,135 @@ func (s *IncidentStore) AppendAlertNote(ctx context.Context, tenantID, incidentI
 	newVal := note
 	if err := s.recordEvent(ctx, tx, current.TenantID, current.IncidentID,
 		domain.IncidentEventAlertNote, "alert", nil, &newVal, actor, current.RowVersion); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ---------------------------------------------------------------------------
+// E8.1b-2 correlation (security.IncidentCorrelator): the SIEM-detection ->
+// Incident wiring, the exact SECURITY analog of the two E4.1 methods above.
+// These two methods are the ONLY ones on this type meant to be called from an
+// *IncidentStore built over the PRIVILEGED pool for this role — the same
+// dual-role split already documented above. Every statement here carries an
+// explicit tenant_id predicate, sourced from the caller's own security_rule
+// row: this connection has row-level security switched off (ADR-TENANCY-012).
+var _ security.IncidentCorrelator = (*IncidentStore)(nil)
+
+// FindOrCreateOpenSecurityIncident implements security.IncidentCorrelator.
+// want must already be security-sourced with a non-empty AssetID (domain.
+// NewSecurityIncident's shape) — Validate is re-run here defensively, the
+// same belt-and-suspenders FindOrCreateOpenAlertIncident applies.
+//
+// Atomicity is the database's, not Go's: the INSERT below races
+// ux_incident_open_security_per_asset via ON CONFLICT ... DO NOTHING — the
+// SECURITY analog of ux_incident_open_alert_per_asset, a SEPARATE partial
+// unique index scoped to source = 'security', so two detector goroutines
+// correlating different rules' firings on the same (tenant, asset) at once
+// cannot both create a row. Because the two indexes are source-scoped and
+// distinct, an OPEN alert-sourced incident and an OPEN security-sourced
+// incident on the SAME (tenant, asset) coexist as two separate rows — this
+// INSERT's own predicate (`source = 'security'`) never matches, and is never
+// blocked by, the alert path's row.
+func (s *IncidentStore) FindOrCreateOpenSecurityIncident(
+	ctx context.Context, want *domain.Incident, actor, noteOnLink string,
+) (string, error) {
+	if err := want.Validate(); err != nil {
+		return "", err
+	}
+	if want.Source != domain.IncidentSourceSecurity {
+		return "", fmt.Errorf("find-or-create security incident: want.Source must be security, got %q", want.Source)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row := tx.QueryRow(ctx, `
+		INSERT INTO incident (incident_id, tenant_id, title, description, severity, status, source, asset_id)
+		VALUES ($1, $2, $3, $4, $5, $6, 'security', $7)
+		ON CONFLICT (tenant_id, asset_id) WHERE source = 'security' AND status NOT IN ('resolved', 'closed')
+		DO NOTHING
+		RETURNING `+incidentColumns,
+		want.IncidentID, want.TenantID, want.Title, want.Description, string(want.Severity), string(domain.IncidentOpen), want.AssetID)
+
+	created, err := scanIncident(row)
+	switch {
+	case err == nil:
+		if err := s.recordEvent(ctx, tx, created.TenantID, created.IncidentID,
+			domain.IncidentEventCreated, "", nil, nil, actor, created.RowVersion); err != nil {
+			return "", err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return "", fmt.Errorf("commit: %w", err)
+		}
+		return created.IncidentID, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		// ON CONFLICT ... DO NOTHING skipped the row: an OPEN security-sourced
+		// incident already exists for this (tenant, asset) — fall through to
+		// find and link it instead.
+	default:
+		if isForeignKeyViolation(err) {
+			return "", domain.ErrNotFound
+		}
+		return "", fmt.Errorf("insert security incident: %w", err)
+	}
+
+	// Explicit tenant_id predicate (ADR-TENANCY-012): this connection has RLS
+	// switched off, so nothing else confines this read to want.TenantID.
+	existing := tx.QueryRow(ctx, `
+		SELECT `+incidentColumns+`
+		  FROM incident
+		 WHERE tenant_id = $1 AND asset_id = $2 AND source = 'security' AND status NOT IN ('resolved', 'closed')
+		 FOR UPDATE`,
+		want.TenantID, want.AssetID)
+	current, err := scanIncident(existing)
+	if err != nil {
+		return "", fmt.Errorf("read existing open security incident: %w", err)
+	}
+
+	note := noteOnLink
+	if err := s.recordEvent(ctx, tx, current.TenantID, current.IncidentID,
+		domain.IncidentEventSecurityNote, "security", nil, &note, actor, current.RowVersion); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit: %w", err)
+	}
+	return current.IncidentID, nil
+}
+
+// AppendSecurityNote implements security.IncidentCorrelator: it appends one
+// incident_event row of kind security_note to incidentID, having first
+// re-verified — under an explicit tenant_id predicate, not the FK alone —
+// that incidentID actually names a row owned by tenantID. Mirrors
+// AppendAlertNote exactly; see that method's doc comment for the full
+// tenant-boundary reasoning (ADR-TENANCY-012).
+func (s *IncidentStore) AppendSecurityNote(ctx context.Context, tenantID, incidentID, note, actor string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row := tx.QueryRow(ctx, `
+		SELECT `+incidentColumns+`
+		  FROM incident
+		 WHERE incident_id = $1 AND tenant_id = $2
+		 FOR UPDATE`, incidentID, tenantID)
+	current, err := scanIncident(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("get incident for security note: %w", err)
+	}
+
+	newVal := note
+	if err := s.recordEvent(ctx, tx, current.TenantID, current.IncidentID,
+		domain.IncidentEventSecurityNote, "security", nil, &newVal, actor, current.RowVersion); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

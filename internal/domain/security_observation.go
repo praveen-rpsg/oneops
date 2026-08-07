@@ -262,4 +262,16 @@ type SecurityObservationRepository interface {
 	// Returns observations ordered by ObservedAt ascending, bounded by
 	// MaxSecurityObservationQueryLimit.
 	QueryRangeForTenant(ctx context.Context, tenantID, assetID, observationType string, from, to time.Time) ([]SecurityObservation, error)
+
+	// CountForTenant is the detector's (internal/security, E8.1b-2) own
+	// privileged-pool read: how many of tenantID's assetID/observationType
+	// observations, at or above minSeverity, fall within [from, to]. It is a
+	// bounded SQL COUNT(*), never a List — a security_rule's window can span
+	// up to MaxSecurityRuleWindowSeconds (24h) of a hypertable that may hold
+	// far more rows than a detector tick should ever pull into Go, the same
+	// "count, don't fetch" discipline AlertRuleStore.CountFiring applies to
+	// alert_rule (E7.1). tenantID is an explicit SQL predicate rather than an
+	// ambient connection property, exactly like QueryRangeForTenant's own —
+	// this method exists FOR a privileged, cross-tenant caller (ADR-TENANCY-012).
+	CountForTenant(ctx context.Context, tenantID, assetID, observationType string, minSeverity ObservationSeverity, from, to time.Time) (int, error)
 }

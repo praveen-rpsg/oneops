@@ -100,15 +100,24 @@ type SecurityRule struct {
 	// other (ObservationSeverity's own doc comment).
 	IncidentSeverity IncidentSeverity
 	Enabled          bool
-	// LastState is set only by the future detector's background write path
-	// (E8.1b-2), never through the row_version-guarded Update path — see
-	// SecurityRulePatch's doc comment. A new rule starts at
-	// SecurityRuleStateOK. Nothing in this story writes it after creation.
+	// LastState is set only by the detector's background write path
+	// (internal/security, E8.1b-2), never through the row_version-guarded
+	// Update path — see SecurityRulePatch's doc comment. A new rule starts at
+	// SecurityRuleStateOK.
 	LastState SecurityRuleState
-	// CurrentIncidentID is the open Incident this rule's firing is currently
-	// linked to, or nil when the rule is ok — set only by the future
-	// detector's background write path (E8.1b-2), never through Update. Like
-	// LastState, nothing in this story writes it after creation.
+	// LastTransitionAt is when LastState last actually changed — set only by
+	// the detector's RecordTransition, in the SAME write as LastState (E8.1b-2,
+	// mirroring AlertRule.LastTransitionAt exactly). Zero means "never
+	// evaluated to a transition".
+	LastTransitionAt time.Time
+	// CurrentIncidentID is the open, security-sourced Incident this rule's
+	// firing is currently linked to, or nil when the rule is ok — set only by
+	// the detector's background write path (internal/security, E8.1b-2),
+	// never through Update. Cleared (set back to nil) on the matching
+	// firing->ok transition; the linked Incident itself is never
+	// auto-resolved or auto-closed by that clearing (the same
+	// correlate-don't-remediate scope AlertRule.CurrentIncidentID's doc
+	// comment states for E4.1).
 	CurrentIncidentID *string
 	RowVersion        int64
 	CreatedAt         time.Time

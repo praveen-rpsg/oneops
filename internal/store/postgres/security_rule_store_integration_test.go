@@ -3,7 +3,9 @@
 package postgres
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/rpsg/oneops/internal/domain"
 )
@@ -257,5 +259,125 @@ func TestSecurityRuleStore_MinSeverityAndIncidentSeverityRoundTrip(t *testing.T)
 	}
 	if patched.IncidentSeverity != domain.IncidentSeverityLow {
 		t.Errorf("patched incident_severity = %q, want %q", patched.IncidentSeverity, domain.IncidentSeverityLow)
+	}
+}
+
+// TestSecurityRuleDetectorStore_EnabledRulesAndRecordTransition proves the
+// detector's own privileged surface (security.Store, E8.1b-2): EnabledRules
+// pages across tenants (a disabled rule and another tenant's rule are both
+// excluded/included correctly), and RecordTransition CAS-updates
+// last_state/last_transition_at/current_incident_id fenced on row_version —
+// mirrors TestAlertRuleStore-equivalent coverage for alert_rule.
+func TestSecurityRuleDetectorStore_EnabledRulesAndRecordTransition(t *testing.T) {
+	priv := testPool(t)
+	tenants := NewTenantStore(priv)
+	a, err := tenants.Create(adminTestCtx(), newTenant("sr-detector-alpha", "ext-sr-detector-alpha"))
+	if err != nil {
+		t.Fatalf("create tenant a: %v", err)
+	}
+	b, err := tenants.Create(adminTestCtx(), newTenant("sr-detector-bravo", "ext-sr-detector-bravo"))
+	if err != nil {
+		t.Fatalf("create tenant b: %v", err)
+	}
+
+	scoped := tenantScopedPool(t)
+	assets := NewAssetStore(scoped)
+	rules := NewSecurityRuleStore(scoped)
+	ctxA := assetTestCtx(a)
+	ctxB := assetTestCtx(b)
+
+	hostA := telemetryAsset(t, assets, ctxA, a.TenantID, "sr-detector-host-a")
+	hostB := telemetryAsset(t, assets, ctxB, b.TenantID, "sr-detector-host-b")
+
+	rA, err := domain.NewSecurityRule(a.TenantID, hostA.AssetID, "port_scan", 300, 5, domain.IncidentSeverityHigh)
+	if err != nil {
+		t.Fatalf("new security rule a: %v", err)
+	}
+	createdA, err := rules.Create(ctxA, rA)
+	if err != nil {
+		t.Fatalf("create rule a: %v", err)
+	}
+	rB, err := domain.NewSecurityRule(b.TenantID, hostB.AssetID, "port_scan", 300, 5, domain.IncidentSeverityHigh)
+	if err != nil {
+		t.Fatalf("new security rule b: %v", err)
+	}
+	createdB, err := rules.Create(ctxB, rB)
+	if err != nil {
+		t.Fatalf("create rule b: %v", err)
+	}
+	// A disabled rule must never appear in EnabledRules.
+	rDisabled, err := domain.NewSecurityRule(a.TenantID, hostA.AssetID, "malware_detected", 300, 1, domain.IncidentSeverityCritical)
+	if err != nil {
+		t.Fatalf("new disabled security rule: %v", err)
+	}
+	createdDisabled, err := rules.Create(ctxA, rDisabled)
+	if err != nil {
+		t.Fatalf("create disabled rule: %v", err)
+	}
+	disabled := false
+	if _, err := rules.Update(ctxA, createdDisabled.RuleID, createdDisabled.RowVersion, domain.SecurityRulePatch{Enabled: &disabled}); err != nil {
+		t.Fatalf("disable rule: %v", err)
+	}
+
+	detector := NewSecurityRuleDetectorStore(priv)
+	seen := map[string]*domain.SecurityRule{}
+	after := ""
+	for {
+		page, err := detector.EnabledRules(context.Background(), 500, after)
+		if err != nil {
+			t.Fatalf("enabled rules: %v", err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, r := range page {
+			seen[r.RuleID] = r
+			after = r.RuleID
+		}
+		if len(page) < 500 {
+			break
+		}
+	}
+	if _, ok := seen[createdA.RuleID]; !ok {
+		t.Errorf("EnabledRules did not include tenant a's rule")
+	}
+	if _, ok := seen[createdB.RuleID]; !ok {
+		t.Errorf("EnabledRules did not include tenant b's rule — the due-scan is cross-tenant by design")
+	}
+	if _, ok := seen[createdDisabled.RuleID]; ok {
+		t.Errorf("EnabledRules included a disabled rule")
+	}
+
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	incidentID := "fake-incident-id"
+	updated, err := detector.RecordTransition(context.Background(), createdA.RuleID, createdA.RowVersion, domain.SecurityRuleStateFiring, now, &incidentID)
+	if err != nil {
+		t.Fatalf("record transition: %v", err)
+	}
+	if updated.LastState != domain.SecurityRuleStateFiring {
+		t.Errorf("last_state = %q, want firing", updated.LastState)
+	}
+	if !updated.LastTransitionAt.Equal(now) {
+		t.Errorf("last_transition_at = %s, want %s", updated.LastTransitionAt, now)
+	}
+	if updated.CurrentIncidentID == nil || *updated.CurrentIncidentID != incidentID {
+		t.Errorf("current_incident_id = %v, want %q", updated.CurrentIncidentID, incidentID)
+	}
+
+	// A stale row_version is refused.
+	if _, err := detector.RecordTransition(context.Background(), createdA.RuleID, createdA.RowVersion, domain.SecurityRuleStateOK, now, nil); err != domain.ErrVersionMismatch {
+		t.Errorf("stale record transition err = %v, want ErrVersionMismatch", err)
+	}
+
+	// Clearing the link (firing->ok) sets current_incident_id back to nil.
+	cleared, err := detector.RecordTransition(context.Background(), createdA.RuleID, updated.RowVersion, domain.SecurityRuleStateOK, now.Add(time.Minute), nil)
+	if err != nil {
+		t.Fatalf("record recovery transition: %v", err)
+	}
+	if cleared.CurrentIncidentID != nil {
+		t.Errorf("current_incident_id after recovery = %v, want nil", cleared.CurrentIncidentID)
+	}
+	if cleared.LastState != domain.SecurityRuleStateOK {
+		t.Errorf("last_state after recovery = %q, want ok", cleared.LastState)
 	}
 }

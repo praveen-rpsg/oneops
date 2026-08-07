@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,13 +18,21 @@ const (
 )
 
 const securityRuleCols = `rule_id, tenant_id, asset_id, observation_type, min_severity, window_seconds,
-	threshold_count, incident_severity, enabled, last_state, current_incident_id, row_version, created_at, updated_at`
+	threshold_count, incident_severity, enabled, last_state, last_transition_at, current_incident_id,
+	row_version, created_at, updated_at`
 
 // SecurityRuleStore administers security_rule: the admin CRUD API's
-// tenant-scoped reads/writes (domain.SecurityRuleRepository) — mirroring
-// AlertRuleStore's tenant-scoped role exactly. CONFIG ONLY: unlike
-// AlertRuleStore, this type has no privileged-pool counterpart in this
-// story — there is no detector/evaluator yet (E8.1b-2).
+// tenant-scoped reads/writes (domain.SecurityRuleRepository) — built
+// EXCLUSIVELY over the tenant-scoped pool, unlike AlertRuleStore's dual-role
+// split. The detector's own privileged due-scan/transition-recording surface
+// (security.Store) is *SecurityRuleDetectorStore instead — a DELIBERATELY
+// SEPARATE type (security_rule_detector_store.go), so this type's own
+// asset-existence probe (Create, below) is never attributed to a privileged
+// instance by TestPrivilegedReads_AreScopedToATenant, which derives its
+// subject set by TYPE, not by call site. Two small types with a shared
+// tenant_id column, rather than one dual-role struct, keeps the privileged
+// surface minimal — nothing more can be reached from the privileged pool
+// than EnabledRules/RecordTransition themselves.
 //
 // security_rule is TENANT-OWNED — it is in TenantOwnedTables and carries
 // row-level security — so this store takes no tenant argument anywhere; the
@@ -55,10 +64,11 @@ func scanSecurityRule(sc scanner) (*domain.SecurityRule, error) {
 		minSeverity      string
 		incidentSeverity string
 		lastState        string
+		lastTransitionAt *time.Time
 	)
 	if err := sc.Scan(
 		&r.RuleID, &r.TenantID, &r.AssetID, &r.ObservationType, &minSeverity, &r.WindowSeconds,
-		&r.ThresholdCount, &incidentSeverity, &r.Enabled, &lastState, &r.CurrentIncidentID,
+		&r.ThresholdCount, &incidentSeverity, &r.Enabled, &lastState, &lastTransitionAt, &r.CurrentIncidentID,
 		&r.RowVersion, &r.CreatedAt, &r.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -66,6 +76,9 @@ func scanSecurityRule(sc scanner) (*domain.SecurityRule, error) {
 	r.MinSeverity = domain.ObservationSeverity(minSeverity)
 	r.IncidentSeverity = domain.IncidentSeverity(incidentSeverity)
 	r.LastState = domain.SecurityRuleState(lastState)
+	if lastTransitionAt != nil {
+		r.LastTransitionAt = *lastTransitionAt
+	}
 	return &r, nil
 }
 
@@ -92,9 +105,9 @@ func (s *SecurityRuleStore) Create(ctx context.Context, r *domain.SecurityRule) 
 	row := s.pool.QueryRow(ctx, `
 		INSERT INTO security_rule
 			(rule_id, tenant_id, asset_id, observation_type, min_severity, window_seconds,
-			 threshold_count, incident_severity, enabled, last_state, current_incident_id,
+			 threshold_count, incident_severity, enabled, last_state, last_transition_at, current_incident_id,
 			 row_version, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,1,now(),now())
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,NULL,1,now(),now())
 		RETURNING `+securityRuleCols,
 		r.RuleID, r.TenantID, r.AssetID, r.ObservationType, string(r.MinSeverity), r.WindowSeconds,
 		r.ThresholdCount, string(r.IncidentSeverity), r.Enabled, string(r.LastState))

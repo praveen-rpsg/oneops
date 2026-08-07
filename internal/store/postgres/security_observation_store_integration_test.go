@@ -232,6 +232,105 @@ func TestSecurityObservationIsolation_RLSByTenant(t *testing.T) {
 	}
 }
 
+// TestSecurityObservationCounterStore_CountForTenant proves the detector's
+// own read (E8.1b-2): a window-bounded, severity-thresholded COUNT(*) that
+// never crosses tenants even when scoped to a specific asset_id/
+// observation_type another tenant also happens to use — the privileged
+// analog of TestSecurityObservationIsolation_RLSByTenant's QueryRangeForTenant
+// proof, applied to CountForTenant instead.
+func TestSecurityObservationCounterStore_CountForTenant(t *testing.T) {
+	priv := testPool(t)
+	tenants := NewTenantStore(priv)
+	a, err := tenants.Create(adminTestCtx(), newTenant("secobs-count-alpha", "ext-secobs-count-alpha"))
+	if err != nil {
+		t.Fatalf("create tenant a: %v", err)
+	}
+	b, err := tenants.Create(adminTestCtx(), newTenant("secobs-count-bravo", "ext-secobs-count-bravo"))
+	if err != nil {
+		t.Fatalf("create tenant b: %v", err)
+	}
+
+	scoped := tenantScopedPool(t)
+	assets := NewAssetStore(scoped)
+	writeStore := NewSecurityObservationStore(scoped)
+	ctxA := assetTestCtx(a)
+	ctxB := assetTestCtx(b)
+
+	hostA := securityObservationAsset(t, assets, ctxA, a.TenantID, "count-host-a")
+	hostB := securityObservationAsset(t, assets, ctxB, b.TenantID, "count-host-b")
+
+	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	// Tenant A: 3 high-severity port_scan observations inside the window, 1
+	// low-severity one (must not count toward a min_severity=high threshold),
+	// and 1 observation OUTSIDE the window (must not count either).
+	if _, err := writeStore.WriteObservations(ctxA, []domain.SecurityObservation{
+		{TenantID: a.TenantID, AssetID: hostA.AssetID, ObservationType: "port_scan", Source: "wazuh",
+			Severity: domain.ObservationSeverityHigh, ObservedAt: base},
+		{TenantID: a.TenantID, AssetID: hostA.AssetID, ObservationType: "port_scan", Source: "wazuh",
+			Severity: domain.ObservationSeverityCritical, ObservedAt: base.Add(1 * time.Minute)},
+		{TenantID: a.TenantID, AssetID: hostA.AssetID, ObservationType: "port_scan", Source: "wazuh",
+			Severity: domain.ObservationSeverityHigh, ObservedAt: base.Add(2 * time.Minute)},
+		{TenantID: a.TenantID, AssetID: hostA.AssetID, ObservationType: "port_scan", Source: "wazuh",
+			Severity: domain.ObservationSeverityLow, ObservedAt: base.Add(3 * time.Minute)},
+		{TenantID: a.TenantID, AssetID: hostA.AssetID, ObservationType: "port_scan", Source: "wazuh",
+			Severity: domain.ObservationSeverityCritical, ObservedAt: base.Add(-time.Hour)},
+	}); err != nil {
+		t.Fatalf("write observations as tenant a: %v", err)
+	}
+	// Tenant B: many high-severity observations on the SAME asset_id/
+	// observation_type string as tenant A — an adversarial collision a
+	// globally unique asset id would not normally produce, proving isolation
+	// does not merely happen to hold by construction.
+	if _, err := writeStore.WriteObservations(ctxB, []domain.SecurityObservation{
+		{TenantID: b.TenantID, AssetID: hostB.AssetID, ObservationType: "port_scan", Source: "wazuh",
+			Severity: domain.ObservationSeverityCritical, ObservedAt: base},
+		{TenantID: b.TenantID, AssetID: hostB.AssetID, ObservationType: "port_scan", Source: "wazuh",
+			Severity: domain.ObservationSeverityCritical, ObservedAt: base.Add(1 * time.Minute)},
+	}); err != nil {
+		t.Fatalf("write observations as tenant b: %v", err)
+	}
+
+	counter := NewSecurityObservationCounterStore(priv)
+	from, to := base.Add(-time.Minute), base.Add(10*time.Minute)
+
+	gotA, err := counter.CountForTenant(context.Background(), a.TenantID, hostA.AssetID, "port_scan", domain.ObservationSeverityHigh, from, to)
+	if err != nil {
+		t.Fatalf("count for tenant a: %v", err)
+	}
+	if gotA != 3 {
+		t.Fatalf("count for tenant a (min_severity=high, in window) = %d, want 3 (excludes the low-severity and out-of-window rows)", gotA)
+	}
+
+	// Tenant B's asset_id is a DIFFERENT string (hostB.AssetID), so this also
+	// proves the asset_id predicate itself, not merely tenant_id, confines
+	// the count — tenant A's own count on hostB's id must be zero.
+	gotAOnHostB, err := counter.CountForTenant(context.Background(), a.TenantID, hostB.AssetID, "port_scan", domain.ObservationSeverityHigh, from, to)
+	if err != nil {
+		t.Fatalf("count for tenant a on tenant b's asset: %v", err)
+	}
+	if gotAOnHostB != 0 {
+		t.Fatalf("count for tenant a on tenant b's asset_id = %d, want 0", gotAOnHostB)
+	}
+
+	gotB, err := counter.CountForTenant(context.Background(), b.TenantID, hostB.AssetID, "port_scan", domain.ObservationSeverityHigh, from, to)
+	if err != nil {
+		t.Fatalf("count for tenant b: %v", err)
+	}
+	if gotB != 2 {
+		t.Fatalf("count for tenant b = %d, want 2", gotB)
+	}
+
+	// A threshold requiring more than what exists returns a genuinely low
+	// count, not an error — the detector decides ok vs firing off this value.
+	gotNone, err := counter.CountForTenant(context.Background(), a.TenantID, hostA.AssetID, "port_scan", domain.ObservationSeverityCritical, from, to)
+	if err != nil {
+		t.Fatalf("count critical-only for tenant a: %v", err)
+	}
+	if gotNone != 1 {
+		t.Fatalf("count for tenant a (min_severity=critical) = %d, want 1", gotNone)
+	}
+}
+
 // TestSecurityObservation_IsARealHypertable proves the storage decision
 // landed, not merely a plain table with the right name: security_observation
 // must be registered in TimescaleDB's own catalogue — mirrors

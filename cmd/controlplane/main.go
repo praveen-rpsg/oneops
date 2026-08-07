@@ -32,6 +32,7 @@ import (
 	"github.com/rpsg/oneops/internal/ops"
 	"github.com/rpsg/oneops/internal/policy"
 	"github.com/rpsg/oneops/internal/safehttp"
+	"github.com/rpsg/oneops/internal/security"
 	"github.com/rpsg/oneops/internal/store/migrate"
 	"github.com/rpsg/oneops/internal/store/postgres"
 	"github.com/rpsg/oneops/internal/timeline"
@@ -559,15 +560,16 @@ func run(logger *slog.Logger) error {
 	// Security observation ingestion/query (E8.1a, the SOC epic's
 	// foundation): tenant-owned and under row-level security, exactly like
 	// telemetry above — a sibling TimescaleDB hypertable, not a reuse of
-	// telemetry_sample (ADR-TELEMETRY-001, ADR-SOC-001). Fact ingest/query
-	// only: no detection, correlation or worker is wired here (E8.1b).
+	// telemetry_sample (ADR-TELEMETRY-001, ADR-SOC-001). This admin instance is
+	// fact ingest/query only; the leader-gated detector's own privileged
+	// instance (CountForTenant, E8.1b-2) is built separately, further below.
 	srv.SetSecurityObservations(postgres.NewSecurityObservationStore(appPool))
 	// Security rule administration (E8.1b-1): tenant-owned and under
 	// row-level security, exactly like security_observation above, so the
-	// admin CRUD API is built from the tenant-scoped pool. CONFIG ONLY: no
-	// detector/worker is wired here — the SOC detector that evaluates these
-	// rules against security_observation (E8.1b-2) is a later, separate
-	// story, so there is no privileged-pool counterpart yet either.
+	// admin CRUD API is built from the tenant-scoped pool. The leader-gated
+	// SIEM detector that evaluates these rules against security_observation
+	// (E8.1b-2) is wired further below, over the privileged pool — the
+	// identical dual-role split AlertRuleStore already draws above.
 	srv.SetSecurityRules(postgres.NewSecurityRuleStore(appPool))
 	// Telemetry retention + downsampling (E2.1b, ADR-TELEMETRY-002): both
 	// workers process every tenant's chunks/buckets from one process, the
@@ -705,6 +707,30 @@ func run(logger *slog.Logger) error {
 	groupingMetrics := grouping.NewPromMetrics(metrics.Registry())
 	groupingReconciler := grouping.NewReconciler(groupingStore, dependencyGraph, groupingMetrics, logger, grouping.Config{})
 	workers = append(workers, groupingReconciler.Run)
+
+	// SIEM detector (E8.1b-2, ADR-SOC-001/002 continued): a SEPARATE
+	// leader-gated pass over security_rule, the SECURITY analog of
+	// alertEvaluator above. UNLIKE AlertRuleStore's single dual-role struct,
+	// its privileged store/counter are their OWN minimal types
+	// (SecurityRuleDetectorStore, SecurityObservationCounterStore) rather
+	// than the admin-CRUD SecurityRuleStore/SecurityObservationStore built a
+	// second time over pool — see SecurityRuleStore's own doc comment for
+	// why: it keeps every asset-existence-probe/RLS-scoped read those admin
+	// types carry off the privileged surface entirely. Correlation reuses
+	// the SAME incidentCorrelator instance (*postgres.IncidentStore built
+	// over pool) alertEvaluator already uses, which now also satisfies
+	// security.IncidentCorrelator (FindOrCreateOpenSecurityIncident/
+	// AppendSecurityNote) alongside alerting.IncidentCorrelator — one
+	// privileged IncidentStore, two correlation ports. Unlike
+	// alertEvaluator's optional correlator, security.NewDetector's
+	// correlator argument must never be nil (see its own doc comment):
+	// correlation is this detector's only consequence of a firing.
+	securityRuleDetectorStore := postgres.NewSecurityRuleDetectorStore(pool)
+	securityObservationCounter := postgres.NewSecurityObservationCounterStore(pool)
+	securityMetrics := security.NewPromMetrics(metrics.Registry())
+	securityDetector := security.NewDetector(
+		securityRuleDetectorStore, securityObservationCounter, incidentCorrelator, securityMetrics, logger, security.Config{})
+	workers = append(workers, securityDetector.Run)
 
 	// Escalation engine (E5.2b-2, ADR-ONCALL-003): pages an incident's
 	// on-call chain and escalates through its policy's tiers while it stays

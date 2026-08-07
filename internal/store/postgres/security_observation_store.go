@@ -212,6 +212,43 @@ func (s *SecurityObservationStore) QueryRangeForTenant(
 	return out, nil
 }
 
+// CountForTenant implements domain.SecurityObservationRepository's detector
+// read (E8.1b-2): a single bounded COUNT(*), never a List — see that
+// interface method's own doc comment. Present on this type for interface
+// completeness, the same reason TelemetryRepository.QueryRangeForTenant sits
+// on TelemetryStore even though nothing calls it through this tenant-scoped
+// instance in production; the detector's own privileged caller uses
+// SecurityObservationCounterStore instead
+// (security_observation_counter_store.go) — a SEPARATE, minimal type kept
+// off this store's admin-CRUD method set for the identical reason
+// SecurityRuleStore's own doc comment explains for security_rule. The query
+// itself (including the severity-rank CASE expressions) is duplicated there
+// rather than shared through a package-level helper, so
+// TestPrivilegedReads_AreScopedToATenant can see the tenant_id predicate
+// directly in EACH method's own source text — a helper call site would hide
+// the SQL literal from that guard's per-method sweep.
+func (s *SecurityObservationStore) CountForTenant(
+	ctx context.Context, tenantID, assetID, observationType string, minSeverity domain.ObservationSeverity, from, to time.Time,
+) (int, error) {
+	var count int
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		  FROM security_observation
+		 WHERE tenant_id = $1 AND asset_id = $2 AND observation_type = $3
+		   AND observed_at >= $4 AND observed_at <= $5
+		   AND (CASE severity
+		          WHEN 'info' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2
+		          WHEN 'high' THEN 3 WHEN 'critical' THEN 4 ELSE -1 END) >=
+		       (CASE $6::text
+		          WHEN 'info' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2
+		          WHEN 'high' THEN 3 WHEN 'critical' THEN 4 ELSE -1 END)`,
+		tenantID, assetID, observationType, from, to, string(minSeverity),
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count security observations for tenant: %w", err)
+	}
+	return count, nil
+}
+
 func scanSecurityObservation(s scanner) (domain.SecurityObservation, error) {
 	var (
 		o         domain.SecurityObservation

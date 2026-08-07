@@ -77,22 +77,28 @@ func (s IncidentStatus) Valid() bool {
 
 // IncidentSource distinguishes an incident an operator filed directly
 // (manual, the only kind before E4) from one internal/alerting's evaluator
-// created or linked off an alert-rule firing (alert, E4.1). It is the ONLY
-// thing that gates auto-correlation: FindOrCreateOpenAlertIncident only ever
-// considers incidents whose Source is alert, so a later firing on the same
-// CI can never silently annex an operator's own manually-filed incident —
-// nothing else about the two shapes would otherwise tell them apart.
+// created or linked off an alert-rule firing (alert, E4.1), or one
+// internal/security's detector created or linked off a security-rule firing
+// (security, E8.1b-2). It is the ONLY thing that gates auto-correlation:
+// FindOrCreateOpenAlertIncident only ever considers incidents whose Source is
+// alert, and FindOrCreateOpenSecurityIncident only ever considers incidents
+// whose Source is security, so a later firing on the same CI can never
+// silently annex an operator's own manually-filed incident, and an alert
+// firing and a security firing on the SAME asset always produce two SEPARATE
+// open incidents rather than colliding into one — nothing else about the
+// three shapes would otherwise tell them apart.
 type IncidentSource string
 
 const (
-	IncidentSourceManual IncidentSource = "manual"
-	IncidentSourceAlert  IncidentSource = "alert"
+	IncidentSourceManual   IncidentSource = "manual"
+	IncidentSourceAlert    IncidentSource = "alert"
+	IncidentSourceSecurity IncidentSource = "security"
 )
 
 // Valid reports whether s is a defined source.
 func (s IncidentSource) Valid() bool {
 	switch s {
-	case IncidentSourceManual, IncidentSourceAlert:
+	case IncidentSourceManual, IncidentSourceAlert, IncidentSourceSecurity:
 		return true
 	default:
 		return false
@@ -278,10 +284,11 @@ func (i *Incident) Validate() error {
 		return newValidation("status", "must be one of: open, acknowledged, investigating, resolved, closed, reopened")
 	}
 	if !i.Source.Valid() {
-		return newValidation("source", "must be one of: manual, alert")
+		return newValidation("source", "must be one of: manual, alert, security")
 	}
-	if i.Source == IncidentSourceAlert && (i.AssetID == nil || strings.TrimSpace(*i.AssetID) == "") {
-		return newValidation("asset_id", "must be set for an alert-sourced incident — correlation always names the CI the firing rule watches")
+	if (i.Source == IncidentSourceAlert || i.Source == IncidentSourceSecurity) &&
+		(i.AssetID == nil || strings.TrimSpace(*i.AssetID) == "") {
+		return newValidation("asset_id", "must be set for an alert- or security-sourced incident — correlation always names the CI the firing rule watches")
 	}
 	if i.AssetID != nil && strings.TrimSpace(*i.AssetID) == "" {
 		return newValidation("asset_id", "must not be blank when supplied; omit it to leave the incident unlinked")
@@ -332,6 +339,34 @@ func NewAlertIncident(tenantID, title, description string, severity IncidentSeve
 		Severity:    severity,
 		Status:      IncidentOpen,
 		Source:      IncidentSourceAlert,
+		AssetID:     &trimmed,
+	}
+	if err := inc.Validate(); err != nil {
+		return nil, err
+	}
+	return inc, nil
+}
+
+// NewSecurityIncident builds a freshly opened, security-sourced Incident —
+// the shape internal/security's detector creates on an ok->firing transition
+// that finds no existing OPEN security-sourced incident for the firing
+// rule's own asset (E8.1b-2). It is NewAlertIncident's exact analog for the
+// SOC detection path: assetID is required for the identical reason (a
+// correlation always names the CI the firing rule watches), and
+// IncidentSourceSecurity without one is refused by Validate. A security
+// incident and an alert incident on the SAME asset are two SEPARATE rows —
+// Source distinguishes them, so neither correlation path ever discovers or
+// annexes the other's incident.
+func NewSecurityIncident(tenantID, title, description string, severity IncidentSeverity, assetID string) (*Incident, error) {
+	trimmed := strings.TrimSpace(assetID)
+	inc := &Incident{
+		IncidentID:  NewID(),
+		TenantID:    strings.TrimSpace(tenantID),
+		Title:       strings.TrimSpace(title),
+		Description: description,
+		Severity:    severity,
+		Status:      IncidentOpen,
+		Source:      IncidentSourceSecurity,
 		AssetID:     &trimmed,
 	}
 	if err := inc.Validate(); err != nil {
@@ -400,12 +435,22 @@ const (
 	// identity, never ActorFrom(ctx) — this is a background write, not a
 	// request-attributed one.
 	IncidentEventAlertNote IncidentEventKind = "alert_note"
+	// IncidentEventSecurityNote is IncidentEventAlertNote's exact analog for
+	// internal/security's detector (E8.1b-2): "security rule <observation_type>
+	// fired" when a second rule's firing links to an already-open security
+	// incident, and "security rule <observation_type> recovered" when the
+	// linked rule's firing clears. Field is always "security"; NewValue
+	// carries the note text; OldValue is always nil. Actor is always the
+	// detector's own system identity, never ActorFrom(ctx) — this is a
+	// background write, not a request-attributed one.
+	IncidentEventSecurityNote IncidentEventKind = "security_note"
 )
 
 // Valid reports whether k is a value the database will accept.
 func (k IncidentEventKind) Valid() bool {
 	switch k {
-	case IncidentEventCreated, IncidentEventStatusTransitioned, IncidentEventAssigned, IncidentEventAlertNote:
+	case IncidentEventCreated, IncidentEventStatusTransitioned, IncidentEventAssigned,
+		IncidentEventAlertNote, IncidentEventSecurityNote:
 		return true
 	default:
 		return false

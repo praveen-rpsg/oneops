@@ -18,28 +18,29 @@ import (
 func (s *Server) SetSecurityRules(repo domain.SecurityRuleRepository) { s.securityRules = repo }
 
 type securityRuleDTO struct {
-	RuleID            string    `json:"rule_id"`
-	AssetID           string    `json:"asset_id"`
-	ObservationType   string    `json:"observation_type"`
-	MinSeverity       string    `json:"min_severity"`
-	WindowSeconds     int       `json:"window_seconds"`
-	ThresholdCount    int       `json:"threshold_count"`
-	IncidentSeverity  string    `json:"incident_severity"`
-	Enabled           bool      `json:"enabled"`
-	LastState         string    `json:"last_state"`
-	CurrentIncidentID *string   `json:"current_incident_id,omitempty"`
-	RowVersion        int64     `json:"row_version"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	RuleID            string     `json:"rule_id"`
+	AssetID           string     `json:"asset_id"`
+	ObservationType   string     `json:"observation_type"`
+	MinSeverity       string     `json:"min_severity"`
+	WindowSeconds     int        `json:"window_seconds"`
+	ThresholdCount    int        `json:"threshold_count"`
+	IncidentSeverity  string     `json:"incident_severity"`
+	Enabled           bool       `json:"enabled"`
+	LastState         string     `json:"last_state"`
+	LastTransitionAt  *time.Time `json:"last_transition_at,omitempty"`
+	CurrentIncidentID *string    `json:"current_incident_id,omitempty"`
+	RowVersion        int64      `json:"row_version"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 // toSecurityRuleDTO deliberately omits tenant_id, the same choice
 // toAlertRuleDTO makes: the caller is already inside exactly one tenant.
-// last_state/current_incident_id are passed straight through: they are
-// read-only evaluator-owned surfaces (nothing writes them yet — E8.1b-2 is a
-// later, separate story), the same shape toAlertRuleDTO already exposes.
+// last_state/last_transition_at/current_incident_id are passed straight
+// through: they are read-only, detector-owned surfaces (E8.1b-2), the same
+// shape toAlertRuleDTO already exposes for the alert path.
 func toSecurityRuleDTO(r *domain.SecurityRule) securityRuleDTO {
-	return securityRuleDTO{
+	dto := securityRuleDTO{
 		RuleID: r.RuleID, AssetID: r.AssetID, ObservationType: r.ObservationType,
 		MinSeverity: string(r.MinSeverity), WindowSeconds: r.WindowSeconds,
 		ThresholdCount: r.ThresholdCount, IncidentSeverity: string(r.IncidentSeverity),
@@ -47,6 +48,11 @@ func toSecurityRuleDTO(r *domain.SecurityRule) securityRuleDTO {
 		CurrentIncidentID: r.CurrentIncidentID,
 		RowVersion:        r.RowVersion, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
+	if !r.LastTransitionAt.IsZero() {
+		t := r.LastTransitionAt
+		dto.LastTransitionAt = &t
+	}
+	return dto
 }
 
 // createSecurityRuleRequest carries no rule_id (minted server-side, the same

@@ -144,13 +144,73 @@ func TestNewIncidentTransitionError_UnwrapsToErrInvalidTransition(t *testing.T) 
 }
 
 func TestIncidentEventKind_Valid(t *testing.T) {
-	for _, k := range []IncidentEventKind{IncidentEventCreated, IncidentEventStatusTransitioned, IncidentEventAssigned} {
+	for _, k := range []IncidentEventKind{
+		IncidentEventCreated, IncidentEventStatusTransitioned, IncidentEventAssigned,
+		IncidentEventAlertNote, IncidentEventSecurityNote,
+	} {
 		if !k.Valid() {
 			t.Errorf("%q should be valid", k)
 		}
 	}
 	if IncidentEventKind("commented").Valid() {
 		t.Error(`"commented" has no write path in E5.1 and must not validate as a storable kind yet`)
+	}
+}
+
+// TestIncidentSource_Valid pins the closed vocabulary: manual, alert and
+// security (E8.1b-2) are defined; nothing else is.
+func TestIncidentSource_Valid(t *testing.T) {
+	for _, s := range []IncidentSource{IncidentSourceManual, IncidentSourceAlert, IncidentSourceSecurity} {
+		if !s.Valid() {
+			t.Errorf("%q should be valid", s)
+		}
+	}
+	if IncidentSource("bogus").Valid() {
+		t.Error(`"bogus" should not be a valid source`)
+	}
+}
+
+// TestNewSecurityIncident_BuildsAnOpenSecuritySourcedIncident proves
+// NewSecurityIncident is NewAlertIncident's exact analog: Source is always
+// security, AssetID is required (mirroring NewAlertIncident's own required
+// assetID), and Validate runs before the incident is returned.
+func TestNewSecurityIncident_BuildsAnOpenSecuritySourcedIncident(t *testing.T) {
+	inc, err := NewSecurityIncident(" tn-1 ", " port scan detected ", "5 hits in 300s", IncidentSeverityHigh, "asset-1")
+	if err != nil {
+		t.Fatalf("NewSecurityIncident: %v", err)
+	}
+	if inc.TenantID != "tn-1" || inc.Title != "port scan detected" {
+		t.Errorf("identifiers/title not trimmed: %+v", inc)
+	}
+	if inc.Source != IncidentSourceSecurity {
+		t.Errorf("source = %q, want security", inc.Source)
+	}
+	if inc.Status != IncidentOpen {
+		t.Errorf("status = %q, want open", inc.Status)
+	}
+	if inc.AssetID == nil || *inc.AssetID != "asset-1" {
+		t.Errorf("asset_id = %v, want asset-1", inc.AssetID)
+	}
+	if inc.IncidentID == "" {
+		t.Error("incident_id must be minted")
+	}
+}
+
+// TestIncident_Validate_RequiresAssetIDForAlertOrSecuritySource proves the
+// AssetID-required check AlertIncident's own doc comment states is extended
+// to security-sourced incidents too — neither correlation path can create an
+// incident with no CI to link.
+func TestIncident_Validate_RequiresAssetIDForAlertOrSecuritySource(t *testing.T) {
+	for _, source := range []IncidentSource{IncidentSourceAlert, IncidentSourceSecurity} {
+		inc, err := NewIncident("tn-1", "title", "", IncidentSeverityHigh, nil, nil)
+		if err != nil {
+			t.Fatalf("new incident: %v", err)
+		}
+		inc.Source = source
+		inc.AssetID = nil
+		if err := inc.Validate(); err == nil {
+			t.Errorf("source=%q with no asset_id should be rejected", source)
+		}
 	}
 }
 
