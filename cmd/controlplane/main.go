@@ -556,6 +556,12 @@ func run(logger *slog.Logger) error {
 	// security, exactly like asset above — a TimescaleDB hypertable is a
 	// regular table to this wiring rule (ADR-TELEMETRY-001).
 	srv.SetTelemetry(postgres.NewTelemetryStore(appPool))
+	// Security observation ingestion/query (E8.1a, the SOC epic's
+	// foundation): tenant-owned and under row-level security, exactly like
+	// telemetry above — a sibling TimescaleDB hypertable, not a reuse of
+	// telemetry_sample (ADR-TELEMETRY-001, ADR-SOC-001). Fact ingest/query
+	// only: no detection, correlation or worker is wired here (E8.1b).
+	srv.SetSecurityObservations(postgres.NewSecurityObservationStore(appPool))
 	// Telemetry retention + downsampling (E2.1b, ADR-TELEMETRY-002): both
 	// workers process every tenant's chunks/buckets from one process, the
 	// same category of background worker the webhook dispatcher and policy

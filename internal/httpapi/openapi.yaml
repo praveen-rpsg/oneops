@@ -1913,6 +1913,80 @@ paths:
         '422': { $ref: '#/components/responses/Problem' }
         '501': { $ref: '#/components/responses/Problem' }
 
+  /v1/admin/security-observations:
+    post:
+      summary: Ingest a batch of security observations tied to Configuration Items (E8.1a)
+      description: >-
+        The fact-ingestion layer the SOC epic's detection story (E8.1b, a
+        later, separate story) will read — an append-only fact, the same
+        category as POST /admin/telemetry, and deliberately NOT a reified
+        SecurityEvent/Alert/Finding: no status, lifecycle or management API
+        exists here. asset_id names an EXISTING asset — re-verified against
+        the caller's tenant before any row naming it is written, so a
+        cross-tenant or nonexistent asset_id is rejected, not silently
+        stored (ADR-TELEMETRY-001, ADR-SOC-001). Each observation is
+        validated and reported independently at its own index — one bad
+        observation does not abort the batch around it. Re-sending an
+        identical (asset_id, observation_type, source, observed_at)
+        observation is idempotent: it is reported accepted again and writes
+        no second row. Bounded to 1000 observations per call.
+      operationId: ingestSecurityObservations
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IngestSecurityObservationsRequest' }
+      responses:
+        '200':
+          description: One result per input observation, in input order
+          content: { application/json: { schema: { $ref: '#/components/schemas/IngestSecurityObservationsResponse' } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+    get:
+      summary: Query a bounded, paginated range of one asset's one observation type (E8.1a)
+      description: >-
+        Row-level security confines the result to the caller's tenant; an
+        asset_id belonging to another tenant (or naming nothing at all)
+        returns an empty page, not an error — the same answer every other
+        read in this schema gives for an invisible id. Ordered by
+        observed_at ascending; a caller with more observations than one
+        page fits re-queries with `after` set to the last item's
+        observed_at.
+      operationId: querySecurityObservations
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { name: asset_id, in: query, required: true, schema: { type: string } }
+        - { name: observation_type, in: query, required: true, schema: { type: string } }
+        - name: from
+          in: query
+          required: true
+          description: RFC3339 timestamp, inclusive lower bound.
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          description: RFC3339 timestamp, inclusive upper bound.
+          schema: { type: string, format: date-time }
+        - name: after
+          in: query
+          description: Keyset cursor — the observed_at of the last observation of the previous page, exclusive.
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 5000 }
+      responses:
+        '200':
+          description: A page of security observations, ordered by observed_at ascending
+          content: { application/json: { schema: { $ref: '#/components/schemas/SecurityObservationList' } } }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '501': { $ref: '#/components/responses/Problem' }
+
   /v1/admin/collector-checks:
     get:
       summary: List the caller's tenant's collector checks (E2.2a)
@@ -4017,6 +4091,69 @@ components:
         items:
           type: array
           items: { $ref: '#/components/schemas/Sample' }
+    IngestSecurityObservation:
+      type: object
+      required: [asset_id, observation_type, source, severity, observed_at]
+      properties:
+        asset_id: { type: string }
+        observation_type:
+          type: string
+          description: Lower-case snake_case, e.g. port_scan, malware_detected, failed_login.
+          maxLength: 100
+        source:
+          type: string
+          description: Names the producer that reported this observation, e.g. wazuh, cloudtrail.
+          maxLength: 200
+        severity: { type: string, enum: [info, low, medium, high, critical] }
+        observed_at: { type: string, format: date-time }
+        attributes:
+          type: object
+          additionalProperties: { type: string }
+          description: At most 20 attributes; each key at most 100 characters, each value at most 200.
+    IngestSecurityObservationsRequest:
+      type: object
+      required: [observations]
+      properties:
+        observations:
+          type: array
+          maxItems: 1000
+          items: { $ref: '#/components/schemas/IngestSecurityObservation' }
+    SecurityObservationWriteResult:
+      type: object
+      description: >-
+        One input observation's outcome, at that observation's input index —
+        always present even when the observation was rejected, so a caller
+        can correlate a failure back to the request it sent.
+      properties:
+        index: { type: integer }
+        outcome: { type: string, enum: [accepted, rejected] }
+        reason: { type: string, description: Present when outcome is rejected. }
+    IngestSecurityObservationsResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/SecurityObservationWriteResult' }
+    SecurityObservation:
+      type: object
+      description: >-
+        An append-only fact tied to a Configuration Item (E8.1a) — the same
+        category as Sample, deliberately not a reified SecurityEvent/Alert/Finding.
+      properties:
+        asset_id: { type: string }
+        observation_type: { type: string }
+        source: { type: string }
+        severity: { type: string, enum: [info, low, medium, high, critical] }
+        observed_at: { type: string, format: date-time }
+        attributes:
+          type: object
+          additionalProperties: { type: string }
+    SecurityObservationList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SecurityObservation' }
     CollectorCheck:
       type: object
       description: >-

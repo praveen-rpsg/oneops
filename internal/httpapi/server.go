@@ -123,6 +123,14 @@ type Server struct {
 	// needs an exemption from row-level security (ADR-TELEMETRY-001).
 	telemetry domain.TelemetryRepository
 
+	// Security observation ingestion/query registry (E8.1a, the SOC epic's
+	// foundation); nil until SetSecurityObservations. security_observation is
+	// TENANT-OWNED, like telemetry above, so nothing here needs an exemption
+	// from row-level security (ADR-TELEMETRY-001, ADR-SOC-001). A sibling
+	// hypertable of telemetry_sample, not a reuse of it — see
+	// domain.SecurityObservation's doc comment.
+	securityObservations domain.SecurityObservationRepository
+
 	// Collector check registry (E2.2a); nil until SetCollectorChecks.
 	// collector_check is TENANT-OWNED, like asset above, so nothing here
 	// needs an exemption from row-level security. The scheduler that
@@ -568,6 +576,16 @@ func (s *Server) routesFor(root fs.FS, consoleBuilt bool) *chi.Mux {
 		// two verbs, the same shape /admin/assets uses for list/create.
 		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/telemetry", s.ingestTelemetry)
 		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/telemetry", s.queryTelemetry)
+
+		// Security observation ingestion + range query (E8.1a, the SOC
+		// epic's foundation). security_observation is TENANT-OWNED, exactly
+		// like telemetry_sample above, so the permission tier is tenant
+		// administration, not requirePlatformAdmin. One collection, two
+		// verbs, the same shape /admin/telemetry uses. This is a fact-only
+		// ingest/query surface — no detection, correlation, or lifecycle
+		// endpoint exists here (E8.1b is a later, separate story).
+		rt.With(s.requirePermission(auth.PermAdmin)).Post("/admin/security-observations", s.ingestSecurityObservations)
+		rt.With(s.requirePermission(auth.PermAdmin)).Get("/admin/security-observations", s.querySecurityObservations)
 
 		// Collector check administration (E2.2a). collector_check is
 		// TENANT-OWNED, exactly like asset/telemetry above, so the permission

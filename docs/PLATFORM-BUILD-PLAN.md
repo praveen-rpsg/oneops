@@ -245,8 +245,10 @@ Stateful work items on the workflow + state-machine primitives.
 - [ ] E-ID.5 **Invitations UI** — admin invite (create → surface the one-time token/link to share) + list/revoke pending (over E-ID.4a) + an invitee redeem screen (over E-ID.4b).
 - [ ] E-ID.5 **Invitations UI** — admin invites a user (create → surface the one-time token/link to share) + an invitee redeem screen (enter token → become active). Completes the register flow.
 
-### E8 — SOC / Security Platform  `[ ]`
-- [ ] E8.1 Security event ingestion + SIEM correlation (reuses E2/E4 patterns, security-scoped)
+### E8 — SOC / Security Platform  `[~]` — **FOUNDER CHOSE THIS as the new backend epic (2026-08-07).** Foundation-first, reusing E2 (telemetry ingestion) + E4 (correlation) patterns; reduced-concept discipline held (no reified SecurityEvent — observations are append-only FACTS like telemetry samples; detections/correlation are derived).
+- [x] E8.1a **Security observation ingestion foundation** — DONE (ADR-SOC-001): new append-only `security_observation` TimescaleDB hypertable + `POST/GET /v1/admin/security-observations` (PermAdmin), reusing telemetry patterns exactly — FORCE RLS `tenant_isolation` (fail-closed), in `TenantOwnedTables`, natural key carries tenant_id, tenant-scoped `appPool` ingestion with asset_id re-verification. Sibling table NOT telemetry_sample reuse (security facts are categorical/attributed, not numeric); a FACT not a reified event (no status/lifecycle/update/delete). Pluggable `SecurityObservationRepository`. Gate: two-tenant isolation + RLS/uniqueness/tenant-column arch guards all --- PASS (re-run independently, non-vacuous); hypertable confirmed; contract bijection PASS; make test (race) green; lint clean; migrate-hash/validate clean; PKG census updated with real numbers.
+- [ ] E8.1b **SIEM detection + correlation** — a leader-gated `SecurityDetector` (reusing the `alerting.Evaluator` Run/RunOnce/Config/Store shape) over `security_rule` configs, reading observations (QueryRangeForTenant), deciding firing, and creating/linking incidents via the existing `IncidentCorrelator` — all DERIVED (no reified Alert/Correlation noun). ▶ CURRENT
+- [ ] E8.2 Threat detection (rules, IOCs, behavioral hooks)
 - [ ] E8.2 Threat detection (rules, IOCs, behavioral hooks)
 - [ ] E8.3 Vulnerability management (scan ingestion, prioritization by CI criticality, remediation → E5 tickets)
 - [ ] E8.4 Compliance (frameworks, controls, evidence, continuous audit) + Risk register/scoring
