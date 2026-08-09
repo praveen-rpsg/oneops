@@ -5922,13 +5922,17 @@ components:
     IncidentTrendSourceCounts:
       type: object
       description: >-
-        One bucket's opened-incident breakdown by source. alert is the
-        honest alert-VOLUME proxy (ADR-NOC-008): this system has no
-        alert-firing log, so it counts alert-sourced incidents (E4.1), not
-        raw firings.
+        One bucket's opened-incident breakdown by source — all four of
+        domain.IncidentSource's closed vocabulary (E9.3), so opened_total
+        always equals the sum of this object's fields. alert is the honest
+        alert-VOLUME proxy (ADR-NOC-008): this system has no alert-firing
+        log, so it counts alert-sourced incidents (E4.1), not raw firings.
+        security/vuln count E8/E8.3's SOC and vuln-remediation incidents.
       properties:
         manual: { type: integer }
         alert: { type: integer }
+        security: { type: integer }
+        vuln: { type: integer }
     IncidentTrendPoint:
       type: object
       description: >-
@@ -5970,7 +5974,7 @@ components:
           enum: [open, acknowledged, investigating, resolved, closed, reopened]
         source:
           type: string
-          enum: [manual, alert, security]
+          enum: [manual, alert, security, vuln]
           description: >-
             Read-only. manual: filed via this API. alert: created or linked
             by E4.1's alert-correlation pipeline off an alert-rule firing.

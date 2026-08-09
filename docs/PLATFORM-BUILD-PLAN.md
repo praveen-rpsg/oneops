@@ -286,6 +286,7 @@ Stateful work items on the workflow + state-machine primitives.
 - (Load test deferred per founder; the `make loadtest` harness already exists.)
 
 ### E9 — Reports & Dashboards (projections)  `[ ]`
+- [x] E9.3 **Incident-trends: security/vuln source breakdown** — DONE (extends ADR-NOC-008): now that E8/E8.3 create incidents with `source=security`/`vuln`, added those two buckets to `incidentTrendSourceCountsDTO` + `buildIncidentTrendsResponse`'s switch (they were counted in `opened_total` but dropped from the by-source breakdown) + openapi + the DashboardsPage "Incidents by source" chart (4 series). Also fixed the related contract-accuracy gap: `Incident.source` enum (openapi) + `incidents.ts` type now include `security`+`vuln`. Store unchanged (already GROUPs BY source). Gate: Go unit + real-PG integration (opened_by_source == {manual:2,alert:1,security:1,vuln:1}) --- PASS; contract bijection PASS; web-test 300/300; lint clean. Paid down debt flagged in E8.1b-2/E8.3b.
 - [ ] E9.1 Query/aggregation engine over the domain + telemetry (bounded, cached)
 - [ ] E9.2 Dashboards (composable projections), scheduled reports, exports
 - [ ] E9.3 SLO/KPI reporting

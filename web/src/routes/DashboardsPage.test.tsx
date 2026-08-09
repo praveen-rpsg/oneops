@@ -13,16 +13,16 @@ const TRENDS: IncidentTrendsResponse = {
   points: [
     {
       bucket_start: '2026-08-06T10:00:00Z',
-      opened_total: 3,
+      opened_total: 5,
       opened_by_severity: { critical: 1, high: 1, medium: 1, low: 0 },
-      opened_by_source: { manual: 2, alert: 1 },
+      opened_by_source: { manual: 2, alert: 1, security: 1, vuln: 1 },
       resolved_total: 1,
     },
     {
       bucket_start: '2026-08-06T11:00:00Z',
       opened_total: 0,
       opened_by_severity: { critical: 0, high: 0, medium: 0, low: 0 },
-      opened_by_source: { manual: 0, alert: 0 },
+      opened_by_source: { manual: 0, alert: 0, security: 0, vuln: 0 },
       resolved_total: 0,
     },
   ],
@@ -74,6 +74,26 @@ describe('dashboards page', () => {
       .findItems()
       .map((i) => i.getElement().textContent?.trim());
     expect(legendText).toEqual(expect.arrayContaining(['Critical', 'High', 'Medium', 'Low', 'Resolved']));
+  });
+
+  it('renders security and vuln series in the by-source breakdown chart (E9.3)', async () => {
+    vi.stubGlobal('fetch', routedFetch());
+    const { container } = renderApp();
+
+    expect(await screen.findByRole('heading', { name: 'Incidents by source' })).toBeInTheDocument();
+
+    const wrapper = createWrapper(container);
+    const charts = await waitFor(() => {
+      const found = wrapper.findAllBarCharts();
+      expect(found.length).toBeGreaterThan(0);
+      return found;
+    });
+    const sourceChart = charts[charts.length - 1];
+    const legendText = sourceChart
+      .findLegend()!
+      .findItems()
+      .map((i) => i.getElement().textContent?.trim());
+    expect(legendText).toEqual(expect.arrayContaining(['Manual', 'Alert-sourced (proxy)', 'Security', 'Vuln remediation']));
   });
 
   it('defaults to Last 24h/bucket=hour and refetches with bucket=day on a wider range', async () => {

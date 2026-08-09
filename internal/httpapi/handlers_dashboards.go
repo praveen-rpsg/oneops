@@ -17,14 +17,21 @@ type incidentTrendSeverityCountsDTO struct {
 }
 
 // incidentTrendSourceCountsDTO is one bucket's opened-incident breakdown by
-// source — the honest alert-volume proxy (ADR-NOC-008): manual/alert is
-// domain.Incident.Source (E4.1), NOT a true alert-firing log. There is no
-// alert_event table in this system; alert (the field below) counts incidents
-// E4.1's correlation pipeline created or linked off a firing, never a raw
-// firing count.
+// source — all four of domain.IncidentSource's closed vocabulary
+// (manual/alert/security/vuln, E9.3) are broken out here so OpenedTotal
+// always equals the sum of this struct's fields. alert remains the honest
+// alert-volume proxy (ADR-NOC-008): it is domain.Incident.Source (E4.1), NOT
+// a true alert-firing log. There is no alert_event table in this system;
+// alert counts incidents E4.1's correlation pipeline created or linked off a
+// firing, never a raw firing count. security/vuln are E8/E8.3's SOC and
+// vuln-remediation incidents (domain.NewSecurityIncident /
+// domain.NewVulnRemediationIncident) — previously counted in OpenedTotal but
+// silently dropped from this breakdown (E9.3 closes that gap).
 type incidentTrendSourceCountsDTO struct {
-	Manual int `json:"manual"`
-	Alert  int `json:"alert"`
+	Manual   int `json:"manual"`
+	Alert    int `json:"alert"`
+	Security int `json:"security"`
+	Vuln     int `json:"vuln"`
 }
 
 // incidentTrendPointDTO is one contiguous, boundary-aligned bucket of GET
@@ -93,6 +100,14 @@ func buildIncidentTrendsResponse(
 			p.OpenedBySource.Manual += o.Count
 		case domain.IncidentSourceAlert:
 			p.OpenedBySource.Alert += o.Count
+		case domain.IncidentSourceSecurity:
+			p.OpenedBySource.Security += o.Count
+		case domain.IncidentSourceVuln:
+			p.OpenedBySource.Vuln += o.Count
+		default:
+			// An unrecognized source stays in OpenedTotal (already added
+			// above) but intentionally does not land in any bucket here —
+			// no invented "other" catch-all ahead of a real future source.
 		}
 	}
 	for _, r := range resolved {

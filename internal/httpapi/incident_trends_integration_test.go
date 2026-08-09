@@ -172,6 +172,60 @@ func (h *incidentTrendsHarness) seedAlertIncident(
 	return created
 }
 
+// seedSecurityIncident is seedAlertIncident's security-sourced counterpart
+// (E8.1b-2, domain.NewSecurityIncident) — E9.3's fix proves this source
+// lands in its own opened_by_source bucket rather than being dropped.
+func (h *incidentTrendsHarness) seedSecurityIncident(
+	t *testing.T, tn *domain.Tenant, severity domain.IncidentSeverity, at time.Time, resolvedAt *time.Time,
+) *domain.Incident {
+	t.Helper()
+	asset, err := domain.NewAsset(tn.TenantID, "server", "trend-fixture-host-"+domain.NewID(), nil)
+	if err != nil {
+		t.Fatalf("new asset: %v", err)
+	}
+	createdAsset, err := h.assets.Create(h.ctx(tn), asset)
+	if err != nil {
+		t.Fatalf("create asset: %v", err)
+	}
+	inc, err := domain.NewSecurityIncident(tn.TenantID, "trend-fixture-security", "", severity, createdAsset.AssetID)
+	if err != nil {
+		t.Fatalf("new security incident: %v", err)
+	}
+	created, err := h.incidents.Create(h.ctx(tn), inc)
+	if err != nil {
+		t.Fatalf("create security incident: %v", err)
+	}
+	h.backdate(t, tn, created.IncidentID, at, resolvedAt)
+	return created
+}
+
+// seedVulnIncident is seedAlertIncident's vuln-sourced counterpart (E8.3b,
+// domain.NewVulnRemediationIncident) — E9.3's fix proves this source lands
+// in its own opened_by_source bucket rather than being dropped.
+func (h *incidentTrendsHarness) seedVulnIncident(
+	t *testing.T, tn *domain.Tenant, severity domain.IncidentSeverity, at time.Time, resolvedAt *time.Time,
+) *domain.Incident {
+	t.Helper()
+	asset, err := domain.NewAsset(tn.TenantID, "server", "trend-fixture-host-"+domain.NewID(), nil)
+	if err != nil {
+		t.Fatalf("new asset: %v", err)
+	}
+	createdAsset, err := h.assets.Create(h.ctx(tn), asset)
+	if err != nil {
+		t.Fatalf("create asset: %v", err)
+	}
+	inc, err := domain.NewVulnRemediationIncident(tn.TenantID, "trend-fixture-vuln", "", severity, createdAsset.AssetID)
+	if err != nil {
+		t.Fatalf("new vuln incident: %v", err)
+	}
+	created, err := h.incidents.Create(h.ctx(tn), inc)
+	if err != nil {
+		t.Fatalf("create vuln incident: %v", err)
+	}
+	h.backdate(t, tn, created.IncidentID, at, resolvedAt)
+	return created
+}
+
 // backdate sets incidentID's created_at (and, if non-nil, resolved_at)
 // directly on the tenant-scoped connection — RLS' WITH CHECK still applies
 // (the connection remains bound to tn), it is only the derived timestamp
@@ -230,9 +284,10 @@ func pointAt(t *testing.T, points []incidentTrendPointDTO, want time.Time) incid
 
 // TestIncidentTrendsAPI_BucketsBySeverityAndSourceAndZeroFills is the
 // correctness proof: incidents seeded across three hourly buckets, several
-// severities and both sources, produce exact per-bucket counts, and a
-// bucket with no incidents at all (the middle one) still appears, zeroed —
-// the contiguous, zero-filled series the review criteria require.
+// severities and all four sources (manual/alert/security/vuln, E9.3),
+// produce exact per-bucket counts, and a bucket with no incidents at all
+// (the middle one) still appears, zeroed — the contiguous, zero-filled
+// series the review criteria require.
 func TestIncidentTrendsAPI_BucketsBySeverityAndSourceAndZeroFills(t *testing.T) {
 	h := realIncidentTrendsHarness(t)
 	tn := h.trendsTenant(t, "trends-correctness")
@@ -240,10 +295,13 @@ func TestIncidentTrendsAPI_BucketsBySeverityAndSourceAndZeroFills(t *testing.T) 
 	from := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	to := from.Add(3 * time.Hour)
 
-	// Bucket 0 [00:00,01:00): two manual critical, one alert high.
+	// Bucket 0 [00:00,01:00): two manual critical, one alert high, one
+	// security medium, one vuln low.
 	h.seedManualIncident(t, tn, domain.IncidentSeverityCritical, from.Add(10*time.Minute), nil)
 	h.seedManualIncident(t, tn, domain.IncidentSeverityCritical, from.Add(20*time.Minute), nil)
 	h.seedAlertIncident(t, tn, domain.IncidentSeverityHigh, from.Add(30*time.Minute), nil)
+	h.seedSecurityIncident(t, tn, domain.IncidentSeverityMedium, from.Add(35*time.Minute), nil)
+	h.seedVulnIncident(t, tn, domain.IncidentSeverityLow, from.Add(40*time.Minute), nil)
 	// Bucket 1 [01:00,02:00): deliberately empty — proves zero-fill.
 	// Bucket 2 [02:00,03:00): one manual low.
 	h.seedManualIncident(t, tn, domain.IncidentSeverityLow, from.Add(2*time.Hour+5*time.Minute), nil)
@@ -260,11 +318,13 @@ func TestIncidentTrendsAPI_BucketsBySeverityAndSourceAndZeroFills(t *testing.T) 
 	}
 
 	b0 := pointAt(t, got.Points, from)
-	if b0.OpenedTotal != 3 || b0.OpenedBySeverity.Critical != 2 || b0.OpenedBySeverity.High != 1 {
-		t.Errorf("bucket0 = %+v, want opened_total=3 critical=2 high=1", b0)
+	if b0.OpenedTotal != 5 || b0.OpenedBySeverity.Critical != 2 || b0.OpenedBySeverity.High != 1 ||
+		b0.OpenedBySeverity.Medium != 1 || b0.OpenedBySeverity.Low != 1 {
+		t.Errorf("bucket0 = %+v, want opened_total=5 critical=2 high=1 medium=1 low=1", b0)
 	}
-	if b0.OpenedBySource.Manual != 2 || b0.OpenedBySource.Alert != 1 {
-		t.Errorf("bucket0.opened_by_source = %+v, want manual=2 alert=1", b0.OpenedBySource)
+	wantSource := incidentTrendSourceCountsDTO{Manual: 2, Alert: 1, Security: 1, Vuln: 1}
+	if b0.OpenedBySource != wantSource {
+		t.Errorf("bucket0.opened_by_source = %+v, want %+v", b0.OpenedBySource, wantSource)
 	}
 
 	b1 := pointAt(t, got.Points, from.Add(time.Hour))

@@ -221,6 +221,36 @@ func TestBuildIncidentTrendsResponse_SeverityAndSourceAggregateAcrossRows(t *tes
 	}
 }
 
+// TestBuildIncidentTrendsResponse_SecurityAndVulnSourcesAreBrokenOut proves
+// E9.3's fix: incidents sourced from E8's SOC pipeline (security) and E8.3's
+// vuln remediation (vuln) land in their own opened_by_source buckets rather
+// than being dropped, and opened_total still sums across all four sources.
+func TestBuildIncidentTrendsResponse_SecurityAndVulnSourcesAreBrokenOut(t *testing.T) {
+	from := mustParseRFC3339HTTP(t, "2026-08-01T00:00:00Z")
+	to := mustParseRFC3339HTTP(t, "2026-08-01T01:00:00Z")
+	q := domain.IncidentTrendsQuery{From: from, To: to, Bucket: domain.IncidentTrendBucketHour}
+
+	opened := []domain.IncidentOpenedTrendPoint{
+		{BucketStart: from, Severity: domain.IncidentSeverityCritical, Source: domain.IncidentSourceManual, Count: 1},
+		{BucketStart: from, Severity: domain.IncidentSeverityHigh, Source: domain.IncidentSourceAlert, Count: 2},
+		{BucketStart: from, Severity: domain.IncidentSeverityMedium, Source: domain.IncidentSourceSecurity, Count: 3},
+		{BucketStart: from, Severity: domain.IncidentSeverityLow, Source: domain.IncidentSourceVuln, Count: 4},
+	}
+
+	got := buildIncidentTrendsResponse(q, opened, nil)
+	if len(got.Points) != 1 {
+		t.Fatalf("points = %d, want 1", len(got.Points))
+	}
+	p := got.Points[0]
+	if p.OpenedTotal != 10 {
+		t.Errorf("opened_total = %d, want 10", p.OpenedTotal)
+	}
+	want := incidentTrendSourceCountsDTO{Manual: 1, Alert: 2, Security: 3, Vuln: 4}
+	if p.OpenedBySource != want {
+		t.Errorf("opened_by_source = %+v, want %+v", p.OpenedBySource, want)
+	}
+}
+
 // TestBuildIncidentTrendsResponse_DropsRowsOutsideTheGeneratedShape proves a
 // defensive property: a store row whose bucket_start does not match any
 // generated slot (which q.Validate should make impossible in production) is

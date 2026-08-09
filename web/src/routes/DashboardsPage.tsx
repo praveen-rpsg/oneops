@@ -20,7 +20,7 @@ import { getAssetGraph } from '../assetGraph';
 import type { AssetGraphNode } from '../assetGraph';
 import { getIncidentTrends } from '../dashboards';
 import type { IncidentTrendBucket, IncidentTrendPoint } from '../dashboards';
-import { humanise, RESOLVED_CHART_COLOR, SEVERITY_CHART_COLOR } from '../incidentPresentation';
+import { humanise, RESOLVED_CHART_COLOR, SEVERITY_CHART_COLOR, SOURCE_CHART_COLOR } from '../incidentPresentation';
 import { ErrorState } from '../components/States';
 import { queryTelemetry } from '../telemetry';
 import type { TelemetrySample } from '../telemetry';
@@ -119,25 +119,39 @@ function IncidentVolumeChart({
 }
 
 /**
- * The alert-volume proxy chart (E9.1/ADR-NOC-008 §5, optional per the E9.2
- * brief): `opened_by_source` split manual/alert. Labeled honestly — this is
- * NOT a firing log, only how many incidents the correlation pipeline
- * created or linked off a firing.
+ * The by-source breakdown chart (E9.1/ADR-NOC-008 §5, extended to all four
+ * sources by E9.3): `opened_by_source` split manual/alert/security/vuln.
+ * Labeled honestly — `alert` is NOT a firing log, only how many incidents
+ * the correlation pipeline created or linked off a firing; `security`/`vuln`
+ * are E8/E8.3's SOC and vuln-remediation incidents.
  */
-function AlertSourceChart({ points, bucket, loading }: { points: IncidentTrendPoint[]; bucket: IncidentTrendBucket; loading: boolean }) {
+function SourceBreakdownChart({ points, bucket, loading }: { points: IncidentTrendPoint[]; bucket: IncidentTrendBucket; loading: boolean }) {
   const series = useMemo<MixedLineBarChartProps.BarDataSeries<string>[]>(() => {
     const labels = points.map((p) => bucketLabel(p.bucket_start, bucket));
     return [
       {
         title: 'Manual',
         type: 'bar',
+        color: SOURCE_CHART_COLOR.manual,
         data: points.map((p, i) => ({ x: labels[i], y: p.opened_by_source.manual })),
       },
       {
         title: 'Alert-sourced (proxy)',
         type: 'bar',
-        color: '#7d8998',
+        color: SOURCE_CHART_COLOR.alert,
         data: points.map((p, i) => ({ x: labels[i], y: p.opened_by_source.alert })),
+      },
+      {
+        title: 'Security',
+        type: 'bar',
+        color: SOURCE_CHART_COLOR.security,
+        data: points.map((p, i) => ({ x: labels[i], y: p.opened_by_source.security })),
+      },
+      {
+        title: 'Vuln remediation',
+        type: 'bar',
+        color: SOURCE_CHART_COLOR.vuln,
+        data: points.map((p, i) => ({ x: labels[i], y: p.opened_by_source.vuln })),
       },
     ];
   }, [points, bucket]);
@@ -388,12 +402,15 @@ export function DashboardsPage() {
 
           <Container
             header={
-              <Header variant="h2" description="An incident-source proxy — NOT a firing log (ADR-NOC-008 §5).">
-                Alert-sourced incidents
+              <Header
+                variant="h2"
+                description="Manual, alert-sourced, security, and vuln-remediation incidents. Alert-sourced is an incident-source proxy — NOT a firing log (ADR-NOC-008 §5)."
+              >
+                Incidents by source
               </Header>
             }
           >
-            <AlertSourceChart points={points} bucket={bucket} loading={trendsLoading} />
+            <SourceBreakdownChart points={points} bucket={bucket} loading={trendsLoading} />
           </Container>
 
           <Container

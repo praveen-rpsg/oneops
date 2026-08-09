@@ -16,14 +16,19 @@ export interface IncidentTrendSeverityCounts {
 }
 
 /**
- * `alert` is an incident-*source* proxy (ADR-NOC-008 §5), NOT a true
- * alert-firing log — there is no `alert_event` table in this system. It
- * counts incidents `alerting.IncidentCorrelator` created or linked off a
- * rule's firing, never how many times a rule actually fired.
+ * All four of domain.IncidentSource's closed vocabulary (E9.3), so
+ * `opened_total` always equals the sum of this object's fields. `alert` is
+ * an incident-*source* proxy (ADR-NOC-008 §5), NOT a true alert-firing log —
+ * there is no `alert_event` table in this system. It counts incidents
+ * `alerting.IncidentCorrelator` created or linked off a rule's firing, never
+ * how many times a rule actually fired. `security`/`vuln` count E8/E8.3's
+ * SOC and vuln-remediation incidents.
  */
 export interface IncidentTrendSourceCounts {
   manual: number;
   alert: number;
+  security: number;
+  vuln: number;
 }
 
 export interface IncidentTrendPoint {

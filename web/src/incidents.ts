@@ -24,7 +24,7 @@ export interface IncidentDTO {
   description: string;
   severity: IncidentSeverity;
   status: IncidentStatus;
-  source: 'manual' | 'alert';
+  source: 'manual' | 'alert' | 'security' | 'vuln';
   asset_id?: string;
   assignee_user_id?: string;
   row_version: number;

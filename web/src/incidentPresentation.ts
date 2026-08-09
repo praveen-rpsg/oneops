@@ -48,6 +48,21 @@ export const SEVERITY_CHART_COLOR: Record<IncidentSeverity, string> = {
 /** The resolved-incidents line series' color — green, distinct from every severity color above. */
 export const RESOLVED_CHART_COLOR = '#037f51';
 
+/**
+ * Fixed hex colors for the incident-source series in the dashboards
+ * by-source chart (E9.3, ADR-NOC-008 §5) — all four of
+ * domain.IncidentSource's closed vocabulary. Same "fixed hex, no design-
+ * tokens package" constraint SEVERITY_CHART_COLOR's own doc comment states.
+ * Distinct from SEVERITY_CHART_COLOR's palette so the two charts are never
+ * confused for the same legend.
+ */
+export const SOURCE_CHART_COLOR: Record<'manual' | 'alert' | 'security' | 'vuln', string> = {
+  manual: '#545b64',
+  alert: '#7d8998',
+  security: '#8d6605',
+  vuln: '#0972d3',
+};
+
 export const STATUS_TYPE: Record<IncidentStatus, StatusIndicatorProps.Type> = {
   open: 'error',
   acknowledged: 'warning',
