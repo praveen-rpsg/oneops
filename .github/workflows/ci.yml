@@ -208,6 +208,27 @@ jobs:
           fi
           echo "console bundle is self-contained (no external host beyond the documented-inert allowlist)"
 
+  # The deploy chart is a release artifact like the binary and the console.
+  # This gate keeps it from rotting: a template that stops rendering, or a
+  # values file that drifts out of sync with the templates, fails the build
+  # instead of failing a `helm install` in front of a pilot.
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: lint (default + production values)
+        run: |
+          helm lint deploy/charts/controlplane
+          helm lint deploy/charts/controlplane -f deploy/charts/controlplane/values-production.yaml
+      - name: template renders (default + production values)
+        run: |
+          helm template controlplane deploy/charts/controlplane > /dev/null
+          helm template controlplane deploy/charts/controlplane \
+            -f deploy/charts/controlplane/values-production.yaml > /dev/null
+
   docker:
     runs-on: ubuntu-latest
     needs: [build-test, web]

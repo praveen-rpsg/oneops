@@ -13,6 +13,22 @@ env:
   # address — config.go refuses to boot in production otherwise.
   ONEOPS_METRICS_ADDR: ":9090"
 
+  # --- Real OIDC auth (relying-party). These are PUBLIC and belong in env;
+  # the only secret (the HS256 dev key) is unused in prod and stays in the
+  # Secret. Point these at the pilot/customer IdP; see docs/PILOT-AUTH.md.
+  # Each tenant must additionally have this issuer in its allowed_issuers
+  # (PATCH /v1/admin/tenants/{id}), and the IdP's tokens must carry the
+  # `roles` and `tenant` claims OneOps reads (ADR-IDENTITY-003 / ADR-AUTHZ-001).
+  ONEOPS_AUTH_ENABLED: "true"
+  ONEOPS_JWT_ISSUER: "https://idp.example.com/realms/your-realm"      # the token `iss`
+  ONEOPS_JWKS_URL: "https://idp.example.com/realms/your-realm/protocol/openid-connect/certs"
+  ONEOPS_JWT_AUDIENCE: "oneops-console"                              # audience the SPA client requests
+  ONEOPS_OIDC_CLIENT_ID: "oneops-console"                           # public SPA client id (served via /auth/config)
+  # Leave false for a public internet-reachable IdP (keeps the SSRF egress
+  # guard on). Set "true" ONLY for an on-prem/private-network IdP whose JWKS
+  # is on a private address (mirrors ONEOPS_WEBHOOK_ALLOW_PRIVATE_TARGETS).
+  ONEOPS_JWKS_ALLOW_PRIVATE_TARGETS: "false"
+
 # Sensitive env comes from a Secret provisioned out of band (sealed-secrets,
 # external-secrets, vault-agent, ...). The chart does not create it.
 existingSecret: "oneops-controlplane-credentials"

@@ -23,6 +23,12 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
+        # Pin the container to the runtime's default seccomp profile so the pod
+        # satisfies the Pod Security Standards "restricted" profile (together
+        # with the container-level readOnlyRootFilesystem/drop-ALL/no-privilege-
+        # escalation below). Without this, "restricted" admission rejects the pod.
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: controlplane
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
