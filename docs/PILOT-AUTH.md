@@ -98,11 +98,18 @@ mappers in `deploy/keycloak/oneops-realm.json` as the worked example):
 Roles map to permissions in `internal/auth/rbac.go` (exact match, no wildcard);
 platform operations additionally require the system tenant (ADR-AUTHZ-001).
 
-### Invited users
+### Invited users (identity reconciliation)
 An invited email that redeems an invitation (`/redeem`) is provisioned in
-OneOps; for them to actually log in, the IdP must authenticate that email and
-issue a token with the matching `tenant` + `roles`. Aligning OneOps membership
-with IdP identity is the pilot's identity-integration step (see ADR-IAC-004).
+OneOps (an `app_user` + membership); for them to log in, the IdP must
+authenticate that email and issue a token with the matching `tenant` + `roles`.
+**Requirement:** the IdP must emit a stable **`email`** claim for invited
+addresses — email is the reconciliation key (ADR-IAC-005). The pilot model is
+**invite-first**: an admin invites and the account exists before first login, so
+login *resolves* an existing member (no blind self-provisioning). Resolving the
+authenticated session to the OneOps `app_user` by email (for who-am-I + audit
+attribution by OneOps user id) is the decided design in ADR-IAC-005, implemented
+against the first real IdP so the claim shapes are known rather than guessed —
+authorization (roles + tenant from the token) already works without it.
 
 ---
 
