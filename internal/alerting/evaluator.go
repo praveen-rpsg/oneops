@@ -282,11 +282,10 @@ func (e *Evaluator) evaluateRule(ctx context.Context, rule *domain.AlertRule, no
 		// "skip entirely, never persist" rather than "commit but suppress
 		// the side effect" applies identically here — see
 		// dependencySuppressed's own doc comment for the down-signal, the
-		// traversal direction/type filter, and the honest all-or-nothing
-		// bound this check accepts (ADR-ALERTING-003's Honest Bound: no
-		// symptom-class scoping exists, so a genuinely independent failure
-		// on X while a dependency is down is masked too, mitigated only by
-		// visible recording and self-clearing).
+		// traversal direction/type filter, and E3.5's (ADR-ALERTING-006)
+		// symptom-class scoping (resource symptoms are never suppressed;
+		// availability/unspecified are, and carry the narrower residual
+		// bound documented there).
 		depSuppressed, err := e.dependencySuppressed(ctx, rule, now)
 		if err != nil {
 			e.log.Error("alert rule evaluator: check dependency suppression", "rule_id", rule.RuleID, "err", err)
@@ -364,21 +363,32 @@ func (e *Evaluator) maintenanceSuppressed(ctx context.Context, rule *domain.Aler
 // doc comment already states for this package's other privileged,
 // cross-tenant checks.
 //
-// HONEST BOUND (ADR-ALERTING-003's Honest Bound, recorded here because this
-// is the call site that accepts it): there is no rule symptom-class/taxonomy
-// (deliberately deferred — docs/PLATFORM-BUILD-PLAN.md E3.3b), so this
-// suppresses X's ENTIRE firing whenever ANY dependency is down, all-or-
-// nothing per asset. A genuinely independent failure on X, coincidentally
-// concurrent with a dependency's outage, is masked too. This is mitigated,
-// never eliminated, by two properties already built above:
-// dependency_suppression's suppressed_count/last_suppressed_at make every
-// occurrence visible (never a silent drop), and — because RecordTransition
-// is skipped entirely, exactly like E3.3a — the suppression is self-
-// clearing: the moment the dependency recovers, X's next tick re-detects the
-// same ok->firing candidate and, finding no down dependency, pages normally.
-// Symptom-class scoping (suppress only reachability-class symptoms on X, not
-// every metric) is the named future refinement; it is not built here.
+// CLASS-SCOPED (E3.5, ADR-ALERTING-006, consuming E3.4's
+// domain.AlertSymptomClass primitive): a rule's own symptom class decides
+// whether a down dependency can suppress it at all. A resource-class symptom
+// on X (cpu/disk/mem/latency, ...) is usually independent of whether some CI
+// X depends on is up, so it is NEVER dependency-suppressed — the check
+// returns before e.dependency.Suppress is even called, so nothing is
+// consulted or recorded for it. An availability-class symptom legitimately
+// cascades (X looks unreachable because its dependency is down) and is
+// suppressed exactly as before. unspecified — an un-classified pre-E3.4 rule
+// or one an operator never classified — keeps today's conservative default
+// and is suppressed exactly as before too (E3.4's non-breaking guarantee).
+//
+// Residual bound: this narrows, but does not eliminate, ADR-ALERTING-003's
+// Honest Bound. An availability-or-unspecified symptom on X that is
+// genuinely independent of, yet coincidentally concurrent with, a real
+// dependency outage can still be masked — the classifier only excludes
+// resource symptoms, it does not prove causation for the remaining two
+// classes. That residual is mitigated the same way ADR-ALERTING-003 already
+// does: visible recording (dependency_suppression's suppressed_count/
+// last_suppressed_at) and self-clearing (RecordTransition is skipped
+// entirely, so the moment the dependency recovers, X's next tick re-detects
+// the same ok->firing candidate and pages normally).
 func (e *Evaluator) dependencySuppressed(ctx context.Context, rule *domain.AlertRule, now time.Time) (bool, error) {
+	if rule.SymptomClass == domain.AlertSymptomClassResource {
+		return false, nil
+	}
 	rootAssetID, suppressed, err := e.dependency.Suppress(ctx, rule.TenantID, rule.AssetID, now)
 	if err != nil {
 		return false, fmt.Errorf("check dependency suppression: %w", err)

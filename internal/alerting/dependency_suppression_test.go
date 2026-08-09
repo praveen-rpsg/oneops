@@ -420,3 +420,137 @@ func TestEvaluator_DependencyCheckIsNotVacuous(t *testing.T) {
 			"this test, is what makes the suppressing test pass)", got)
 	}
 }
+
+// TestEvaluator_ResourceSymptomNeverDependencySuppressed is E3.5's (ADR-
+// ALERTING-006) core payoff: a resource-class rule (e.g. disk/cpu) on X pages
+// normally even while a dependency of X is down, because a resource symptom
+// is usually independent of a dependency's own health — suppressing it would
+// mask a genuine, independent failure. This is the mutation proof the story
+// requires: with the `rule.SymptomClass == domain.AlertSymptomClassResource`
+// gate at the top of dependencySuppressed removed, this rule would take the
+// exact fixture TestEvaluator_DependencyDownSuppressesFiringNoIncidentNoNotify
+// uses and get suppressed instead — this test's assertions (fires, notifies,
+// consults the checker zero times) would flip to FAIL.
+func TestEvaluator_ResourceSymptomNeverDependencySuppressed(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	rule := mkRule(t, "tenant-a", "asset-x", "disk_utilization", domain.ComparatorGT, 90, 300)
+	rule.SymptomClass = domain.AlertSymptomClassResource
+
+	store := newFakeStore(rule)
+	tel := newFakeTelemetry()
+	notifier := &fakeNotifier{}
+	correlator := newFakeCorrelator()
+	dependency := newFakeDependencyChecker(fakeDownDependency{
+		tenantID: rule.TenantID, assetID: rule.AssetID, rootAssetID: "db-y",
+	})
+	e := newTestEvaluatorWithDependency(store, tel, notifier, correlator, newFakeMaintenanceChecker(), dependency, now)
+
+	from := now.Add(-300 * time.Second)
+	tel.set(rule.TenantID, rule.AssetID, rule.Metric, breachingSamples(from, now, 30*time.Second, 95))
+
+	e.RunOnce(context.Background())
+
+	if got := notifier.count(); got != 1 {
+		t.Errorf("notifications for a resource-class symptom with a down dependency = %d, want 1 (never "+
+			"dependency-suppressed)", got)
+	}
+	if creates := correlator.callsOfKind("create"); len(creates) != 1 {
+		t.Errorf("incident creations for a resource-class symptom with a down dependency = %d, want 1", len(creates))
+	}
+	if got := store.get(rule.RuleID).LastState; got != domain.AlertRuleStateFiring {
+		t.Errorf("last_state for a resource-class symptom with a down dependency = %q, want firing", got)
+	}
+	if got := dependency.callCount(); got != 0 {
+		t.Errorf("dependency checker consulted %d times for a resource-class symptom, want 0 — the gate must "+
+			"return before Suppress is ever called", got)
+	}
+	if got := dependency.suppressions(); got != 0 {
+		t.Errorf("recorded suppressions for a resource-class symptom = %d, want 0 (nothing to record: the check "+
+			"was never consulted)", got)
+	}
+}
+
+// TestEvaluator_AvailabilitySymptomStillDependencySuppressed pins the
+// unchanged half of E3.5: an availability-class symptom on X (reachability)
+// legitimately cascades from a down dependency, so it is suppressed exactly
+// as it was before symptom-class scoping existed — mirrors
+// TestEvaluator_DependencyDownSuppressesFiringNoIncidentNoNotify with the
+// class made explicit.
+func TestEvaluator_AvailabilitySymptomStillDependencySuppressed(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	rule := mkRule(t, "tenant-a", "asset-x", "up", domain.ComparatorLT, 1, 300)
+	rule.SymptomClass = domain.AlertSymptomClassAvailability
+
+	store := newFakeStore(rule)
+	tel := newFakeTelemetry()
+	notifier := &fakeNotifier{}
+	correlator := newFakeCorrelator()
+	dependency := newFakeDependencyChecker(fakeDownDependency{
+		tenantID: rule.TenantID, assetID: rule.AssetID, rootAssetID: "db-y",
+	})
+	e := newTestEvaluatorWithDependency(store, tel, notifier, correlator, newFakeMaintenanceChecker(), dependency, now)
+
+	from := now.Add(-300 * time.Second)
+	tel.set(rule.TenantID, rule.AssetID, rule.Metric, breachingSamples(from, now, 30*time.Second, 0))
+
+	e.RunOnce(context.Background())
+
+	if got := notifier.count(); got != 0 {
+		t.Errorf("notifications for an availability-class symptom while a dependency is down = %d, want 0 "+
+			"(cascading symptom, unchanged behavior)", got)
+	}
+	if creates := correlator.callsOfKind("create"); len(creates) != 0 {
+		t.Errorf("incident creations for an availability-class symptom while a dependency is down = %d, want 0", len(creates))
+	}
+	if got := store.get(rule.RuleID).LastState; got != domain.AlertRuleStateOK {
+		t.Errorf("last_state during suppression = %q, want ok (not committed while suppressed)", got)
+	}
+	if got := dependency.callCount(); got != 1 {
+		t.Errorf("dependency checker consulted %d times for an availability-class symptom, want exactly 1", got)
+	}
+	if got := dependency.suppressions(); got != 1 {
+		t.Errorf("recorded suppressions for an availability-class symptom = %d, want exactly 1", got)
+	}
+}
+
+// TestEvaluator_UnspecifiedSymptomStillDependencySuppressed pins E3.4's
+// non-breaking guarantee at the E3.5 call site: an unspecified-class rule
+// (the default for every pre-E3.4 rule and every rule an operator never
+// classified) keeps today's conservative behavior — suppressed exactly as it
+// was before symptom-class scoping existed.
+func TestEvaluator_UnspecifiedSymptomStillDependencySuppressed(t *testing.T) {
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	rule := mkRule(t, "tenant-a", "asset-x", "cpu_utilization", domain.ComparatorGT, 90, 300)
+	rule.SymptomClass = domain.AlertSymptomClassUnspecified
+
+	store := newFakeStore(rule)
+	tel := newFakeTelemetry()
+	notifier := &fakeNotifier{}
+	correlator := newFakeCorrelator()
+	dependency := newFakeDependencyChecker(fakeDownDependency{
+		tenantID: rule.TenantID, assetID: rule.AssetID, rootAssetID: "db-y",
+	})
+	e := newTestEvaluatorWithDependency(store, tel, notifier, correlator, newFakeMaintenanceChecker(), dependency, now)
+
+	from := now.Add(-300 * time.Second)
+	tel.set(rule.TenantID, rule.AssetID, rule.Metric, breachingSamples(from, now, 30*time.Second, 95))
+
+	e.RunOnce(context.Background())
+
+	if got := notifier.count(); got != 0 {
+		t.Errorf("notifications for an unspecified-class symptom while a dependency is down = %d, want 0 "+
+			"(conservative default, unchanged behavior)", got)
+	}
+	if creates := correlator.callsOfKind("create"); len(creates) != 0 {
+		t.Errorf("incident creations for an unspecified-class symptom while a dependency is down = %d, want 0", len(creates))
+	}
+	if got := store.get(rule.RuleID).LastState; got != domain.AlertRuleStateOK {
+		t.Errorf("last_state during suppression = %q, want ok (not committed while suppressed)", got)
+	}
+	if got := dependency.callCount(); got != 1 {
+		t.Errorf("dependency checker consulted %d times for an unspecified-class symptom, want exactly 1", got)
+	}
+	if got := dependency.suppressions(); got != 1 {
+		t.Errorf("recorded suppressions for an unspecified-class symptom = %d, want exactly 1", got)
+	}
+}

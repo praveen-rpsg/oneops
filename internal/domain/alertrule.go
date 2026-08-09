@@ -74,9 +74,11 @@ func (s AlertSeverity) Valid() bool {
 // downstream CI looks unreachable because its dependency is down); resource =
 // a resource/utilization metric such as cpu/disk/mem/latency (it is usually
 // independent of a dependency's own health). unspecified is the default for
-// every rule an operator has not explicitly classified. E3.4 is the
-// PRIMITIVE ONLY: this field is stored and exposed but nothing reads it to
-// make a decision yet — see DefaultAlertSymptomClass's doc comment.
+// every rule an operator has not explicitly classified. E3.4 introduced this
+// field as a primitive; E3.5 (ADR-ALERTING-006) is its first consumer — the
+// evaluator's dependency suppression never suppresses a `resource` symptom
+// (an independent failure must not be masked by an upstream outage), while
+// `availability` and `unspecified` remain subject to it.
 type AlertSymptomClass string
 
 const (
