@@ -1,0 +1,112 @@
+{
+  "realm": "oneops",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "accessTokenLifespan": 900,
+  "roles": {
+    "realm": [
+      { "name": "oneops-reader", "description": "OneOps: tenant-scoped read access" },
+      { "name": "oneops-editor", "description": "OneOps: tenant-scoped read/write access" },
+      { "name": "oneops-admin", "description": "OneOps: tenant administrator (full authority inside one tenant)" },
+      {
+        "name": "oneops-platform-admin",
+        "description": "OneOps: operator of the installation (administers the tenant registry itself)"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "oneops-console",
+      "name": "OneOps Console",
+      "description": "Public PKCE client for the OneOps browser console (E-AUTH.1)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": ["http://localhost:8080/*"],
+      "webOrigins": ["http://localhost:8080"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8080/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "oneops-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        },
+        {
+          "name": "oneops-tenant",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "tenant",
+            "claim.value": "system",
+            "jsonType.label": "String",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        },
+        {
+          "name": "oneops-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "oneops-console",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "priya.nair",
+      "email": "priya.nair@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Priya",
+      "lastName": "Nair",
+      "credentials": [{ "type": "password", "value": "oneops-demo-pw1", "temporary": false }],
+      "realmRoles": ["oneops-admin", "oneops-platform-admin"]
+    },
+    {
+      "username": "raj.shah",
+      "email": "raj.shah@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Raj",
+      "lastName": "Shah",
+      "credentials": [{ "type": "password", "value": "oneops-demo-pw2", "temporary": false }],
+      "realmRoles": ["oneops-editor"]
+    },
+    {
+      "username": "mei.lin",
+      "email": "mei.lin@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Mei",
+      "lastName": "Lin",
+      "credentials": [{ "type": "password", "value": "oneops-demo-pw3", "temporary": false }],
+      "realmRoles": ["oneops-reader"]
+    }
+  ]
+}

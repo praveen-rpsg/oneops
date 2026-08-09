@@ -38,9 +38,19 @@ type IDPConfig struct {
 	Audience string
 	HMACKey  string
 	JWKSURL  string
+	// AllowPrivateJWKS opts this IdP's JWKS fetch out of the SSRF guard's
+	// public-address requirement (ADR-SECURITY-001/003), mirroring
+	// config.WebhookAllowPrivateTargets for the same guard on outbound
+	// delivery. False by default — the secure posture (public addresses
+	// only) is unchanged. Set true only for an IdP an operator has
+	// deliberately placed on a private network: a self-hosted/on-prem IdP
+	// reachable solely inside the customer's VPN, or a bundled local IdP
+	// (e.g. the demo Keycloak in docker-compose.auth.yml, reached over
+	// loopback). Ignored when Client is set explicitly.
+	AllowPrivateJWKS bool
 	// Client is the HTTP client used for this IdP's JWKS fetch. nil means the
-	// SSRF-guarded default (ADR-SECURITY-003); tests inject their own to
-	// reach a local server.
+	// SSRF-guarded default (ADR-SECURITY-003), gated by AllowPrivateJWKS;
+	// tests inject their own to reach a local server.
 	Client *http.Client
 }
 
@@ -101,7 +111,7 @@ func NewMultiVerifier(configs []IDPConfig) (*Verifier, error) {
 			e.hmacKey = []byte(c.HMACKey)
 		}
 		if c.JWKSURL != "" {
-			e.jwks = newJWKSCache(c.JWKSURL, c.Client)
+			e.jwks = newJWKSCache(c.JWKSURL, c.Client, c.AllowPrivateJWKS)
 		}
 		idps[c.Issuer] = e
 	}
@@ -225,9 +235,9 @@ type jwksCache struct {
 	ttl       time.Duration
 }
 
-func newJWKSCache(url string, doer *http.Client) *jwksCache {
+func newJWKSCache(url string, doer *http.Client, allowPrivate bool) *jwksCache {
 	if doer == nil {
-		doer = safehttp.Client(10*time.Second, false)
+		doer = safehttp.Client(10*time.Second, allowPrivate)
 	}
 	return &jwksCache{url: url, doer: doer, keys: map[string]*rsa.PublicKey{}, ttl: 15 * time.Minute}
 }

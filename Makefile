@@ -63,6 +63,35 @@ SEED_BASE_URL ?= http://localhost:8080
 seed-demo: ## Populate a running (fresh-tenant) control plane with a demo dataset via its /v1/admin API
 	@go run ./cmd/seed-demo -base $(SEED_BASE_URL)
 
+# --- Turnkey real OIDC login for demos/pilots (E-AUTH.1) — see docs/PILOT-AUTH.md.
+# Opt-in and additive: none of the above (default auth-disabled demo flow) changes.
+AUTH_ISSUER   ?= http://localhost:8081/realms/oneops
+AUTH_JWKS     ?= http://localhost:8081/realms/oneops/protocol/openid-connect/certs
+AUTH_AUDIENCE ?= oneops-console
+AUTH_CLIENT   ?= oneops-console
+
+up-auth: ## Start the bundled demo Keycloak (real OIDC IdP) alongside `make up`
+	@docker compose -f docker-compose.auth.yml up -d
+
+down-auth: ## Stop the bundled demo Keycloak
+	@docker compose -f docker-compose.auth.yml down
+
+auth-bind: ## One-time: bind the demo (system) tenant to the Keycloak issuer (run while the control plane is up)
+	@curl -fsS -X PATCH $(SEED_BASE_URL)/v1/admin/tenants/system \
+		-H 'Content-Type: application/json' \
+		-d '{"allowed_issuers":["$(AUTH_ISSUER)"]}' >/dev/null && \
+		echo "system tenant bound to $(AUTH_ISSUER)"
+
+run-auth: ## Run the control plane with REAL OIDC auth against the bundled Keycloak (see docs/PILOT-AUTH.md)
+	@ONEOPS_AUTH_ENABLED=true \
+		ONEOPS_JWT_ISSUER=$(AUTH_ISSUER) \
+		ONEOPS_JWKS_URL=$(AUTH_JWKS) \
+		ONEOPS_JWT_AUDIENCE=$(AUTH_AUDIENCE) \
+		ONEOPS_OIDC_CLIENT_ID=$(AUTH_CLIENT) \
+		ONEOPS_JWT_HMAC_KEY= \
+		ONEOPS_JWKS_ALLOW_PRIVATE_TARGETS=true \
+		$(DOTENV) go run ./cmd/controlplane
+
 db-backup: ## Take a verified logical backup into ./backups
 	@$(PGTOOLS) scripts/db-backup.sh /src/backups
 

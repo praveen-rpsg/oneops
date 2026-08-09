@@ -121,6 +121,7 @@ func run(logger *slog.Logger) error {
 	idpConfigs := make([]auth.IDPConfig, 0, 1+len(cfg.AdditionalIDPs))
 	idpConfigs = append(idpConfigs, auth.IDPConfig{
 		Issuer: cfg.JWTIssuer, Audience: cfg.JWTAudience, HMACKey: cfg.JWTHMACKey, JWKSURL: cfg.JWKSURL,
+		AllowPrivateJWKS: cfg.JWKSAllowPrivateTargets,
 	})
 	for _, extra := range cfg.AdditionalIDPs {
 		idpConfigs = append(idpConfigs, auth.IDPConfig{

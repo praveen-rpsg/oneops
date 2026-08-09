@@ -45,6 +45,15 @@ type Config struct {
 	JWTHMACKey  string // HS256 dev/test secret; empty => RS256/JWKS
 	JWKSURL     string // RS256 public keys (OIDC)
 
+	// JWKSAllowPrivateTargets disables the SSRF egress guard for the default
+	// IdP's JWKS fetch, permitting loopback/private-network addresses —
+	// mirroring WebhookAllowPrivateTargets for the same guard on outbound
+	// delivery (ADR-SECURITY-001/003). The secure default is false. Set true
+	// only when ONEOPS_JWKS_URL deliberately points at a private/on-prem IdP
+	// (a self-hosted IdP inside the customer's VPN, or a local bundled IdP
+	// such as the demo Keycloak in docker-compose.auth.yml on loopback).
+	JWKSAllowPrivateTargets bool
+
 	// AdditionalIDPs are trusted identity providers beyond the default
 	// (JWTIssuer/JWTAudience/...) — enterprise SSO, where different tenants
 	// bring their own IdP. Configured via ONEOPS_ADDITIONAL_IDPS; empty is the
@@ -184,23 +193,24 @@ func (c *Config) validateAdditionalIDPs() error {
 // Load reads configuration from the environment and validates it.
 func Load() (*Config, error) {
 	c := &Config{
-		HTTPAddr:        getEnv("ONEOPS_HTTP_ADDR", ":8080"),
-		MetricsAddr:     getEnv("ONEOPS_METRICS_ADDR", ":9090"),
-		Env:             getEnv("ONEOPS_ENV", "dev"),
-		ShutdownGrace:   getEnvInt("ONEOPS_SHUTDOWN_GRACE_SECONDS", 10),
-		DatabaseURL:     getEnv("ONEOPS_DB_URL", "postgres://oneops:dev@localhost:5432/oneops?sslmode=disable"),
-		DBMaxConns:      getEnvInt("ONEOPS_DB_MAX_CONNS", 10),
-		AutoMigrate:     getEnvBool("ONEOPS_AUTO_MIGRATE", true),
-		MaxPageSize:     getEnvInt("ONEOPS_MAX_PAGE_SIZE", 200),
-		DefaultPageSize: getEnvInt("ONEOPS_DEFAULT_PAGE_SIZE", 50),
-		AuthEnabled:     getEnvBool("ONEOPS_AUTH_ENABLED", true),
-		JWTIssuer:       getEnv("ONEOPS_JWT_ISSUER", "https://oneops.local"),
-		JWTAudience:     getEnv("ONEOPS_JWT_AUDIENCE", "oneops"),
-		JWTHMACKey:      getEnv("ONEOPS_JWT_HMAC_KEY", "dev-insecure-secret-change-me"),
-		JWKSURL:         getEnv("ONEOPS_JWKS_URL", ""),
-		OIDCClientID:    getEnv("ONEOPS_OIDC_CLIENT_ID", ""),
-		ServiceName:     getEnv("ONEOPS_SERVICE_NAME", "oneops-controlplane"),
-		OTLPEndpoint:    getEnv("ONEOPS_OTLP_ENDPOINT", ""),
+		HTTPAddr:                getEnv("ONEOPS_HTTP_ADDR", ":8080"),
+		MetricsAddr:             getEnv("ONEOPS_METRICS_ADDR", ":9090"),
+		Env:                     getEnv("ONEOPS_ENV", "dev"),
+		ShutdownGrace:           getEnvInt("ONEOPS_SHUTDOWN_GRACE_SECONDS", 10),
+		DatabaseURL:             getEnv("ONEOPS_DB_URL", "postgres://oneops:dev@localhost:5432/oneops?sslmode=disable"),
+		DBMaxConns:              getEnvInt("ONEOPS_DB_MAX_CONNS", 10),
+		AutoMigrate:             getEnvBool("ONEOPS_AUTO_MIGRATE", true),
+		MaxPageSize:             getEnvInt("ONEOPS_MAX_PAGE_SIZE", 200),
+		DefaultPageSize:         getEnvInt("ONEOPS_DEFAULT_PAGE_SIZE", 50),
+		AuthEnabled:             getEnvBool("ONEOPS_AUTH_ENABLED", true),
+		JWTIssuer:               getEnv("ONEOPS_JWT_ISSUER", "https://oneops.local"),
+		JWTAudience:             getEnv("ONEOPS_JWT_AUDIENCE", "oneops"),
+		JWTHMACKey:              getEnv("ONEOPS_JWT_HMAC_KEY", "dev-insecure-secret-change-me"),
+		JWKSURL:                 getEnv("ONEOPS_JWKS_URL", ""),
+		JWKSAllowPrivateTargets: getEnvBool("ONEOPS_JWKS_ALLOW_PRIVATE_TARGETS", false),
+		OIDCClientID:            getEnv("ONEOPS_OIDC_CLIENT_ID", ""),
+		ServiceName:             getEnv("ONEOPS_SERVICE_NAME", "oneops-controlplane"),
+		OTLPEndpoint:            getEnv("ONEOPS_OTLP_ENDPOINT", ""),
 
 		VerifyIntervalSeconds:         getEnvInt("ONEOPS_AUDIT_VERIFY_INTERVAL_SECONDS", 300),
 		SchemaSentinelIntervalSeconds: getEnvInt("ONEOPS_SCHEMA_SENTINEL_INTERVAL_SECONDS", 30),
