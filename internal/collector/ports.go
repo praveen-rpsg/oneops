@@ -4,9 +4,10 @@
 // to the checked asset (domain.Sample, E2.1), mirroring internal/notification
 // and internal/events' leader-gated delivery shape.
 //
-// This increment ships one executor — an HTTP uptime/synthetic check — behind
-// a Type dispatch that SNMP (E2.2b) and cloud/API pollers (E2.2c) extend
-// without changing the scheduler itself.
+// It ships two executors — an HTTP uptime/synthetic check (E2.2a) and an
+// SNMP v2c reachability check (Phase A.1, ADR-NET-001) — behind a Type
+// dispatch that cloud/API pollers extend later without changing the
+// scheduler itself.
 package collector
 
 import (

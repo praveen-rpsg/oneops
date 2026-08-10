@@ -4906,27 +4906,38 @@ components:
       type: object
       description: >-
         A polled check target (E2.2a): the agentless collector framework's
-        config. Its result is written as telemetry samples named
-        <metric_prefix>_up, <metric_prefix>_latency_ms and
-        <metric_prefix>_status_code — never a reified Alert/Metric.
+        config. An "http" check's result is written as telemetry samples
+        named <metric_prefix>_up, <metric_prefix>_latency_ms and
+        <metric_prefix>_status_code; an "snmp" check's (A.1, ADR-NET-001) as
+        <metric_prefix>_reachable and, when reachable,
+        <metric_prefix>_uptime_seconds — never a reified Alert/Metric.
       properties:
         check_id: { type: string }
         asset_id: { type: string }
         type:
           type: string
           description: >-
-            Open but validated: lower-case snake_case. "http" is the only
-            type with an executor today (E2.2a); SNMP (E2.2b) and cloud/API
-            pollers (E2.2c) add more values later.
+            Open but validated: lower-case snake_case. "http" and "snmp"
+            (v2c reachability, A.1) have executors today; cloud/API pollers
+            add more values later.
         target:
           type: string
-          description: Interpreted according to `type` — a URL for "http".
+          description: >-
+            Interpreted according to `type` — a URL for "http"; a "host" or
+            "host:port" (port defaults to 161) for "snmp".
         interval_seconds: { type: integer, minimum: 30, maximum: 2592000 }
         enabled: { type: boolean }
         metric_prefix:
           type: string
           maxLength: 80
           description: Lower-case snake_case, e.g. checkout_api.
+        has_snmp_community:
+          type: boolean
+          description: >-
+            Whether an SNMP community string is set. The community itself is
+            a device credential and is NEVER returned by any response — see
+            CreateCollectorCheckRequest's snmp_community for the only place
+            it is ever written.
         last_run_at:
           type: string
           format: date-time
@@ -4953,21 +4964,29 @@ components:
         When the resulting type is "http", `target` is validated as an
         http(s) URL with a host at creation time; the authoritative SSRF
         egress guard (non-public addresses) is enforced at dial time by
-        every poll (ADR-SECURITY-001).
+        every poll (ADR-SECURITY-001). When the resulting type is "snmp",
+        `target` is a "host" or "host:port" (port defaults to 161) and
+        `snmp_community` is REQUIRED and non-empty — SNMP v2c authenticates
+        with a plaintext community string, a device credential; it is
+        write-only (accepted here, never returned by any response — see
+        CollectorCheck.has_snmp_community) and forbidden (must be omitted or
+        empty) for every other type.
       properties:
         asset_id: { type: string }
         type: { type: string }
         target: { type: string, maxLength: 500 }
         interval_seconds: { type: integer, minimum: 30, maximum: 2592000 }
         metric_prefix: { type: string, maxLength: 80 }
+        snmp_community: { type: string, maxLength: 255 }
         enabled: { type: boolean }
     PatchCollectorCheckRequest:
       type: object
       required: [row_version]
       description: >-
-        Supply one or more of type, target, interval_seconds, enabled or
-        metric_prefix. asset_id cannot be changed — delete and recreate the
-        check instead.
+        Supply one or more of type, target, interval_seconds, enabled,
+        metric_prefix or snmp_community. asset_id cannot be changed — delete
+        and recreate the check instead. snmp_community rotates the stored
+        credential (write-only, same as on create — never returned).
       properties:
         row_version: { type: integer, format: int64 }
         type: { type: string }
@@ -4975,6 +4994,7 @@ components:
         interval_seconds: { type: integer, minimum: 30, maximum: 2592000 }
         enabled: { type: boolean }
         metric_prefix: { type: string, maxLength: 80 }
+        snmp_community: { type: string, maxLength: 255 }
     AlertRule:
       type: object
       description: >-

@@ -22,7 +22,7 @@ func TestCollectorCheckStore_CreateGetListUpdateDelete(t *testing.T) {
 
 	host := telemetryAsset(t, assets, ctx, tn.TenantID, "collector-host")
 
-	c, err := domain.NewCollectorCheck(tn.TenantID, host.AssetID, domain.CollectorCheckTypeHTTP, "https://example.test/health", 60, "chk")
+	c, err := domain.NewCollectorCheck(tn.TenantID, host.AssetID, domain.CollectorCheckTypeHTTP, "https://example.test/health", 60, "chk", "")
 	if err != nil {
 		t.Fatalf("new collector check: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestCollectorCheckStore_CreateRejectsCrossTenantOrNonexistentAsset(t *testi
 	victim := telemetryAsset(t, assets, ctxA, a.TenantID, "victim-host")
 
 	// Tenant B names tenant A's real asset.
-	cross, err := domain.NewCollectorCheck(b.TenantID, victim.AssetID, domain.CollectorCheckTypeHTTP, "https://example.test", 60, "chk")
+	cross, err := domain.NewCollectorCheck(b.TenantID, victim.AssetID, domain.CollectorCheckTypeHTTP, "https://example.test", 60, "chk", "")
 	if err != nil {
 		t.Fatalf("new collector check: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestCollectorCheckStore_CreateRejectsCrossTenantOrNonexistentAsset(t *testi
 	}
 
 	// Tenant B names an asset id that does not exist anywhere.
-	missing, err := domain.NewCollectorCheck(b.TenantID, "no-such-asset", domain.CollectorCheckTypeHTTP, "https://example.test", 60, "chk")
+	missing, err := domain.NewCollectorCheck(b.TenantID, "no-such-asset", domain.CollectorCheckTypeHTTP, "https://example.test", 60, "chk", "")
 	if err != nil {
 		t.Fatalf("new collector check: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestCollectorCheckIsolation_RLSByTenant(t *testing.T) {
 
 	hostA := telemetryAsset(t, assets, ctxA, a.TenantID, "iso-host-a")
 
-	cA, err := domain.NewCollectorCheck(a.TenantID, hostA.AssetID, domain.CollectorCheckTypeHTTP, "https://example.test", 60, "chk")
+	cA, err := domain.NewCollectorCheck(a.TenantID, hostA.AssetID, domain.CollectorCheckTypeHTTP, "https://example.test", 60, "chk", "")
 	if err != nil {
 		t.Fatalf("new collector check: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestCollectorCheckStore_DueChecksRespectsEnabledAndInterval(t *testing.T) {
 	host := telemetryAsset(t, assets, ctx, tn.TenantID, "due-host")
 
 	mk := func(interval int, enabled bool) *domain.CollectorCheck {
-		c, err := domain.NewCollectorCheck(tn.TenantID, host.AssetID, domain.CollectorCheckTypeHTTP, "https://example.test", interval, "chk")
+		c, err := domain.NewCollectorCheck(tn.TenantID, host.AssetID, domain.CollectorCheckTypeHTTP, "https://example.test", interval, "chk", "")
 		if err != nil {
 			t.Fatalf("new collector check: %v", err)
 		}
@@ -268,7 +268,7 @@ func TestCollectorCheckStore_RecordRunDoesNotBumpRowVersion(t *testing.T) {
 	ctx := assetTestCtx(tn)
 	host := telemetryAsset(t, assets, ctx, tn.TenantID, "recordrun-host")
 
-	c, err := domain.NewCollectorCheck(tn.TenantID, host.AssetID, domain.CollectorCheckTypeHTTP, "https://example.test", 60, "chk")
+	c, err := domain.NewCollectorCheck(tn.TenantID, host.AssetID, domain.CollectorCheckTypeHTTP, "https://example.test", 60, "chk", "")
 	if err != nil {
 		t.Fatalf("new collector check: %v", err)
 	}

@@ -311,6 +311,184 @@ func TestCollectorChecks_DeleteMapsNotFoundTo404(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------- SNMP (A.1)
+
+// TestCollectorChecks_CreateSNMP_RequiresCommunity proves domain.Validate's
+// cross-field requirement is actually reachable through the API: a "snmp"
+// check with no community is refused before the store is ever touched.
+func TestCollectorChecks_CreateSNMP_RequiresCommunity(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeCollectorChecks{}
+	srv.SetCollectorChecks(spy)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/collector-checks",
+		strings.NewReader(`{"asset_id":"a1","type":"snmp","target":"10.0.0.1","interval_seconds":60,"metric_prefix":"chk"}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	if spy.creates != 0 {
+		t.Error("an snmp check with no community reached the store")
+	}
+}
+
+// TestCollectorChecks_CreateHTTP_RejectsCommunity proves the credential is
+// forbidden outside "snmp" — supplying it for an "http" check is refused,
+// not silently ignored (silently accepting it would let an operator believe
+// a credential was stored when it never can be read back for that type).
+func TestCollectorChecks_CreateHTTP_RejectsCommunity(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeCollectorChecks{}
+	srv.SetCollectorChecks(spy)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/collector-checks",
+		strings.NewReader(`{"asset_id":"a1","target":"https://example.test","interval_seconds":60,"metric_prefix":"chk","snmp_community":"public"}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	if spy.creates != 0 {
+		t.Error("an http check with a community reached the store")
+	}
+}
+
+// TestCollectorChecks_CreateSNMP_RejectsMalformedTarget mirrors
+// TestCollectorChecks_CreateRejectsMalformedHTTPTarget for "snmp": an
+// unparseable port is refused with 400 before the store is reached. A bare
+// host with no port is accepted (defaults to 161 — proven by the success
+// case below).
+func TestCollectorChecks_CreateSNMP_RejectsMalformedTarget(t *testing.T) {
+	for _, target := range []string{"", "10.0.0.1:not-a-port", "10.0.0.1:0", "10.0.0.1:99999"} {
+		t.Run(target, func(t *testing.T) {
+			srv, _ := newTestServer(true)
+			srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+			spy := &fakeCollectorChecks{}
+			srv.SetCollectorChecks(spy)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/admin/collector-checks",
+				strings.NewReader(`{"asset_id":"a1","type":"snmp","target":"`+target+`","interval_seconds":60,"metric_prefix":"chk","snmp_community":"public"}`))
+			req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+			rec := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+			}
+			if spy.creates != 0 {
+				t.Error("a malformed snmp target reached the store")
+			}
+		})
+	}
+}
+
+// TestCollectorChecks_CreateSNMP_CommunityNeverAppearsInTheResponse is the
+// security-critical proof for this story: a create request carrying a
+// community string gets back a 201 whose body never contains that string in
+// any form (raw, nor a masked variant that would still require handling the
+// secret) — only a has_snmp_community boolean. httpapi has no server-side
+// state here (the fake store echoes back whatever was passed to Create), so
+// this exercises exactly the redaction toCollectorCheckDTO performs.
+func TestCollectorChecks_CreateSNMP_CommunityNeverAppearsInTheResponse(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeCollectorChecks{}
+	srv.SetCollectorChecks(spy)
+
+	const secret = "sup3r-s3cr3t-community"
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/collector-checks",
+		strings.NewReader(`{"asset_id":"a1","type":"snmp","target":"10.0.0.1:161","interval_seconds":60,"metric_prefix":"chk","snmp_community":"`+secret+`"}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, secret) {
+		t.Fatalf("the community string leaked into the create response: %s", body)
+	}
+	if !strings.Contains(body, `"has_snmp_community":true`) {
+		t.Errorf("response did not report has_snmp_community=true: %s", body)
+	}
+	if spy.lastCreated == nil || spy.lastCreated.SNMPCommunity != secret {
+		t.Fatalf("the store did not receive the community to persist: %+v", spy.lastCreated)
+	}
+}
+
+// TestCollectorChecks_Get_CommunityNeverAppearsInTheResponse proves
+// redaction holds on the read path too, not just the create-echo path: a
+// check whose stored SNMPCommunity is non-empty still serialises to a body
+// with no trace of it.
+func TestCollectorChecks_Get_CommunityNeverAppearsInTheResponse(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	const secret = "another-secret-string"
+	spy := &fakeCollectorChecks{getCheck: &domain.CollectorCheck{
+		CheckID: "c1", AssetID: "a1", Type: domain.CollectorCheckTypeSNMP, Target: "10.0.0.1",
+		IntervalSeconds: 60, Enabled: true, MetricPrefix: "chk", SNMPCommunity: secret, RowVersion: 1,
+	}}
+	srv.SetCollectorChecks(spy)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/collector-checks/c1", nil)
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, secret) {
+		t.Fatalf("the community string leaked into the get response: %s", body)
+	}
+	// Looks for the exact key `"snmp_community":`, not the unrelated
+	// `"has_snmp_community":` boolean this DTO legitimately carries.
+	if strings.Contains(body, `"snmp_community":`) {
+		t.Fatalf("the snmp_community key itself appeared in the get response: %s", body)
+	}
+	if !strings.Contains(body, `"has_snmp_community":true`) {
+		t.Errorf("response did not report has_snmp_community=true: %s", body)
+	}
+}
+
+// TestCollectorChecks_PatchSNMPCommunity_RotatesButNeverReturnsIt proves the
+// "dedicated set" path (PATCH) is equally write-only.
+func TestCollectorChecks_PatchSNMPCommunity_RotatesButNeverReturnsIt(t *testing.T) {
+	srv, _ := newTestServer(true)
+	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))
+	spy := &fakeCollectorChecks{getCheck: &domain.CollectorCheck{
+		CheckID: "c1", AssetID: "a1", Type: domain.CollectorCheckTypeSNMP, Target: "10.0.0.1",
+		IntervalSeconds: 60, Enabled: true, MetricPrefix: "chk", SNMPCommunity: "old-secret", RowVersion: 1,
+	}}
+	srv.SetCollectorChecks(spy)
+
+	const newSecret = "rotated-secret"
+	req := httptest.NewRequest(http.MethodPatch, "/v1/admin/collector-checks/c1",
+		strings.NewReader(`{"row_version":1,"snmp_community":"`+newSecret+`"}`))
+	req.Header.Set("Authorization", "Bearer "+mintRoleTenantToken(t, "ext-acme", []string{"oneops-admin"}))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), newSecret) {
+		t.Fatalf("the rotated community leaked into the patch response: %s", rec.Body.String())
+	}
+	if spy.lastPatch.SNMPCommunity == nil || *spy.lastPatch.SNMPCommunity != newSecret {
+		t.Fatalf("the store did not receive the rotated community: %+v", spy.lastPatch)
+	}
+}
+
 func TestCollectorChecks_GetMapsNotFoundTo404(t *testing.T) {
 	srv, _ := newTestServer(true)
 	srv.SetTenants(newFakeTenants(activeTenant("t-acme", "ext-acme", "acme")))

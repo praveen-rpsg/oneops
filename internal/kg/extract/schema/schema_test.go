@@ -284,7 +284,7 @@ func TestCorpusCensus(t *testing.T) {
 		got[n.Kind]++
 	}
 	want := map[string]int{
-		kindTable: 52, kindColumn: 498, kindIndex: 107, kindConstraint: 195, kindTrigger: 12,
+		kindTable: 52, kindColumn: 499, kindIndex: 107, kindConstraint: 196, kindTrigger: 12,
 	}
 	for kind, w := range want {
 		if got[kind] != w {

@@ -36,7 +36,7 @@ func TestCollectorScheduler_EndToEnd_RunsADueCheckAndWritesSamples(t *testing.T)
 	}))
 	defer srv.Close()
 
-	c, err := domain.NewCollectorCheck(tn.TenantID, host.AssetID, domain.CollectorCheckTypeHTTP, srv.URL, 30, "e2e")
+	c, err := domain.NewCollectorCheck(tn.TenantID, host.AssetID, domain.CollectorCheckTypeHTTP, srv.URL, 30, "e2e", "")
 	if err != nil {
 		t.Fatalf("new collector check: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestCollectorScheduler_EndToEnd_DownTargetRecordsUpZero(t *testing.T) {
 	ctx := assetTestCtx(tn)
 	host := telemetryAsset(t, assets, ctx, tn.TenantID, "e2e-down-host")
 
-	c, err := domain.NewCollectorCheck(tn.TenantID, host.AssetID, domain.CollectorCheckTypeHTTP, "http://127.0.0.1:1", 30, "e2edown")
+	c, err := domain.NewCollectorCheck(tn.TenantID, host.AssetID, domain.CollectorCheckTypeHTTP, "http://127.0.0.1:1", 30, "e2edown", "")
 	if err != nil {
 		t.Fatalf("new collector check: %v", err)
 	}

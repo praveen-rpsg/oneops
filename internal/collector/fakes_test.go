@@ -130,7 +130,15 @@ func (f *fakeTelemetry) samplesFor(assetID string) []domain.Sample {
 }
 
 func newHTTPCheck(assetID, target string) *domain.CollectorCheck {
-	c, err := domain.NewCollectorCheck("t-test", assetID, domain.CollectorCheckTypeHTTP, target, 30, "chk")
+	c, err := domain.NewCollectorCheck("t-test", assetID, domain.CollectorCheckTypeHTTP, target, 30, "chk", "")
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
+
+func newSNMPCheck(assetID, target, community string) *domain.CollectorCheck {
+	c, err := domain.NewCollectorCheck("t-test", assetID, domain.CollectorCheckTypeSNMP, target, 30, "chk", community)
 	if err != nil {
 		panic(err)
 	}

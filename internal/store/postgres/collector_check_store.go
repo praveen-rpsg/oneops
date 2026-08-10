@@ -19,7 +19,7 @@ const (
 )
 
 const collectorCheckCols = `check_id, tenant_id, asset_id, type, target, interval_seconds,
-	enabled, metric_prefix, last_run_at, last_status, row_version, created_at, updated_at`
+	enabled, metric_prefix, snmp_community, last_run_at, last_status, row_version, created_at, updated_at`
 
 // CollectorCheckStore administers collector_check: the admin CRUD API's
 // tenant-scoped reads/writes (domain.CollectorCheckRepository) AND, when
@@ -60,15 +60,19 @@ func clampCollectorCheckPage(limit int) int {
 
 func scanCollectorCheck(sc scanner) (*domain.CollectorCheck, error) {
 	var (
-		c          domain.CollectorCheck
-		lastRunAt  *time.Time
-		lastStatus *string
+		c             domain.CollectorCheck
+		snmpCommunity *string
+		lastRunAt     *time.Time
+		lastStatus    *string
 	)
 	if err := sc.Scan(
 		&c.CheckID, &c.TenantID, &c.AssetID, &c.Type, &c.Target, &c.IntervalSeconds,
-		&c.Enabled, &c.MetricPrefix, &lastRunAt, &lastStatus, &c.RowVersion, &c.CreatedAt, &c.UpdatedAt,
+		&c.Enabled, &c.MetricPrefix, &snmpCommunity, &lastRunAt, &lastStatus, &c.RowVersion, &c.CreatedAt, &c.UpdatedAt,
 	); err != nil {
 		return nil, err
+	}
+	if snmpCommunity != nil {
+		c.SNMPCommunity = *snmpCommunity
 	}
 	c.LastRunAt = lastRunAt
 	if lastStatus != nil {
@@ -100,10 +104,11 @@ func (s *CollectorCheckStore) Create(ctx context.Context, c *domain.CollectorChe
 	row := s.pool.QueryRow(ctx, `
 		INSERT INTO collector_check
 			(check_id, tenant_id, asset_id, type, target, interval_seconds, enabled, metric_prefix,
-			 row_version, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1,now(),now())
+			 snmp_community, row_version, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,now(),now())
 		RETURNING `+collectorCheckCols,
-		c.CheckID, c.TenantID, c.AssetID, c.Type, c.Target, c.IntervalSeconds, c.Enabled, c.MetricPrefix)
+		c.CheckID, c.TenantID, c.AssetID, c.Type, c.Target, c.IntervalSeconds, c.Enabled, c.MetricPrefix,
+		nullString(c.SNMPCommunity))
 
 	created, err := scanCollectorCheck(row)
 	if err != nil {
@@ -181,6 +186,9 @@ func (s *CollectorCheckStore) Update(
 	if patch.MetricPrefix != nil {
 		current.MetricPrefix = *patch.MetricPrefix
 	}
+	if patch.SNMPCommunity != nil {
+		current.SNMPCommunity = *patch.SNMPCommunity
+	}
 	if err := current.Validate(); err != nil {
 		return nil, err
 	}
@@ -188,10 +196,11 @@ func (s *CollectorCheckStore) Update(
 	row := s.pool.QueryRow(ctx, `
 		UPDATE collector_check
 		   SET type = $3, target = $4, interval_seconds = $5, enabled = $6, metric_prefix = $7,
-		       row_version = row_version + 1, updated_at = now()
+		       snmp_community = $8, row_version = row_version + 1, updated_at = now()
 		 WHERE check_id = $1 AND row_version = $2
 		RETURNING `+collectorCheckCols,
-		checkID, rowVersion, current.Type, current.Target, current.IntervalSeconds, current.Enabled, current.MetricPrefix)
+		checkID, rowVersion, current.Type, current.Target, current.IntervalSeconds, current.Enabled, current.MetricPrefix,
+		nullString(current.SNMPCommunity))
 
 	updated, err := scanCollectorCheck(row)
 	if errors.Is(err, pgx.ErrNoRows) {

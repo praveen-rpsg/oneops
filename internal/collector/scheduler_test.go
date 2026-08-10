@@ -157,7 +157,10 @@ func TestScheduler_HangingTarget_TimesOutAndDoesNotStallTheScheduler(t *testing.
 }
 
 func TestScheduler_UnsupportedType_RecordsRunWritesNoSamples(t *testing.T) {
-	check, err := domain.NewCollectorCheck("t-test", "asset-3", "snmp", "10.0.0.1:161/public", 30, "chk")
+	// "cloudwatch" stands in for a real future type (cloud/API pollers):
+	// "snmp" itself now has an executor (Phase A.1), so it can no longer
+	// exercise this "no executor at all" path.
+	check, err := domain.NewCollectorCheck("t-test", "asset-3", "cloudwatch", "10.0.0.1", 30, "chk", "")
 	if err != nil {
 		t.Fatalf("new collector check: %v", err)
 	}
@@ -173,6 +176,98 @@ func TestScheduler_UnsupportedType_RecordsRunWritesNoSamples(t *testing.T) {
 	runs := store.runsFor(check.CheckID)
 	if len(runs) != 1 || runs[0].Status != domain.CollectorCheckStatusUnsupported {
 		t.Fatalf("recorded runs = %+v, want exactly one with status unsupported", runs)
+	}
+}
+
+// ---------------------------------------------------------------- SNMP (A.1)
+
+func TestScheduler_SNMPCheck_Success_WritesReachableAndUptimeSamples(t *testing.T) {
+	agent := newMockSNMPAgent(t, 654321) // 6543.21 seconds
+
+	check := newSNMPCheck("asset-snmp-up", agent.addr, "public")
+	store := newFakeStore(check)
+	telemetry := &fakeTelemetry{}
+	sched := NewScheduler(store, telemetry, http.DefaultClient, nil, quiet(), Config{CheckTimeout: 2 * time.Second})
+
+	sched.RunOnce(context.Background())
+
+	samples := telemetry.samplesFor("asset-snmp-up")
+	if len(samples) != 2 {
+		t.Fatalf("wrote %d samples, want 2 (reachable, uptime_seconds): %+v", len(samples), samples)
+	}
+	byMetric := map[string]domain.Sample{}
+	for _, s := range samples {
+		byMetric[s.Metric] = s
+	}
+	if s, ok := byMetric["chk_reachable"]; !ok || s.Value != 1 {
+		t.Errorf("chk_reachable = %+v (present=%v), want value 1", s, ok)
+	}
+	if s, ok := byMetric["chk_uptime_seconds"]; !ok || s.Value != 6543.21 {
+		t.Errorf("chk_uptime_seconds = %+v (present=%v), want value 6543.21", s, ok)
+	}
+
+	runs := store.runsFor(check.CheckID)
+	if len(runs) != 1 || runs[0].Status != domain.CollectorCheckStatusOK {
+		t.Fatalf("recorded runs = %+v, want exactly one with status ok", runs)
+	}
+}
+
+// TestScheduler_SNMPCheck_Down_WritesReachableZeroNoUptime proves an
+// unreachable device (nothing answers) records reachable=0, no
+// uptime_seconds sample, and last_status=down — the SNMP analogue of
+// TestScheduler_HTTPCheck_Down_RecordsUpZeroNoStatusCode. This also proves
+// the "alert rule on <prefix>.reachable would fire on device-down" claim:
+// the telemetry a device-down alert consumes is exactly what gets written
+// here, unchanged by anything downstream.
+func TestScheduler_SNMPCheck_Down_WritesReachableZeroNoUptime(t *testing.T) {
+	addr := freeUDPAddr(t)
+
+	check := newSNMPCheck("asset-snmp-down", addr, "public")
+	store := newFakeStore(check)
+	telemetry := &fakeTelemetry{}
+	sched := NewScheduler(store, telemetry, http.DefaultClient, nil, quiet(), Config{CheckTimeout: 500 * time.Millisecond})
+
+	sched.RunOnce(context.Background())
+
+	samples := telemetry.samplesFor("asset-snmp-down")
+	byMetric := map[string]domain.Sample{}
+	for _, s := range samples {
+		byMetric[s.Metric] = s
+	}
+	if s, ok := byMetric["chk_reachable"]; !ok || s.Value != 0 {
+		t.Errorf("chk_reachable = %+v (present=%v), want value 0", s, ok)
+	}
+	if _, ok := byMetric["chk_uptime_seconds"]; ok {
+		t.Error("chk_uptime_seconds sample present, want absent — no response was ever received")
+	}
+
+	runs := store.runsFor(check.CheckID)
+	if len(runs) != 1 || runs[0].Status != domain.CollectorCheckStatusDown {
+		t.Fatalf("recorded runs = %+v, want exactly one with status down", runs)
+	}
+}
+
+// TestScheduler_SNMPCheck_NoResponder_DoesNotStallTheScheduler mirrors
+// TestScheduler_HangingTarget_TimesOutAndDoesNotStallTheScheduler: a device
+// that never answers must cost at most roughly CheckTimeout, never longer.
+func TestScheduler_SNMPCheck_NoResponder_DoesNotStallTheScheduler(t *testing.T) {
+	addr := freeUDPAddr(t)
+
+	check := newSNMPCheck("asset-snmp-hang", addr, "public")
+	store := newFakeStore(check)
+	telemetry := &fakeTelemetry{}
+	sched := NewScheduler(store, telemetry, http.DefaultClient, nil, quiet(), Config{CheckTimeout: 100 * time.Millisecond})
+
+	start := time.Now()
+	sched.RunOnce(context.Background())
+	elapsed := time.Since(start)
+
+	if elapsed > time.Second {
+		t.Fatalf("RunOnce took %v against an unresponsive snmp target with a 100ms check timeout — it must not stall the scheduler", elapsed)
+	}
+	runs := store.runsFor(check.CheckID)
+	if len(runs) != 1 || runs[0].Status != domain.CollectorCheckStatusDown {
+		t.Fatalf("recorded runs = %+v, want exactly one with status down", runs)
 	}
 }
 

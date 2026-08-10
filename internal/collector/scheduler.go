@@ -144,10 +144,12 @@ func (s *Scheduler) runOne(ctx context.Context, c *domain.CollectorCheck) {
 	switch c.Type {
 	case domain.CollectorCheckTypeHTTP:
 		s.runHTTP(ctx, c)
+	case domain.CollectorCheckTypeSNMP:
+		s.runSNMP(ctx, c)
 	default:
-		// No executor for this type in this build (SNMP/cloud land in
-		// E2.2b/c). Still record a run so the due-scan does not re-select it
-		// every pass; no telemetry sample to write.
+		// No executor for this type in this build (cloud/API pollers are a
+		// future increment). Still record a run so the due-scan does not
+		// re-select it every pass; no telemetry sample to write.
 		octx, cancel := outcomeContext(ctx)
 		defer cancel()
 		if err := s.store.RecordRun(octx, c.CheckID, s.now(), domain.CollectorCheckStatusUnsupported); err != nil {
@@ -190,6 +192,69 @@ func (s *Scheduler) finishHTTP(ctx context.Context, c *domain.CollectorCheck, re
 		s.log.Error("collector scheduler: record run", "check_id", c.CheckID, "err", err)
 	}
 	s.metrics.IncChecked(status)
+}
+
+// runSNMP executes one "snmp" check: a bounded v2c GET of sysUpTime.0
+// against c.Target using c.SNMPCommunity, and writes reachable/
+// uptime_seconds samples tied to c.AssetID (see runSNMPCheck's doc comment
+// for the timeout discipline). Unlike "http", the check target is UDP:161 to
+// an operator-configured device address, not a tenant-controlled URL: it
+// does not go through s.http/HTTPDoer at all (that port exists only for the
+// HTTP executor — see HTTPDoer's doc comment) and the HTTP SSRF guard class
+// does not apply here (ADR-NET-001) — runSNMPCheck builds its own SNMP
+// client per call.
+func (s *Scheduler) runSNMP(ctx context.Context, c *domain.CollectorCheck) {
+	cctx, cancel := context.WithTimeout(ctx, s.cfg.CheckTimeout)
+	defer cancel()
+	result := runSNMPCheck(cctx, c.Target, c.SNMPCommunity, s.cfg.CheckTimeout)
+	s.finishSNMP(ctx, c, result)
+}
+
+func (s *Scheduler) finishSNMP(ctx context.Context, c *domain.CollectorCheck, result snmpCheckResult) {
+	octx, cancel := outcomeContext(ctx)
+	defer cancel()
+
+	ts := s.now()
+	if samples := s.buildSNMPSamples(c, result, ts); len(samples) > 0 {
+		if _, err := s.telemetry.WriteSamples(octx, samples); err != nil {
+			s.log.Error("collector scheduler: write samples", "check_id", c.CheckID, "err", err)
+		}
+	}
+
+	status := domain.CollectorCheckStatusDown
+	if result.Up {
+		status = domain.CollectorCheckStatusOK
+	}
+	if err := s.store.RecordRun(octx, c.CheckID, ts, status); err != nil {
+		s.log.Error("collector scheduler: record run", "check_id", c.CheckID, "err", err)
+	}
+	s.metrics.IncChecked(status)
+}
+
+// buildSNMPSamples turns one SNMP check result into telemetry samples named
+// <MetricPrefix>_reachable (always) and <MetricPrefix>_uptime_seconds (only
+// when the device answered — an unreachable device has no uptime to report,
+// the same reasoning httpCheckResult.HasStatusCode applies to status_code).
+func (s *Scheduler) buildSNMPSamples(c *domain.CollectorCheck, r snmpCheckResult, ts time.Time) []domain.Sample {
+	var out []domain.Sample
+	add := func(suffix string, value float64) {
+		sm, err := domain.NewSample(c.TenantID, c.AssetID, c.MetricPrefix+"_"+suffix, value, ts, nil)
+		if err != nil {
+			s.log.Warn("collector scheduler: sample dropped", "check_id", c.CheckID, "metric_suffix", suffix, "err", err)
+			return
+		}
+		out = append(out, *sm)
+	}
+
+	reachable := 0.0
+	if r.Up {
+		reachable = 1
+	}
+	add("reachable", reachable)
+	if r.Up {
+		add("uptime_seconds", r.UptimeSeconds)
+	}
+	return out
 }
 
 // buildSamples turns one check result into telemetry samples named

@@ -6,15 +6,26 @@ import (
 	"time"
 )
 
-// CollectorCheckTypeHTTP is the only check type this increment (E2.2a)
-// executes. Type itself is open-but-validated, exactly like Asset.Type
-// (ADR-ASSET-001 §1): SNMP (E2.2b) and cloud/API pollers (E2.2c) add new
-// values to the same open set when they land, not a migration widening a
+// CollectorCheckTypeHTTP was the only check type E2.2a executed. Type itself
+// is open-but-validated, exactly like Asset.Type (ADR-ASSET-001 §1): new
+// values add to the same open set when they land, not a migration widening a
 // closed enum. A CollectorCheck of an unrecognised type is stored without
 // error — the scheduler simply has no executor for it yet, and records
 // CollectorCheckStatusUnsupported rather than crashing or silently never
 // running it (see collector.Scheduler).
 const CollectorCheckTypeHTTP = "http"
+
+// CollectorCheckTypeSNMP is the network/device layer's first check type
+// (Phase A.1, ADR-NET-001): SNMP v2c reachability. Target is "host" or
+// "host:port" (port defaults to 161 when omitted — see
+// collector.splitSNMPTarget); SNMPCommunity is REQUIRED for this type (see
+// its own doc comment) and forbidden for every other type. Bounded to
+// reachability + uptime (a GET of sysUpTime.0): richer OIDs (interfaces,
+// CPU, memory — A.1b) and network discovery (A.2) build on this without
+// changing it. v3 (which needs no shared-secret community string at all) is
+// a deliberate follow-up, not solved here — see SNMPCommunity's doc comment
+// for why that follow-up matters.
+const CollectorCheckTypeSNMP = "snmp"
 
 // collectorCheckTypePattern reuses assetTypePattern: the same lower-case
 // snake_case discipline, for the same reason (fit to appear in a filter, a
@@ -26,14 +37,22 @@ const MaxCollectorCheckTypeLength = 100
 
 // MaxCollectorCheckTargetLength bounds Target. Unlike Type this carries no
 // format constraint at the domain level — what a target string means depends
-// on Type (a URL for "http"; a host and community string for a future SNMP
-// check; ADR-ASSET-001 §1's shape of "open but validated only on what every
-// type shares") — so only a generous length bound applies here. The
-// type-specific format check (e.g. safehttp.ValidateWebhookURL for "http")
-// happens at the transport boundary, exactly where createWebhook checks its
-// own URL, and the authoritative SSRF egress guard runs at dial time in
-// safehttp regardless (ADR-SECURITY-001).
+// on Type (a URL for "http"; a "host" or "host:port" for "snmp", the
+// community travelling separately in SNMPCommunity; ADR-ASSET-001 §1's shape
+// of "open but validated only on what every type shares") — so only a
+// generous length bound applies here. The type-specific format check (e.g.
+// safehttp.ValidateWebhookURL for "http") happens at the transport boundary,
+// exactly where createWebhook checks its own URL. For "http" the
+// authoritative SSRF egress guard additionally runs at dial time in safehttp
+// (ADR-SECURITY-001); "snmp" dials UDP:161 to an operator-configured device
+// address, not a URL, so that HTTP-specific guard class does not apply to it
+// (ADR-NET-001).
 const MaxCollectorCheckTargetLength = 500
+
+// MaxSNMPCommunityLength bounds SNMPCommunity. Real-world community strings
+// are short (often "public"/"private" or a handful of characters); this is a
+// generous ceiling, not a realistic expectation.
+const MaxSNMPCommunityLength = 255
 
 // MaxCollectorMetricPrefixLength bounds MetricPrefix. It is deliberately
 // tighter than MaxTelemetryMetricLength (100): the executor appends a suffix
@@ -73,10 +92,10 @@ const (
 	// still written (see collector.Scheduler).
 	CollectorCheckStatusDown CollectorCheckStatus = "down"
 	// CollectorCheckStatusUnsupported: the check's Type has no executor in
-	// this build (e.g. a "snmp" check created ahead of E2.2b landing). The
-	// scheduler still records a run so the due-scan does not re-select it
-	// every pass, but writes no telemetry sample — there is no result to
-	// report.
+	// this build (e.g. a future cloud/API poller type created ahead of its
+	// executor landing). The scheduler still records a run so the due-scan
+	// does not re-select it every pass, but writes no telemetry sample —
+	// there is no result to report.
 	CollectorCheckStatusUnsupported CollectorCheckStatus = "unsupported"
 )
 
@@ -105,12 +124,13 @@ type CollectorCheck struct {
 	// TelemetryRepository.WriteSamples apply (ADR-ASSET-001 §6) — because the
 	// foreign key alone bypasses row-level security on asset.
 	AssetID string
-	// Type selects the executor: CollectorCheckTypeHTTP today. Open-but-
-	// validated — see CollectorCheckTypeHTTP's doc comment.
+	// Type selects the executor: CollectorCheckTypeHTTP or
+	// CollectorCheckTypeSNMP today. Open-but-validated — see
+	// CollectorCheckTypeHTTP's doc comment.
 	Type string
-	// Target is interpreted according to Type — a URL for "http". See
-	// MaxCollectorCheckTargetLength's doc comment for why no format
-	// constraint lives here.
+	// Target is interpreted according to Type — a URL for "http", a "host"
+	// or "host:port" for "snmp". See MaxCollectorCheckTargetLength's doc
+	// comment for why no format constraint lives here.
 	Target          string
 	IntervalSeconds int
 	Enabled         bool
@@ -118,6 +138,20 @@ type CollectorCheck struct {
 	// — e.g. "checkout_api" yields checkout_api_up, checkout_api_latency_ms,
 	// checkout_api_status_code (collector.Scheduler builds these).
 	MetricPrefix string
+	// SNMPCommunity is the SNMP v2c community string — a device credential —
+	// REQUIRED (non-empty) when Type is CollectorCheckTypeSNMP and forbidden
+	// (must be empty) for every other type (Validate enforces both
+	// directions). There is no secret store anywhere in this platform yet, so
+	// this column is protected the only way currently available: RLS-scoped
+	// like every other column on this tenant-owned row (ADR-TENANCY-001), and
+	// REDACTED from every read — httpapi's collectorCheckDTO never
+	// serialises it, only a has_snmp_community boolean, and it is settable
+	// only through the request bodies that write it, never returned by any
+	// response. At-rest encryption of this column and SNMP v3 (which
+	// authenticates per-user instead of a shared secret, so it would not
+	// need this field at all) are flagged, deliberate follow-ups — not
+	// solved by this increment.
+	SNMPCommunity string
 	// LastRunAt/LastStatus are set only by the scheduler (collector.Scheduler
 	// via CollectorCheckRepository's background counterpart), never by a
 	// caller through Create/Update — the same split Asset.LastSeen draws:
@@ -175,13 +209,29 @@ func (c *CollectorCheck) Validate() error {
 	if c.LastStatus != "" && !c.LastStatus.Valid() {
 		return newValidation("last_status", "must be one of: ok, down, unsupported")
 	}
+	community := strings.TrimSpace(c.SNMPCommunity)
+	switch checkType {
+	case CollectorCheckTypeSNMP:
+		if community == "" {
+			return newValidation("snmp_community", "must not be empty when type is snmp")
+		}
+		if len(community) > MaxSNMPCommunityLength {
+			return newValidation("snmp_community", "must be at most 255 characters")
+		}
+	default:
+		if community != "" {
+			return newValidation("snmp_community", "must be empty unless type is snmp")
+		}
+	}
 	return nil
 }
 
 // NewCollectorCheck builds a validated, enabled CollectorCheck. tenantID is
 // always taken from the bound connection's context, never from request data,
-// the same rule NewAsset and NewSample follow.
-func NewCollectorCheck(tenantID, assetID, checkType, target string, intervalSeconds int, metricPrefix string) (*CollectorCheck, error) {
+// the same rule NewAsset and NewSample follow. snmpCommunity is ignored
+// (should be passed "") for every type except CollectorCheckTypeSNMP, which
+// requires it non-empty — see SNMPCommunity's doc comment.
+func NewCollectorCheck(tenantID, assetID, checkType, target string, intervalSeconds int, metricPrefix, snmpCommunity string) (*CollectorCheck, error) {
 	c := &CollectorCheck{
 		CheckID:         NewID(),
 		TenantID:        strings.TrimSpace(tenantID),
@@ -191,6 +241,7 @@ func NewCollectorCheck(tenantID, assetID, checkType, target string, intervalSeco
 		IntervalSeconds: intervalSeconds,
 		Enabled:         true,
 		MetricPrefix:    strings.TrimSpace(metricPrefix),
+		SNMPCommunity:   strings.TrimSpace(snmpCommunity),
 	}
 	if err := c.Validate(); err != nil {
 		return nil, err
@@ -204,13 +255,19 @@ func NewCollectorCheck(tenantID, assetID, checkType, target string, intervalSeco
 // fixed at creation, not a field to repoint later; delete and recreate
 // instead. LastRunAt/LastStatus are likewise absent: only the scheduler's
 // background counterpart (CollectorCheckRepository's RecordRun-shaped
-// surface) sets them — see CollectorCheck's doc comment.
+// surface) sets them — see CollectorCheck's doc comment. SNMPCommunity IS
+// patchable — unlike a webhook secret there is no way to prove possession of
+// the current one before rotating it, but it is still write-only: applying
+// it never returns the value (Update's caller only ever sees the redacted
+// DTO), so this is the credential's "dedicated set" path, reusing the
+// existing optimistic-locked PATCH rather than adding a second endpoint.
 type CollectorCheckPatch struct {
 	Type            *string
 	Target          *string
 	IntervalSeconds *int
 	Enabled         *bool
 	MetricPrefix    *string
+	SNMPCommunity   *string
 }
 
 // CollectorCheckRepository administers collector_check: the agentless
