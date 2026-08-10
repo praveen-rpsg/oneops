@@ -120,6 +120,16 @@ func (r *Reconciler) RunOnce(ctx context.Context) {
 // dependency, or cleared to NULL), and a call against unchanged state writes
 // nothing (SetRootIncidentID is only invoked where the computed value
 // differs from what is already stored).
+//
+// CLASS-SCOPED (E4.3, ADR-ALERTING-007, consuming E3.4's
+// domain.AlertSymptomClass primitive — the grouping-side mirror of E3.5's
+// (ADR-ALERTING-006) dependency-suppression scoping): an incident whose OWN
+// symptom_class is resource is NEVER rooted, regardless of how deep a down
+// dependency it has — a CPU/mem/disk problem on X is independent of whether
+// something X depends on is up. availability and unspecified are grouped
+// exactly as E4.2 always grouped them. This does not change what counts as
+// "down": a resource-class incident on Y still marks Y down for any OTHER
+// incident whose closure contains Y.
 func (r *Reconciler) reconcileTenant(ctx context.Context, tenantID string) {
 	incidents, err := r.store.OpenAlertIncidents(ctx, tenantID)
 	if err != nil {
@@ -151,6 +161,23 @@ func (r *Reconciler) reconcileTenant(ctx context.Context, tenantID string) {
 
 	candidate := make(map[string]*string, len(incidents))
 	for _, inc := range incidents {
+		// CLASS GATE (E4.3, ADR-ALERTING-007, consuming E3.4's
+		// domain.AlertSymptomClass primitive — the exact grouping-side mirror
+		// of E3.5's dependencySuppressed gate): a resource-class incident on
+		// X's OWN asset is never rooted under a down dependency, however deep
+		// — a CPU/mem/disk problem on X is not caused by an upstream
+		// dependency being down, so treating it as collateral would hide a
+		// genuine, independent failure. The walk is skipped entirely (the
+		// same "gate before consulting" shape dependencySuppressed uses): no
+		// down map lookup, no graph call, for this incident's OWN candidate.
+		// This does NOT remove X from the down SET above — an incident that
+		// transitively depends on X still sees X as down and may still be
+		// rooted under X's own incident; only whether X's INCIDENT is treated
+		// as someone else's collateral is gated.
+		if inc.SymptomClass == domain.AlertSymptomClassResource {
+			candidate[inc.IncidentID] = nil
+			continue
+		}
 		// Direction guarantee (coverage note): this package's own
 		// TestReconciler_DirectionCorrectness uses a FAKE graph, so it pins the
 		// reconciler LOGIC but cannot catch a reversal of the real SQL. The

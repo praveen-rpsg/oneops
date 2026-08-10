@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/rpsg/oneops/internal/domain"
 	"github.com/rpsg/oneops/internal/grouping"
 )
 
@@ -79,7 +80,7 @@ func (s *IncidentGroupingStore) TenantsWithOpenAlertIncidents(ctx context.Contex
 // test TestIncidentGroupingStore_OpenAlertIncidentsIsTenantIsolated — keep it.
 func (s *IncidentGroupingStore) OpenAlertIncidents(ctx context.Context, tenantID string) ([]grouping.OpenAlertIncident, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT incident_id, asset_id, root_incident_id
+		SELECT incident_id, asset_id, root_incident_id, symptom_class
 		  FROM incident
 		 WHERE tenant_id = $1 AND `+openAlertIncidentPredicate+` AND asset_id IS NOT NULL
 		 ORDER BY incident_id`, tenantID)
@@ -92,12 +93,14 @@ func (s *IncidentGroupingStore) OpenAlertIncidents(ctx context.Context, tenantID
 	for rows.Next() {
 		var inc grouping.OpenAlertIncident
 		var assetID *string
-		if err := rows.Scan(&inc.IncidentID, &assetID, &inc.RootIncidentID); err != nil {
+		var symptomClass string
+		if err := rows.Scan(&inc.IncidentID, &assetID, &inc.RootIncidentID, &symptomClass); err != nil {
 			return nil, fmt.Errorf("scan open alert incident: %w", err)
 		}
 		if assetID != nil {
 			inc.AssetID = *assetID
 		}
+		inc.SymptomClass = domain.AlertSymptomClass(symptomClass)
 		out = append(out, inc)
 	}
 	if err := rows.Err(); err != nil {

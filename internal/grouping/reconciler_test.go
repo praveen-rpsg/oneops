@@ -265,3 +265,109 @@ func TestReconciler_EmptyTenantSetIsANoOp(t *testing.T) {
 		t.Errorf("writes with no open incidents anywhere = %d, want 0", got)
 	}
 }
+
+// ----------------------------------------------------------- E4.3 class gate
+
+// TestReconciler_ResourceSymptomIncidentIsNeverRooted is E4.3's (ADR-ALERTING-007)
+// core payoff, the grouping-side mirror of E3.5's dependency-suppression
+// class gate: X has a resource-class incident AND a genuinely down
+// dependency (DB) — the exact same topology TestReconciler_GroupsCollateralUnderDeepestRoot
+// would otherwise root under DB. X's incident must stay root_incident_id =
+// NULL regardless, because a resource symptom on X is not caused by DB being
+// down. DB's own down-ness is untouched — X was never the thing making
+// something else's "is X down" answer, so this fixture alone does not prove
+// the down-map is unaffected; TestReconciler_ResourceSymptomIncidentStillMarksItsAssetDown
+// below proves that half.
+//
+// MUTATION PROOF (verified by hand, reverted): deleting the
+// `if inc.SymptomClass == domain.AlertSymptomClassResource { candidate[inc.IncidentID] = nil; continue }`
+// gate in reconcileTenant flips this test to FAIL — inc-x roots under inc-db,
+// identically to the ungated E4.2 fixture.
+func TestReconciler_ResourceSymptomIncidentIsNeverRooted(t *testing.T) {
+	store := newFakeStore()
+	store.addIncidentWithClass("t1", "inc-x", "asset-x", domain.AlertSymptomClassResource)
+	store.addIncident("t1", "inc-db", "asset-db")
+
+	graph := newFakeGraph()
+	graph.set("t1", "asset-x", []domain.TraversalNode{{CfgID: "asset-db", Depth: 1}})
+	graph.set("t1", "asset-db", nil)
+
+	r := NewReconciler(store, graph, NopMetrics{}, nil, Config{})
+	r.RunOnce(context.Background())
+
+	if got := store.root("t1", "inc-x"); got != nil {
+		t.Fatalf("resource-class inc-x root = %v, want nil — a resource symptom must never be grouped as "+
+			"collateral of a down dependency", *got)
+	}
+}
+
+// TestReconciler_ResourceSymptomIncidentStillMarksItsAssetDown proves the
+// other half of ADR-ALERTING-007's contract: the class gate applies ONLY to
+// whether a resource-class incident's OWN root is computed, never to the
+// "is Y down" candidate map. asset-x carries a resource-class incident and Y
+// depends on X; Y must still root under X's incident — X being resource-class
+// does not make X invisible as a down dependency for something else.
+func TestReconciler_ResourceSymptomIncidentStillMarksItsAssetDown(t *testing.T) {
+	store := newFakeStore()
+	store.addIncidentWithClass("t1", "inc-x", "asset-x", domain.AlertSymptomClassResource)
+	store.addIncident("t1", "inc-y", "asset-y")
+
+	graph := newFakeGraph()
+	graph.set("t1", "asset-x", nil)
+	graph.set("t1", "asset-y", []domain.TraversalNode{{CfgID: "asset-x", Depth: 1}})
+
+	r := NewReconciler(store, graph, NopMetrics{}, nil, Config{})
+	r.RunOnce(context.Background())
+
+	if got := store.root("t1", "inc-y"); got == nil || *got != "inc-x" {
+		t.Fatalf("inc-y root = %v, want inc-x — a resource-class incident on a dependency still marks it "+
+			"down for its dependents", got)
+	}
+	if got := store.root("t1", "inc-x"); got != nil {
+		t.Fatalf("resource-class inc-x root = %v, want nil (unaffected by being someone else's down dependency)", *got)
+	}
+}
+
+// TestReconciler_AvailabilitySymptomIncidentStillRootsUnderDownDependency
+// pins the UNCHANGED half of E4.3: an availability-class incident on X, with
+// the identical down-dependency topology as the resource-class fixture above,
+// is grouped exactly as E4.2 always grouped it — availability legitimately
+// cascades.
+func TestReconciler_AvailabilitySymptomIncidentStillRootsUnderDownDependency(t *testing.T) {
+	store := newFakeStore()
+	store.addIncidentWithClass("t1", "inc-x", "asset-x", domain.AlertSymptomClassAvailability)
+	store.addIncident("t1", "inc-db", "asset-db")
+
+	graph := newFakeGraph()
+	graph.set("t1", "asset-x", []domain.TraversalNode{{CfgID: "asset-db", Depth: 1}})
+	graph.set("t1", "asset-db", nil)
+
+	r := NewReconciler(store, graph, NopMetrics{}, nil, Config{})
+	r.RunOnce(context.Background())
+
+	if got := store.root("t1", "inc-x"); got == nil || *got != "inc-db" {
+		t.Fatalf("availability-class inc-x root = %v, want inc-db (unchanged: availability cascades)", got)
+	}
+}
+
+// TestReconciler_UnspecifiedSymptomIncidentStillRootsUnderDownDependency pins
+// E3.4's non-breaking guarantee at E4.3's own gate: an unspecified-class
+// incident (the default for every pre-E4.3 row and every incident created
+// before this story existed) keeps E4.2's conservative grouping behavior,
+// identical topology to the two fixtures above.
+func TestReconciler_UnspecifiedSymptomIncidentStillRootsUnderDownDependency(t *testing.T) {
+	store := newFakeStore()
+	store.addIncidentWithClass("t1", "inc-x", "asset-x", domain.AlertSymptomClassUnspecified)
+	store.addIncident("t1", "inc-db", "asset-db")
+
+	graph := newFakeGraph()
+	graph.set("t1", "asset-x", []domain.TraversalNode{{CfgID: "asset-db", Depth: 1}})
+	graph.set("t1", "asset-db", nil)
+
+	r := NewReconciler(store, graph, NopMetrics{}, nil, Config{})
+	r.RunOnce(context.Background())
+
+	if got := store.root("t1", "inc-x"); got == nil || *got != "inc-db" {
+		t.Fatalf("unspecified-class inc-x root = %v, want inc-db (unchanged: E3.4's non-breaking default)", got)
+	}
+}

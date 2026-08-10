@@ -579,6 +579,14 @@ func (e *Evaluator) correlate(ctx context.Context, rule *domain.AlertRule, next 
 	if err != nil {
 		return nil, fmt.Errorf("build alert incident: %w", err)
 	}
+	// E4.3 (ADR-ALERTING-007): thread the firing rule's own symptom class onto
+	// a newly CREATED incident, so internal/grouping's reconciler can gate on
+	// it. This is a create-time copy, not a live sync — FindOrCreateOpenAlertIncident
+	// only ever persists it when the INSERT actually wins the race (a LINK to
+	// an already-open incident leaves that incident's own SymptomClass, set at
+	// ITS create, untouched — see that method's own doc comment for why
+	// create and link are mutually exclusive).
+	want.SymptomClass = rule.SymptomClass
 	note := fmt.Sprintf("alert %s fired (rule_id=%s, comparator=%s, threshold=%v)",
 		rule.Metric, rule.RuleID, rule.Comparator, rule.Threshold)
 	id, err := e.correlator.FindOrCreateOpenAlertIncident(ctx, want, alertingSystemActor, note)

@@ -6010,6 +6010,19 @@ components:
             Read-only (E4.2). true when root_incident_id is absent — this
             incident anchors its own topology-aware group (or has none),
             rather than being grouped under another incident.
+        symptom_class:
+          type: string
+          enum: [availability, resource, unspecified]
+          description: >-
+            Read-only (E4.3, ADR-ALERTING-007), mirroring AlertRule's own
+            symptom_class. Always present. unspecified for every
+            manual/security/vuln incident and every incident that predates
+            this field; a meaningful value only for an alert-sourced
+            incident, copied once from its firing rule's own symptom_class at
+            create by the alert-correlation pipeline — never re-synced if
+            the rule is later re-classified. Consumed by internal/grouping's
+            reconciler: a resource-class incident is never grouped as
+            collateral under a down dependency.
     IncidentList:
       type: object
       properties:

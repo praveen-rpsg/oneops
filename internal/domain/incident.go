@@ -286,6 +286,21 @@ type Incident struct {
 	// root; "the group" a caller sees is derived (every incident sharing a
 	// RootIncidentID, plus that root), never a stored membership row.
 	RootIncidentID *string
+	// SymptomClass mirrors alert_rule.SymptomClass's own three-value taxonomy
+	// (E3.4/ADR-ALERTING-005) onto the incident an alert firing correlates
+	// into (E4.3, ADR-ALERTING-007) — the grouping-side counterpart of E3.5's
+	// (ADR-ALERTING-006) dependency-suppression consumption of the same
+	// primitive. It is set ONCE, at create, by internal/alerting's evaluator
+	// (FindOrCreateOpenAlertIncident), copied from the firing rule's own
+	// SymptomClass — never re-synced if the rule is later re-classified, the
+	// same "fact about how this incident came to exist" treatment Source
+	// already gets. There is no HTTP write path for it. A manual/security/vuln
+	// incident always carries DefaultAlertSymptomClass (unspecified) — only an
+	// alert-sourced incident's class is ever meaningful. internal/grouping's
+	// reconciler is the sole reader: a resource-class incident is never
+	// rooted under a down dependency, however deep, because a resource
+	// symptom on X is not caused by an upstream dependency being down.
+	SymptomClass AlertSymptomClass
 }
 
 // Open reports whether the incident is still active work (not closed).
@@ -337,6 +352,9 @@ func (i *Incident) Validate() error {
 	if i.AssigneeUserID != nil && strings.TrimSpace(*i.AssigneeUserID) == "" {
 		return newValidation("assignee_user_id", "must not be blank when supplied; omit it to leave the incident unassigned")
 	}
+	if !i.SymptomClass.Valid() {
+		return newValidation("symptom_class", "must be one of: availability, resource, unspecified")
+	}
 	return nil
 }
 
@@ -357,6 +375,7 @@ func NewIncident(tenantID, title, description string, severity IncidentSeverity,
 		Source:         IncidentSourceManual,
 		AssetID:        assetID,
 		AssigneeUserID: assigneeUserID,
+		SymptomClass:   DefaultAlertSymptomClass,
 	}
 	if err := inc.Validate(); err != nil {
 		return nil, err
@@ -370,17 +389,27 @@ func NewIncident(tenantID, title, description string, severity IncidentSeverity,
 // own asset (E4.1). Unlike NewIncident's optional AssetID, assetID is
 // required here: a correlation always names the CI the firing rule watches,
 // and IncidentSourceAlert without one is refused by Validate.
+//
+// SymptomClass defaults to DefaultAlertSymptomClass (unspecified) here —
+// there is no parameter for it, the same "default inside the constructor,
+// not a parameter every call site must supply" shape NewAlertRule already
+// uses for its own SymptomClass default. The evaluator's own correlate
+// (E4.3, ADR-ALERTING-007) overwrites it with the firing rule's actual
+// SymptomClass on the CREATE path, before calling
+// IncidentCorrelator.FindOrCreateOpenAlertIncident — never on a LINK, which
+// leaves an already-open incident's class exactly as it was set at create.
 func NewAlertIncident(tenantID, title, description string, severity IncidentSeverity, assetID string) (*Incident, error) {
 	trimmed := strings.TrimSpace(assetID)
 	inc := &Incident{
-		IncidentID:  NewID(),
-		TenantID:    strings.TrimSpace(tenantID),
-		Title:       strings.TrimSpace(title),
-		Description: description,
-		Severity:    severity,
-		Status:      IncidentOpen,
-		Source:      IncidentSourceAlert,
-		AssetID:     &trimmed,
+		IncidentID:   NewID(),
+		TenantID:     strings.TrimSpace(tenantID),
+		Title:        strings.TrimSpace(title),
+		Description:  description,
+		Severity:     severity,
+		Status:       IncidentOpen,
+		Source:       IncidentSourceAlert,
+		AssetID:      &trimmed,
+		SymptomClass: DefaultAlertSymptomClass,
 	}
 	if err := inc.Validate(); err != nil {
 		return nil, err
@@ -401,14 +430,15 @@ func NewAlertIncident(tenantID, title, description string, severity IncidentSeve
 func NewSecurityIncident(tenantID, title, description string, severity IncidentSeverity, assetID string) (*Incident, error) {
 	trimmed := strings.TrimSpace(assetID)
 	inc := &Incident{
-		IncidentID:  NewID(),
-		TenantID:    strings.TrimSpace(tenantID),
-		Title:       strings.TrimSpace(title),
-		Description: description,
-		Severity:    severity,
-		Status:      IncidentOpen,
-		Source:      IncidentSourceSecurity,
-		AssetID:     &trimmed,
+		IncidentID:   NewID(),
+		TenantID:     strings.TrimSpace(tenantID),
+		Title:        strings.TrimSpace(title),
+		Description:  description,
+		Severity:     severity,
+		Status:       IncidentOpen,
+		Source:       IncidentSourceSecurity,
+		AssetID:      &trimmed,
+		SymptomClass: DefaultAlertSymptomClass,
 	}
 	if err := inc.Validate(); err != nil {
 		return nil, err
@@ -429,14 +459,15 @@ func NewSecurityIncident(tenantID, title, description string, severity IncidentS
 func NewVulnRemediationIncident(tenantID, title, description string, severity IncidentSeverity, assetID string) (*Incident, error) {
 	trimmed := strings.TrimSpace(assetID)
 	inc := &Incident{
-		IncidentID:  NewID(),
-		TenantID:    strings.TrimSpace(tenantID),
-		Title:       strings.TrimSpace(title),
-		Description: description,
-		Severity:    severity,
-		Status:      IncidentOpen,
-		Source:      IncidentSourceVuln,
-		AssetID:     &trimmed,
+		IncidentID:   NewID(),
+		TenantID:     strings.TrimSpace(tenantID),
+		Title:        strings.TrimSpace(title),
+		Description:  description,
+		Severity:     severity,
+		Status:       IncidentOpen,
+		Source:       IncidentSourceVuln,
+		AssetID:      &trimmed,
+		SymptomClass: DefaultAlertSymptomClass,
 	}
 	if err := inc.Validate(); err != nil {
 		return nil, err

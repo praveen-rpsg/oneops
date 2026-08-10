@@ -13,9 +13,10 @@ import (
 // deliberately narrower than domain.Incident, mirroring OpenAlertIncident's
 // own doc comment: grouping never sees, and therefore cannot mutate, Status.
 type fakeIncident struct {
-	incidentID string
-	assetID    string
-	root       *string
+	incidentID   string
+	assetID      string
+	root         *string
+	symptomClass domain.AlertSymptomClass
 }
 
 // setCall records one SetRootIncidentID invocation, so a test can assert
@@ -42,12 +43,20 @@ func newFakeStore() *fakeStore {
 }
 
 func (s *fakeStore) addIncident(tenantID, incidentID, assetID string) {
+	s.addIncidentWithClass(tenantID, incidentID, assetID, domain.AlertSymptomClassUnspecified)
+}
+
+// addIncidentWithClass is addIncident's E4.3 counterpart: it lets a test pin
+// an incident's own SymptomClass (the class GATE's input), defaulting to
+// unspecified (E4.2's byte-for-byte-unchanged class) everywhere addIncident
+// itself is used.
+func (s *fakeStore) addIncidentWithClass(tenantID, incidentID, assetID string, class domain.AlertSymptomClass) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.byTenant[tenantID] == nil {
 		s.byTenant[tenantID] = map[string]*fakeIncident{}
 	}
-	s.byTenant[tenantID][incidentID] = &fakeIncident{incidentID: incidentID, assetID: assetID}
+	s.byTenant[tenantID][incidentID] = &fakeIncident{incidentID: incidentID, assetID: assetID, symptomClass: class}
 }
 
 // resolve removes incidentID from tenantID's open set — the fake's stand-in
@@ -95,7 +104,10 @@ func (s *fakeStore) OpenAlertIncidents(_ context.Context, tenantID string) ([]Op
 	}
 	var out []OpenAlertIncident
 	for _, inc := range s.byTenant[tenantID] {
-		out = append(out, OpenAlertIncident{IncidentID: inc.incidentID, AssetID: inc.assetID, RootIncidentID: inc.root})
+		out = append(out, OpenAlertIncident{
+			IncidentID: inc.incidentID, AssetID: inc.assetID, RootIncidentID: inc.root,
+			SymptomClass: inc.symptomClass,
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].IncidentID < out[j].IncidentID })
 	return out, nil

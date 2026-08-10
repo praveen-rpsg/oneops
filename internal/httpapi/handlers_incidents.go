@@ -50,6 +50,15 @@ type incidentDTO struct {
 	// a merely-absent field as meaningful on its own.
 	RootIncidentID *string `json:"root_incident_id,omitempty"`
 	IsRoot         bool    `json:"is_root"`
+	// SymptomClass mirrors AlertRule's own symptom_class field (E4.3,
+	// ADR-ALERTING-007): read-only, always present (every incident has one),
+	// never omitempty — mirrors alertRuleDTO.SymptomClass's own shape.
+	// unspecified for every manual/security/vuln incident and every incident
+	// created before this story; a meaningful value only for an alert-sourced
+	// incident, copied once from its firing rule at create by
+	// internal/alerting's evaluator. There is no create/patch field for it —
+	// the only writer is that same correlation path.
+	SymptomClass string `json:"symptom_class"`
 }
 
 // toIncidentDTO deliberately omits tenant_id — the same choice toAssetDTO/
@@ -62,6 +71,7 @@ func toIncidentDTO(inc *domain.Incident) incidentDTO {
 		RowVersion: inc.RowVersion, CreatedAt: inc.CreatedAt, UpdatedAt: inc.UpdatedAt,
 		AcknowledgedAt: inc.AcknowledgedAt, ResolvedAt: inc.ResolvedAt, ClosedAt: inc.ClosedAt,
 		RootIncidentID: inc.RootIncidentID, IsRoot: inc.IsGroupRoot(),
+		SymptomClass: string(inc.SymptomClass),
 	}
 }
 

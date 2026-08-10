@@ -18,7 +18,7 @@ import (
 const (
 	incidentColumns = `incident_id, tenant_id, title, description, severity, status, source,
 		asset_id, assignee_user_id, row_version, created_at, updated_at,
-		acknowledged_at, resolved_at, closed_at, root_incident_id`
+		acknowledged_at, resolved_at, closed_at, root_incident_id, symptom_class`
 	incidentEventColumns = `event_id, tenant_id, incident_id, kind, field, old_value, new_value, actor, row_version, occurred_at`
 )
 
@@ -59,21 +59,23 @@ func clampIncidentPage(limit int) int {
 
 func scanIncident(s scanner) (*domain.Incident, error) {
 	var (
-		inc      domain.Incident
-		severity string
-		status   string
-		source   string
+		inc          domain.Incident
+		severity     string
+		status       string
+		source       string
+		symptomClass string
 	)
 	if err := s.Scan(
 		&inc.IncidentID, &inc.TenantID, &inc.Title, &inc.Description, &severity, &status, &source,
 		&inc.AssetID, &inc.AssigneeUserID, &inc.RowVersion, &inc.CreatedAt, &inc.UpdatedAt,
-		&inc.AcknowledgedAt, &inc.ResolvedAt, &inc.ClosedAt, &inc.RootIncidentID,
+		&inc.AcknowledgedAt, &inc.ResolvedAt, &inc.ClosedAt, &inc.RootIncidentID, &symptomClass,
 	); err != nil {
 		return nil, err
 	}
 	inc.Severity = domain.IncidentSeverity(severity)
 	inc.Status = domain.IncidentStatus(status)
 	inc.Source = domain.IncidentSource(source)
+	inc.SymptomClass = domain.AlertSymptomClass(symptomClass)
 	return &inc, nil
 }
 
@@ -754,13 +756,19 @@ func (s *IncidentStore) FindOrCreateOpenAlertIncident(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// symptom_class is persisted here, from want (E4.3, ADR-ALERTING-007) —
+	// the evaluator's own correlate copies the firing rule's SymptomClass onto
+	// want before calling this method. This INSERT is the CREATE branch only:
+	// the LINK branch below (ON CONFLICT ... DO NOTHING falls through to it)
+	// never touches an existing incident's own symptom_class.
 	row := tx.QueryRow(ctx, `
-		INSERT INTO incident (incident_id, tenant_id, title, description, severity, status, source, asset_id)
-		VALUES ($1, $2, $3, $4, $5, $6, 'alert', $7)
+		INSERT INTO incident (incident_id, tenant_id, title, description, severity, status, source, asset_id, symptom_class)
+		VALUES ($1, $2, $3, $4, $5, $6, 'alert', $7, $8)
 		ON CONFLICT (tenant_id, asset_id) WHERE source = 'alert' AND status NOT IN ('resolved', 'closed')
 		DO NOTHING
 		RETURNING `+incidentColumns,
-		want.IncidentID, want.TenantID, want.Title, want.Description, string(want.Severity), string(domain.IncidentOpen), want.AssetID)
+		want.IncidentID, want.TenantID, want.Title, want.Description, string(want.Severity), string(domain.IncidentOpen), want.AssetID,
+		string(want.SymptomClass))
 
 	created, err := scanIncident(row)
 	switch {

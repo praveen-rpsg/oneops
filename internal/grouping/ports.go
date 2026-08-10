@@ -37,6 +37,14 @@ type OpenAlertIncident struct {
 	IncidentID     string
 	AssetID        string
 	RootIncidentID *string
+	// SymptomClass is E4.3's (ADR-ALERTING-007) class gate input: a
+	// resource-class incident is never rooted under a down dependency,
+	// however deep — see Reconciler.reconcileTenant's own doc comment. It
+	// does NOT change what "down" means (the down map below is built from
+	// every OpenAlertIncident regardless of class): a resource-class incident
+	// on Y still marks Y down for whichever OTHER incident's closure Y
+	// appears in.
+	SymptomClass domain.AlertSymptomClass
 }
 
 // Store is the privileged, cross-tenant persistence port the Reconciler
