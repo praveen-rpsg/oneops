@@ -293,6 +293,9 @@ Stateful work items on the workflow + state-machine primitives.
 - [ ] E9.3 SLO/KPI reporting
 - **Edge cases:** large aggregations, per-tenant data, caching/staleness, export volume.
 
+### E-EXEC — Executive Command Center (Phase 8, as reduced-concept projections)  `[~]` — **CTO note:** Phase-8 "Executive" is delivered as PROJECTIONS over existing data (posture counts + top-N), NOT reified Dashboard/report entities or speculative business KPIs (those are customer-shaped). Only the defensible, generic ops+security+governance posture view is built.
+- [x] E-EXEC.1 **Command Center overview** — DONE: a top-level `/command-center` landing (first nav item) composing FOUR independent posture cards over EXISTING endpoints (zero Go) — Operations (`/noc/overview`: open incidents/alerts/asset-health + on-call), Vulnerabilities (`/vuln-findings/prioritized`: count + top-5 ranked), Risk (`/risks/register`: count + top-5 by score), Compliance (`/compliance-controls`: by-status tally). Reduced-concept projection screen (ADR-NOC-001/005); reuses existing clients + presentation helpers. Per-card independent load + graceful per-card 403/error degrade (one card failing never blanks the page); honest bounded labels ("Top 5 of N" / "All N"); "View all →" links to each detail screen. Gate: web-test 303/303 (3 new: full render + 2 per-card-degrade); self-contained clean; **CTO visual gate PASS — live with seed data: coherent 2×2 posture pane, ranked top-N, on-call shown.** Also fixed a CI regression: E-SEC-UI.4's `example.com` URL placeholder tripped the E-HARD.6 self-contained-bundle gate (red on master since `7408d7e`) — added the RFC 2606 example.* domains to the allowlist (inherently inert, reserved-for-docs).
+
 ### E10 — Knowledge Management  `[ ]` (extends PKG)
 - [ ] E10.1 Knowledge articles / runbooks / known-errors, linked to CIs/incidents/problems
 - [ ] E10.2 Versioning, review workflow (reuse governance), lifecycle

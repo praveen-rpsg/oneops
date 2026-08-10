@@ -44,6 +44,7 @@ export interface ShellSplitPanelContext {
 }
 
 const NAV_ITEMS: SideNavigationProps.Item[] = [
+  { type: 'link', text: 'Command Center', href: '/command-center' },
   { type: 'link', text: 'Estate / Governance', href: '/' },
   { type: 'link', text: 'NOC / Overview', href: '/noc' },
   { type: 'link', text: 'Incidents', href: '/incidents' },
@@ -81,6 +82,7 @@ const NAV_ITEMS: SideNavigationProps.Item[] = [
 
 /** The path a side-nav item is considered active for — longest-prefix match, `/` is exact. */
 function activeHrefFor(pathname: string): string {
+  if (pathname.startsWith('/command-center')) return '/command-center';
   if (pathname === '/' || pathname.startsWith('/artifacts')) return '/';
   if (pathname.startsWith('/noc')) return '/noc';
   if (pathname.startsWith('/incidents')) return '/incidents';
@@ -106,6 +108,7 @@ function activeHrefFor(pathname: string): string {
 
 const CRUMB_LABEL: Record<string, string> = {
   '': 'Estate',
+  'command-center': 'Command Center',
   artifacts: 'Estate',
   noc: 'NOC / Overview',
   incidents: 'Incidents',
@@ -156,12 +159,19 @@ function useBreadcrumbs() {
 
 /**
  * The reusable home for every section of the console: top navigation (identity,
- * session, theme), side navigation (Estate/Governance, NOC/Overview, Incidents,
- * Alerts, Maintenance, On-call, Escalation, Topology, Dashboards, Security and
- * Administration are all live) and breadcrumbs. Routed content renders in
- * the `content` slot via `<Outlet/>`; the incident board (E7-UI.2), the
- * alerts board (E7.3c) and the vulnerabilities board (E-SEC-UI.1) all drive
- * the shared `SplitPanel` through `ShellSplitPanelContext`.
+ * session, theme), side navigation (Command Center, Estate/Governance,
+ * NOC/Overview, Incidents, Alerts, Maintenance, On-call, Escalation,
+ * Topology, Dashboards, Security and Administration are all live) and
+ * breadcrumbs. Routed content renders in the `content` slot via `<Outlet/>`;
+ * the incident board (E7-UI.2), the alerts board (E7.3c) and the
+ * vulnerabilities board (E-SEC-UI.1) all drive the shared `SplitPanel`
+ * through `ShellSplitPanelContext`.
+ *
+ * "Command Center" (E-EXEC.1) sits FIRST, above every section — the
+ * executive landing page, a computed projection composed entirely over
+ * existing NOC/vuln/risk/compliance endpoints (see
+ * `routes/CommandCenterPage.tsx`'s own doc comment), not a new domain of its
+ * own.
  *
  * Security (E-SEC-UI.1, extended E-SEC-UI.2, E-SEC-UI.3, E-SEC-UI.4) is a
  * `SideNavigation` section founding the console's SOC-facing surface, over

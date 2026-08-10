@@ -17,6 +17,9 @@ const AdministrationPage = lazy(() =>
 );
 const AlertsBoardPage = lazy(() => import('./routes/AlertsBoardPage').then((m) => ({ default: m.AlertsBoardPage })));
 const ArtifactPage = lazy(() => import('./routes/ArtifactPage').then((m) => ({ default: m.ArtifactPage })));
+const CommandCenterPage = lazy(() =>
+  import('./routes/CommandCenterPage').then((m) => ({ default: m.CommandCenterPage })),
+);
 const CompliancePage = lazy(() => import('./routes/CompliancePage').then((m) => ({ default: m.CompliancePage })));
 const DashboardsPage = lazy(() => import('./routes/DashboardsPage').then((m) => ({ default: m.DashboardsPage })));
 const DetectionRulesPage = lazy(() =>
@@ -166,6 +169,7 @@ export default function App() {
     <Routes>
       <Route element={<Shell />}>
         <Route index element={<EstatePage />} />
+        <Route path="command-center" element={<CommandCenterPage />} />
         <Route path="artifacts/:id" element={<ArtifactPage />} />
         <Route path="noc" element={<NOCOverviewPage />} />
         <Route path="incidents" element={<IncidentBoardPage />} />
